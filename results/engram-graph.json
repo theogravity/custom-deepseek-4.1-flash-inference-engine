@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-25",
+  "exit_code": 0,
+  "image_id": "sha256:3689a42b8a151bf85d72d03b733ec6f353dba5936ff2558b577687c4f5908aa0",
+  "gpu": "host 1, NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "checkpoint": "/mnt/models/dsv41-flash-exl3",
+  "upstream_engram_sha256": "07b43f726fc66ecfc43967750bd0dcea50d39a99850f3b2ec6f12b817a81f495",
+  "source_sha256": {
+    "tests/engram_graph.py": "46295dac84ebf3284de56811420d9fcb951fc4205606bbfde95cb802d836554c",
+    "native/engram.cpp": "6d7d24451154d519d33041905a04a161b59358343c33c2e487fcb20ebde77d3f",
+    "integration/dsv41_native_engram.py": "8421c980aed7cb67e2c0343cdbd893db6242dbbbe922e987b761eb0533959a2a",
+    "integration/build_engram.py": "7de1ec2d8dcbb12a031581b36a3f6edcc42196fafa02f1e7e3b604150d7f490a"
+  },
+  "test": "python3 -I /tests/engram_graph.py (run in serving image with all 3 overlay files mounted)",
+  "output": [
+    "PASS layer=1 start=0 local=12 tokens=0,1,6,36,64,65 (eager and graph for nonempty shapes)",
+    "warm fixed-ID graph median of 35: 6 tokens native=27.7 us original=69.4 us",
+    "warm fixed-ID graph median of 35: 36 tokens native=32.4 us original=72.2 us",
+    "PASS layer=1 start=12 local=12 tokens=0,1,6,36,64,65 (eager and graph for nonempty shapes)",
+    "PASS layer=14 start=18 local=12 tokens=0,1,6,36,64,65 (eager and graph for nonempty shapes)",
+    "PASS layer=14 start=0 local=24 tokens=0,1,6,36,64,65 (eager and graph for nonempty shapes)"
+  ],
+  "timing_workload": "One layer; 35 replays of fixed, warm IDs drawn from twelve row IDs including duplicate/foreign rows. Both paths used identical data. Serves as an isolated callback and kernel microbenchmark."
+}

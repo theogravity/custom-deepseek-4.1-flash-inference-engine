@@ -1,0 +1,8 @@
+services:
+  dsv41-flash-exl3:
+    labels:
+      io.dsv41.engine: "native-engram"
+    volumes:
+      - ${DSV41_ENGINE_BUILD:?run ./engine start}/engram.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v41/common/engram.py:ro
+      - ${DSV41_ENGINE_BUILD:?run ./engine start}/dsv41_native_engram.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v41/common/dsv41_native_engram.py:ro
+      - ${DSV41_ENGINE_BUILD:?run ./engine start}/libdsv41_engram.so:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v41/common/libdsv41_engram.so:ro

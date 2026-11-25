@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Build or switch the local DeepSeek engine on the existing model-cli route."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent
+STACK = Path(os.environ.get("LLM_STACK_DIR", ROOT.parent)).resolve()
+MODEL = "dsv41-flash-exl3"
+COMPOSE = ["docker", "compose", "-p", "models", "-f", str(STACK / f"models/{MODEL}.yml")]
+IMAGE = "dsv41-flash-1017-exl3-3bpw-sm120-lmcache"
+SOURCE = STACK / "patches/dsv41-engram-nvme/patched/engram.py"
+BUILDS = ROOT / ".build"
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def build():
+    # A running worker can import code lazily. Keep its bind-mounted files immutable.
+    digest = hashlib.sha256()
+    for path in [SOURCE, *sorted((ROOT / "integration").glob("*.py")),
+                 *sorted((ROOT / "native").glob("*"))]:
+        if path.is_file():
+            digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    image_id = subprocess.check_output(["docker", "image", "inspect", "-f", "{{.Id}}", IMAGE]).strip()
+    digest.update(image_id)
+    output = BUILDS / digest.hexdigest()
+    if not output.exists():
+        with tempfile.TemporaryDirectory(dir=BUILDS) as temp:
+            run("docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+                "-e", "PYTHONDONTWRITEBYTECODE=1", "-v", f"{ROOT}:/src:ro",
+                "-v", f"{SOURCE}:/upstream/engram.py:ro", "-v", f"{temp}:/stage",
+                "--entrypoint", "python3", image_id.decode(), "/src/integration/build_engram.py",
+                "--source", "/upstream/engram.py", "--output", "/stage/result")
+            (Path(temp) / "result").rename(output)
+    return output
+
+
+def idle():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8001/metrics", timeout=5) as r:
+            rows = r.read().decode().splitlines()
+    except urllib.error.URLError as exc:
+        # A stopped rotation model has no listener. Reject other network/HTTP errors.
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return
+        raise
+    metrics = ["vllm:num_requests_running", "vllm:num_requests_waiting"]
+    for metric in metrics:
+        values = [float(row.split()[-1]) for row in rows if row.startswith(metric + "{")]
+        if not values or any(values):
+            raise SystemExit(f"Could not confirm idle model ({metric}). Retry after active requests finish.")
+
+
+def container_exists():
+    return bool(subprocess.check_output(
+        ["docker", "ps", "-aq", "--filter", f"name=^/{MODEL}$"], text=True).strip())
+
+
+def previous_service():
+    if not container_exists():
+        return None
+    # Limit inspect output to state, labels and mounts. The command args carry credentials.
+    fmt = "{{json .State}}\n{{json .Config.Labels}}\n{{json .Mounts}}"
+    state, labels, mounts = map(json.loads, subprocess.check_output(
+        ["docker", "inspect", "-f", fmt, MODEL], text=True).splitlines())
+    if (labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service")) != ("models", MODEL):
+        raise SystemExit(f"Another container owns the name {MODEL}")
+    if not state["Running"]:
+        return None
+    if labels.get("io.dsv41.engine") == "native-engram":
+        mount = next(m for m in mounts if m["Destination"].endswith("/dsv41_native_engram.py"))
+        return Path(mount["Source"]).parent
+    return "stock"
+
+
+def check_free():
+    import socket
+    with socket.socket() as sock:
+        if sock.connect_ex(("127.0.0.1", 8001)) == 0:
+            raise SystemExit("Port 8001 is in use by another service.")
+    pids = subprocess.check_output(["nvidia-smi", "-i", "1,2", "--query-compute-apps=pid",
+                                    "--format=csv,noheader,nounits"], text=True).strip()
+    if pids:
+        raise SystemExit("Another compute process is using GPU 1 or 2. Stop it before switching.")
+
+
+def activate(version):
+    compose = COMPOSE.copy()
+    env = os.environ.copy()
+    if version != "stock":
+        env["DSV41_ENGINE_BUILD"] = str(version)
+        compose += ["-f", str(ROOT / "compose.native.yml")]
+    # Compose applies the service's 240-second stop grace period if a recreate is needed.
+    run(*compose, "up", "-d", "--wait", "--wait-timeout", "1200", MODEL, env=env)
+
+
+def switch(native, interrupt=False):
+    target = build() if native else "stock"
+    previous = previous_service()
+    if previous is None:
+        check_free()
+    elif not interrupt:
+        idle()
+    try:
+        activate(target)
+    except (subprocess.CalledProcessError, KeyboardInterrupt):
+        print("Activation failed. Stopping the unsuccessful build.", file=sys.stderr)
+        run(*COMPOSE, "stop", MODEL)
+        if previous is not None:
+            print("Restoring the previous runtime.", file=sys.stderr)
+            activate(previous)
+        raise
+
+
+def status():
+    if not container_exists():
+        print("stopped (container absent)")
+        return
+    run("docker", "inspect", "-f",
+        '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}} {{end}}'
+        '{{if index .Config.Labels "io.dsv41.engine"}}{{index .Config.Labels "io.dsv41.engine"}}{{else}}stock{{end}}',
+        MODEL)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["build", "start", "stock", "stop", "status"])
+    parser.add_argument("--interrupt", action="store_true",
+                        help="stop or replace the DeepSeek worker even if requests are stuck or metrics are unavailable")
+    args = parser.parse_args()
+    cmd = args.command
+    if args.interrupt and cmd not in {"stock", "start", "stop"}:
+        parser.error("--interrupt applies to start, stock and stop")
+    if cmd == "status":
+        return status()
+    BUILDS.mkdir(exist_ok=True)
+    # Multiple checkouts share this user's Docker service and inference GPUs.
+    lock_dir = Path.home() / ".cache/dsv41-engine"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with (lock_dir / "models-dsv41-flash-exl3.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if cmd == "build":
+            print(build())
+        elif cmd == "stop":
+            if previous_service() is not None:
+                if not args.interrupt:
+                    idle()
+                run(*COMPOSE, "stop", MODEL)
+        else:
+            switch(cmd == "start", args.interrupt)
+
+
+if __name__ == "__main__":
+    main()
