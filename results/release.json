@@ -1,0 +1,21 @@
+{
+  "utc": "2026-11-25T23:49:43.988639+00:00",
+  "release_executable_sha256": "781b45eae5af25a98daf8fefd557d5a96ac850740ad05e0b37546f499f17f5a7",
+  "container_matches_local_release": true,
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "nvcc": "Cuda compilation tools, release 13.5, V13.5.37",
+  "dynamic_libraries": [
+    "libc.so.6",
+    "libcublas.so.13",
+    "libcublasLt.so.13",
+    "libcudart.so.13",
+    "libdl.so.2",
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libpthread.so.0",
+    "librt.so.1",
+    "libstdc++.so.6"
+  ],
+  "test_result": "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s",
+  "clippy_denied_warnings": true
+}

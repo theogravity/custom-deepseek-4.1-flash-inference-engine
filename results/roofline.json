@@ -1,0 +1,21 @@
+{
+  "stage_GB": [
+    {
+      "FP32 residual projections": 0.0786,
+      "Other dense projections": 7.2196,
+      "Selected EXL3 experts": 1.5979
+    },
+    {
+      "FP32 residual projections": 0.0786,
+      "Other dense projections": 6.5642,
+      "Selected EXL3 experts": 1.5979,
+      "Packed FP8 vocabulary head with scales": 0.6826
+    }
+  ],
+  "assumed_GB_per_s": [
+    1702.39,
+    1702.74
+  ],
+  "weight_read_floor_ms": 10.466,
+  "ideal_decode_tok_s": 95.55
+}

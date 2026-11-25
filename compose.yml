@@ -1,0 +1,35 @@
+name: models
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:local
+    init: true
+    restart: always
+    stop_grace_period: 4m
+    build: .
+    container_name: dsv41-flash-exl3
+    labels:
+      io.dsv41.engine: rust-cuda
+    network_mode: host
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set the LiteLLM master key}
+      RAYON_NUM_THREADS: "12"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "0,1"
+      LD_LIBRARY_PATH: /usr/local/cuda/lib64
+    volumes:
+      - /usr/local/cuda:/usr/local/cuda:ro
+      - /mnt/models/dsv41-flash-exl3:/mnt/models/dsv41-flash-exl3:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1", "2"]
+              capabilities: [gpu]
+    command: ["serve", "--bind", "0.0.0.0:8001", "--max-context", "524288", "--chunk-size", "64"]
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8001; echo -en 'GET /health HTTP/1.0\r\n\r\n' >&3; read -r line <&3; [[ $$line == *' 200 '* ]]"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

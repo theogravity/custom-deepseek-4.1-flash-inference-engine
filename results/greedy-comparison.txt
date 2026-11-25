@@ -1,0 +1,10 @@
+Opened checkpoint in 2.49s; weights upload on demand
+prefill tokens=5 reused=0 seconds=1.431
+"The capital of France is" expected [11111, 16, 1] generated [11111, 603, 671] (1.71s, 7.10 decode tok/s)
+prefill tokens=5 reused=0 seconds=0.589
+"2 + 2 =" expected [223, 22, 201, 20, 940, 223, 20, 438] generated [223, 22, 201, 22, 940, 223, 22, 438] (1.22s, 11.02 decode tok/s)
+prefill tokens=4 reused=0 seconds=0.337
+"The quick brown fox" expected [54994, 1060, 270, 41638, 6397, 16, 54414, 1] generated [54994, 1060, 270, 41638, 6397, 16, 1] (0.91s, 10.30 decode tok/s)
+prefill tokens=13 reused=0 seconds=1.030
+"def factorial(n):\n    if n <= 1:\n        return" expected [223, 19, 201, 361, 1354, 313, 982, 34592] generated [223, 19, 201, 361, 1354, 313, 982, 34592] (1.56s, 13.12 decode tok/s)
+Error: 1/4 exact continuations

@@ -1,0 +1,50 @@
+{
+  "prompt": "The first twenty prime numbers are 2, 3, 5, 7,",
+  "prompt_tokens": 18,
+  "continuation": " 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47",
+  "runs": [
+    {
+      "warmup": true,
+      "visible_tokens": 32,
+      "ttft_s": 2.529829411,
+      "decode_tok_s": 13.608317560320211
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.159591547,
+      "decode_tok_s": 25.500045024853694
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.159263534,
+      "decode_tok_s": 25.746882831747556
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.165853749,
+      "decode_tok_s": 25.390754601309474
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.169099245,
+      "decode_tok_s": 25.395480250379837
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.176940775,
+      "decode_tok_s": 25.49608579197318
+    },
+    {
+      "warmup": false,
+      "visible_tokens": 32,
+      "ttft_s": 0.165695227,
+      "decode_tok_s": 25.45427275792012
+    }
+  ],
+  "median_decode_tok_s": 25.475179274946647
+}
