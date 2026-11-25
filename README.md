@@ -27,6 +27,15 @@ eval "$(model-cli pi)"
 
 Run one launcher per shell. `model-cli pi --alias deepseek` also uses the OpenAI-compatible route. A Docker restart retains the active build. If activation fails, the launcher attempts to restore the previously running build. After switching to another model with model-cli, use `./engine start` to select this build again once the other model has stopped. Run `./engine stock` for the original implementation, or `./engine stop` to release both inference GPUs. If the DeepSeek worker is stuck and you intend to interrupt active requests, use `./engine stop --interrupt` followed by `./engine stock`. The permissive client options printed by model-cli are the parent stack's defaults.
 
+## Measured throughput at 375 W per card
+
+| Warm code edit | Original, matched control | Native, first boot | Native, second boot |
+| --- | ---: | ---: | ---: |
+| One stream | 292.2 tok/s | 320.4 tok/s | 304.0 tok/s |
+| Six streams, aggregate | 683.6 tok/s | 710.0 tok/s | 683.8 tok/s |
+
+Six timed batches per cell on the same warm code-edit workload. The isolated Engram lookup improved on both measured graph shapes. End-to-end gains varied by boot, especially at six streams.
+
 ## Reproduce the measurements
 
 `python3 tools/measure.py LABEL results/ledger.jsonl` benchmarks the engine directly on localhost:8001. It discards seven warm-up runs at each concurrency, then collects six timed runs at each concurrency using 512 generated tokens per stream. Rates divide server-reported completion tokens by wall time including the warm prompt and stream setup. The ledger records TTFT and a digest of each generated answer. Compare runs on the same hardware and power limits.

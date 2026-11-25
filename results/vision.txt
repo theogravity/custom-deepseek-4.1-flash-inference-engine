@@ -1,0 +1,5 @@
+code word + shapes OK     0.8s prompt_tokens=441 | 'Based on the image provided:\n\n*   **Code Word:** The text written at the top is **ORCHID-73**.\n*   **Shapes and Colors:*'
+solid red          OK     0.2s prompt_tokens=199 | 'Red'
+same image again   OK     0.4s prompt_tokens=432 | 'Based on the image provided, the code word written is **ORCHID-73**.'
+two images         OK     0.4s prompt_tokens=387 | 'Based on the images provided:\n\n*   The first image is **blue**.\n*   The second image is **green**.'
+IMAGE OK

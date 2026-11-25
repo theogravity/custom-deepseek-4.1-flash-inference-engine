@@ -12,4 +12,25 @@ The candidate changes one component, the Engram execution path for batches up to
 
 The fixed-ID Engram microbenchmark initially measured ~40 vs 66 µs at six tokens, but ~78 vs 66 µs at 36 tokens. Repeated IDs issued redundant prefetch hints. The final callback deduplicates page hints within the callback and retains the GPU block budget on the background stream. The same warm-row graph comparison then measured 27.7 vs 69.4 µs and 32.4 vs 72.2 µs at six and 36 tokens, respectively. Those are per-lookup medians for 35 replays. Real-shard tests compared BF16 bits against an independent CPU reference on fresh IDs. See [graph test evidence](results/engram-graph.json).
 
-The initial single-stream stock samples rose from 193 to 258 tok/s through the first six timed requests. Later comparison runs discard seven requests at each concurrency before recording six timed requests. Keep the initial control for reference and use the matched warm-up runs to compare full-model rates.
+The initial single-stream stock samples rose from 193 to 258 tok/s through the first six timed requests. Later comparison runs discard seven warm-up batches at each concurrency before recording six timed batches. Keep the initial control for reference and use the matched warm-up runs to compare full-model rates.
+
+A clean clone of commit `a5cf7c2` reproduced the generated module, native bridge and shared library byte-for-byte. Both tensor-parallel workers mapped the resulting library in the live model process. On the native build, all four client paths returned their own randomly generated tool receipt, and a streamed request returned separate thinking and text with the correct final answer. The real binaries were Codex CLI 0.172.0, Claude Code 2.1.296 and Pi 1.4.0. Pi used both the Anthropic and DeepSeek aliases. [Client evidence](results/client-acceptance.jsonl)
+
+The native build recovered three random receipts at positions near 3%, 50% and 96% in each of the 261,107- and 518,814-token cold prompts. End-to-end times were 42.5 and 85.1 seconds, including HTTP and generation. [Context evidence](results/context.jsonl)
+
+All six concurrent requests of 411,169–411,266 prompt tokens returned all three receipts correctly (2,467,359 input tokens total). Elapsed time for the batch was 417.43 seconds. Individual requests took 76.71–417.18 s from submission to answer, including queueing. The sampler recorded peaks of 95,964 MiB per GPU across the text and vision tests. Four checkpoint vision probes also passed, including repeated and multi-image inputs. [Context evidence](results/context.jsonl) · [Vision evidence](results/vision.txt)
+
+## Measured throughput at 375 W per card
+
+| Warm code edit | Original, matched control | Native, first boot | Native, second boot |
+| --- | ---: | ---: | ---: |
+| One stream | 292.2 tok/s | 320.4 tok/s | 304.0 tok/s |
+| Six streams, aggregate | 683.6 tok/s | 710.0 tok/s | 683.8 tok/s |
+
+Each cell is the median of six timed batches after seven warm-up batches at that concurrency. The three matched builds ran in the order native, original, native. All timed streams returned 512 completion tokens with a length stop. These are warm 25,598-token code edits with temperature zero and thinking disabled. The three short greedy answers also matched byte-for-byte between native and original. [Throughput ledger](results/ledger.jsonl) · [Speculative counters](results/draft-counters.jsonl) · [Greedy outputs](results/greedy.jsonl)
+
+The native kernel improved the isolated Engram operation. End-to-end one-stream medians rose on both candidate boots, with a smaller difference on the repeat. Six-stream throughput on the repeat was effectively equal to stock. The run-to-run spread limits the speedup that can be attributed to Engram. The accepted-draft rate on this workload is unusually high because the prompts ask for repetitive code edits.
+
+Resampling six timed batches with replacement 20,000 times per build (median native divided by median stock, percentile interval) gives 95% intervals of 0.98–1.19 and 0.95–1.13 for the two single-stream runs, and 0.99–1.08 and 0.95–1.05 at six streams. Each interval includes parity. These are within-boot sample intervals and do not account for every source of variation between boots.
+
+Final system state on 2026-11-25: the native build is running and healthy on port 8001 behind the existing LiteLLM proxy on 4000. GPU 1 and 2 remain at 375 W. All six acceptance checks passed again after the final native restart. [Final client checks](results/client-final.jsonl)
