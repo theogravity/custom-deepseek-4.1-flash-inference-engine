@@ -94,6 +94,21 @@ def mean_visible(start, stop, ratio, cap):
     return (integrated(stop) - integrated(start)) / (stop - start)
 
 
+def decode_context_bytes(cfg, length):
+    """Logical cache-record reads per rank for one target query on SM120 with FP8 indexing."""
+    ratios = cfg["compress_ratios"][:cfg["num_hidden_layers"]]
+    window_rows = len(ratios) * min(length, cfg["sliding_window"])
+    sparse_rows = sum(min(length // ratio, cfg["index_topk"]) for ratio in ratios if ratio)
+    # fp8_ds_mla on SM120 stores a 512-dim latent in a 584-byte record.
+    latent_bytes = 584 * (window_rows + sparse_rows)
+    # FP8 indexer: 128 key elements plus a four-byte scale. Candidate masking
+    # happens after logits, so even the four consumer indexers scan the full source.
+    index_rows = sum(length // ratios[layer] for layer in cfg["index_source_layer_ids"])
+    index_bytes = (cfg["index_head_dim"] + 4) * index_rows
+    return {"latent_bytes_per_rank": latent_bytes, "index_rows_per_rank": index_rows,
+            "index_bytes_per_rank": index_bytes, "tp2_bytes": 2 * (latent_bytes + index_bytes)}
+
+
 def prefill_flops(cfg, matrix_params, kv_params, length, trim_replay):
     """FMA=2. Include QK/AV sparse attention and indexer dots, omit activation and reduction ops."""
     total = 0
@@ -110,10 +125,8 @@ def prefill_flops(cfg, matrix_params, kv_params, length, trim_replay):
         attention = 4 * cfg["num_attention_heads"] * cfg["head_dim"] * positions
         indexer = 0
         if layer in cfg["index_source_layer_ids"]:
-            cap = length
-            if layer > cfg["candidate_source_layer_id"]:
-                cap = cfg["candidate_topk_blocks"] * cfg["candidate_block_size"]
-            positions = mean_visible(start, length, ratio, cap)
+            # Deployed FP8 path computes all logits, then applies the candidate mask.
+            positions = mean_visible(start, length, ratio, length)
             indexer = 2 * cfg["index_n_heads"] * cfg["index_head_dim"] * positions
         total += fraction * (2 * params + attention + indexer)
     if trim_replay:
@@ -159,6 +172,18 @@ def calculate(pack, probe):
             "verify_bytes": verify, "draft_bytes": draft, "step_ms": step / bandwidth * 1e3,
             "tokens_s_at_fraction_accepted": {
                 p: streams * (1 + k * p) * bandwidth / step for p in (0, .483, .806, 1)}}
+    context = {}
+    independent = spec["independent_routes"]
+    base_step = independent["verify_bytes"] + independent["draft_bytes"]
+    for length in [25598, 400000, 524288]:
+        item = decode_context_bytes(cfg, length)
+        payload = item["tp2_bytes"]
+        item["no_spec_tokens_s"] = bandwidth / (decode["lm_head_fp8"]["bytes"] + payload)
+        # A six-row target pass can reuse cached context or reread per query.
+        # Both illustrative scenarios omit the small, fixed draft window.
+        item["dspark_tokens_s_at_80_6pct_reused_context"] = (1 + k * .806) * bandwidth / (base_step + payload)
+        item["dspark_tokens_s_at_80_6pct_reread_context"] = (1 + k * .806) * bandwidth / (base_step + (k + 1) * payload)
+        context[length] = item
     prefill = []
     for length in [2048, 40000, 524288]:
         for trim in (False, True):
@@ -169,7 +194,7 @@ def calculate(pack, probe):
     return {"tensor_bytes": dict(table), "target_active_routed_bytes": active, "target_dense_bytes": dense,
             "target_linear_params": sum(matrix_params.values()), "first20_linear_params":
             sum(v for l, v in matrix_params.items() if l < 20), "no_spec": decode, "dspark": spec,
-            "prefill": prefill}
+            "decode_context": context, "prefill": prefill}
 
 
 if __name__ == "__main__":
