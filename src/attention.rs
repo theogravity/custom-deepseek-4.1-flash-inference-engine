@@ -2272,6 +2272,7 @@ mod tests {
             let scale = 2f32.powi((i % 19) as i32 - 9);
             key[INDEX_DIM..].copy_from_slice(&scale.to_le_bytes());
         }
+        let compact = upload(device, &packed[..3 * INDEX_BYTES])?;
         let packed = upload(device, &packed)?;
         let q: Vec<_> = (0..rows * INDEX_HEADS * INDEX_DIM)
             .map(|i| ((i * 503 % 1093) as f32 - 546.) / 77.)
@@ -2303,11 +2304,21 @@ mod tests {
                     }
                 })
                 .collect();
-            for (candidates, contiguous, active_rows) in [
-                (ptr::null(), true, rows),
-                (causal.as_ptr(), true, rows),
-                (causal.as_ptr(), true, rows - 1),
-                (ids.as_ptr(), false, rows),
+            let short_ids: Vec<i32> = (0..rows * width)
+                .map(|i| {
+                    if i % width < 3 {
+                        (i % width) as i32
+                    } else {
+                        -1
+                    }
+                })
+                .collect();
+            for (source, candidates, contiguous, active_rows) in [
+                (&packed, ptr::null(), true, rows),
+                (&packed, causal.as_ptr(), true, rows),
+                (&packed, causal.as_ptr(), true, rows - 1),
+                (&packed, ids.as_ptr(), false, rows),
+                (&compact, short_ids.as_ptr(), true, rows),
             ] {
                 let score = |mode| -> Result<Vec<u32>> {
                     let mut out = vec![0f32; active_rows * width];
@@ -2316,7 +2327,7 @@ mod tests {
                             ds4_attn_scores(
                                 device,
                                 scratch.ptr.as_ptr(),
-                                packed.ptr.as_ptr(),
+                                source.ptr.as_ptr(),
                                 q.data(),
                                 w.data(),
                                 candidates,

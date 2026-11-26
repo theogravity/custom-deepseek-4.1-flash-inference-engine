@@ -424,9 +424,10 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
     auto io=l.slice<int>(ids ? ns : 0), so=l.slice<float>(ns);
     TRY(b->grow(l.used));
     if (ids) TRY(cudaMemcpy(at<int>(b,io),ids,ns*4,cudaMemcpyHostToDevice));
-    auto *keys = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
+    auto *key_buffer = static_cast<const Buffer *>(cache);
+    auto *keys = static_cast<const uint8_t *>(key_buffer->ptr);
     launch_index_scores(packed_scores,keys,queries,weights,ids ? at<int>(b,io) : nullptr,
-                        width,batch,at<float>(b,so),contiguous_ids);
+                        width,batch,at<float>(b,so),contiguous_ids && key_buffer->capacity / (idim + sizeof(float)) >= size_t(width));
     TRY(cudaGetLastError());
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
     return 0;
@@ -466,11 +467,13 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     auto *rank=reinterpret_cast<unsigned long long *>(work+s.ranks);
     auto *sorted=reinterpret_cast<unsigned long long *>(work+s.sorted);
     auto *offsets=reinterpret_cast<int *>(work+s.offsets);
-    auto *packed=static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
+    auto *key_buffer=static_cast<const Buffer *>(cache);
+    auto *packed=static_cast<const uint8_t *>(key_buffer->ptr);
     dim3 grid((width+block-1)/block,rows);
     index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
     TRY(cudaGetLastError());
-    launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores,candidates == nullptr);
+    launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores,
+                        candidates == nullptr && key_buffer->capacity / (idim + sizeof(float)) >= size_t(width));
     TRY(cudaGetLastError());
     auto select=[&](int stride, int keep)->cudaError_t {
         if (use_tiled_selection(stride,rows,keep)) {
