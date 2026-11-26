@@ -57,3 +57,7 @@ Future performance runs use the native OpenAI Chat endpoint on port 8001. The co
 ## Long-context decode and prefix RAM at 375 W
 
 Tagged the stable engine and serving image before changing the CUDA scorer. Reducing packed index scoring to eight or sixteen lanes preserved raw scores and improved single-client full-window retrieval from 321–322 to 372 tok/s. At 404k, six coding clients delivered 252 aggregate tok/s with the scorer alone and 285 with a 6 GiB host prefix tier. The joint drafter projection experiment measured 228 against controls of 231 and remained on its experiment branch. [Controls, workloads and gates](LONG-CONTEXT-BENCHMARK.md)
+
+## Expert uploads and draft limits at 404k
+
+Six 512-token coding clients delivered 260–264 aggregate tok/s on the 375 W checkpoint. A maximum draft length of five measured 258, and a confidence threshold of 0.65 measured 261. Neither improved delivery against both controls. The next experiments target repeated expert uploads (2.78–2.82 GiB/s during six-way decode), host copies during warm prefix admission, and the routed expert projection kernel. [Ranked experiments, GPU timelines and controls](NEXT-OPTIMIZATIONS.md)
