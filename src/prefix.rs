@@ -5,6 +5,7 @@ use crate::{
     restore_timing::{timed, Host, Tier},
 };
 use anyhow::{ensure, Context, Result};
+use bytes::Bytes;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -87,7 +88,7 @@ pub struct PrefixCache {
     ram_limit: usize,
     disk_limit: usize,
     dir: Option<PathBuf>,
-    ram: VecDeque<(Key, Vec<u8>)>,
+    ram: VecDeque<(Key, Bytes)>,
     ram_bytes: usize,
 }
 impl PrefixCache {
@@ -190,7 +191,7 @@ impl PrefixCache {
         let key = self.draft_key(tokens, pos, span)?;
         if let Some(i) = self.ram.iter().position(|e| e.0 == key) {
             let entry = self.ram.remove(i).unwrap();
-            let data = entry.1.clone();
+            let data = entry.1.to_vec();
             self.ram.push_back(entry);
             return Ok(Some((Tier::Ram, data)));
         }
@@ -200,7 +201,7 @@ impl PrefixCache {
                 Ok(data)
             }) {
                 Ok(data) => {
-                    self.remember(key, data.clone());
+                    self.remember(key, data.clone().into());
                     return Ok(Some((Tier::Disk, data)));
                 }
                 Err(e) => {
@@ -254,7 +255,7 @@ impl PrefixCache {
             .as_ref()
             .map(|p| p.join(format!("{}.kv", hex(key))))
     }
-    fn remember(&mut self, key: Key, data: Vec<u8>) {
+    fn remember(&mut self, key: Key, data: Bytes) {
         if data.len() > self.ram_limit {
             return;
         }
@@ -346,7 +347,7 @@ impl PrefixCache {
         }
     }
     fn decode_target(
-        data: &[u8],
+        data: &Bytes,
         pos: usize,
         tier: Tier,
         timing: &mut Option<Host>,
@@ -355,7 +356,7 @@ impl PrefixCache {
             profile.backing_read(tier);
         }
         let (state, elapsed) = timed(timing.is_some(), || {
-            AttentionState::decode_snapshot(data, pos)
+            AttentionState::decode_prefix(data, pos)
         });
         if let Some(profile) = timing {
             profile.decoded(data.len(), elapsed);
@@ -387,6 +388,7 @@ impl PrefixCache {
                 let read = self
                     .read_blob(&path, &key, 6 * MIB + 2048 * pos)
                     .and_then(|data| {
+                        let data = Bytes::from(data);
                         let state = Self::decode_target(&data, pos, Tier::Disk, &mut timing)?;
                         Ok((state, data))
                     });
@@ -457,7 +459,7 @@ impl PrefixCache {
                 }
             }
         }
-        self.remember(key, data);
+        self.remember(key, Bytes::from(data));
     }
 }
 
@@ -513,7 +515,8 @@ mod tests {
         cache.store(&[23, 88], 1, 128, &state)?;
         let mut restarted = make();
         restarted.ram_limit = 2 * data.len();
-        assert_eq!(restarted.restore(&[22, 99], 2, 128)?.unwrap().0, 1);
+        let (pos, held, _) = restarted.restore(&[22, 99], 2, 128)?.unwrap();
+        assert_eq!(pos, 1);
         assert_eq!(restarted.restore(&[23, 11], 2, 128)?.unwrap().0, 1);
         assert!(restarted.restore(&[22], 1, 64)?.is_none());
         let key = cache.keys(&[22], 1, 128)?[0].1;
@@ -526,6 +529,11 @@ mod tests {
         assert!(!cache.file(&key).unwrap().exists());
         cache.store(&[22], 1, 128, &state)?;
         assert!(cache.restore(&[22], 1, 128)?.is_some());
+        restarted.ram_limit = data.len();
+        restarted.store(&[24], 1, 128, &state)?;
+        assert_eq!(restarted.ram_bytes, data.len());
+        assert!(restarted.ram.iter().all(|(k, _)| k != &key));
+        assert_eq!(held.encode_snapshot(pos)?, data);
         restarted.disk_limit = 0;
         restarted.trim_disk(0)?;
         assert!(fs::read_dir(d.path())?.all(|entry| entry.unwrap().file_name() == ".cache.lock"));

@@ -144,6 +144,18 @@ impl AttentionState {
     }
 
     pub fn decode_snapshot(bytes: &[u8], pos: usize) -> Result<Self> {
+        Self::parse_snapshot(bytes, pos, |part| PackedRows::Owned(part.to_vec()))
+    }
+
+    pub(crate) fn decode_prefix(image: &Bytes, pos: usize) -> Result<Self> {
+        Self::parse_snapshot(image, pos, |part| PackedRows::Prefix(image.slice_ref(part)))
+    }
+
+    fn parse_snapshot(
+        bytes: &[u8],
+        pos: usize,
+        packed: impl Fn(&[u8]) -> PackedRows,
+    ) -> Result<Self> {
         // Derive every slice length from the caller's validated token count.
         // Check the entire file before allocating buffers or slicing its body.
         ensure!(
@@ -188,11 +200,11 @@ impl AttentionState {
         for owner in OWNERS {
             let (kv, keys, pending) = source_lengths(owner, pos);
             let values = Rows {
-                packed: take(kv).to_vec(),
+                packed: packed(take(kv)),
                 ..Default::default()
             };
             let keys = Rows {
-                packed: take(keys).to_vec(),
+                packed: packed(take(keys)),
                 ..Default::default()
             };
             let mut floats = || {
@@ -230,6 +242,37 @@ mod tests {
             *b = (i * 13 % 251) as u8;
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn prefix_rows_share_the_image_until_mutated_or_released() -> Result<()> {
+        let pos = 257; // Covers a wrapped window and the pending ratio-two rows.
+        let bytes = payload(pos)?;
+        let image = Bytes::from(bytes);
+        let mut restored = AttentionState::decode_prefix(&image, pos)?;
+        let other = AttentionState::decode_prefix(&image, pos)?;
+        assert_eq!(restored.encode_snapshot(pos)?, &image[..]);
+        let mut offset = 16 + 40 * (WINDOW - 1) * DIM * 2;
+        for owner in OWNERS {
+            let (kv, keys, pending) = source_lengths(owner, pos);
+            let source = restored.sources.get_mut(&owner).unwrap();
+            for (rows, len) in [(&mut source.values, kv), (&mut source.keys, keys)] {
+                assert_eq!(rows.packed.as_ptr(), image[offset..].as_ptr());
+                rows.truncate(len - 1);
+                assert_eq!(rows.packed.as_ptr(), image[offset..].as_ptr());
+                let owned = rows.packed.for_append();
+                owned.push(0);
+                assert_ne!(owned.as_ptr(), image[offset..].as_ptr());
+                assert_eq!(&owned[..len - 1], &image[offset..offset + len - 1]);
+                offset += len;
+            }
+            offset += 2 * pending * 4;
+        }
+        assert_eq!(offset, image.len());
+        assert_eq!(other.encode_snapshot(pos)?, &image[..]);
+        drop(other);
+        assert!(image.is_unique());
+        Ok(())
     }
 
     #[test]
@@ -281,7 +324,8 @@ mod tests {
             let dev = i32::from(owner >= 20);
             // The CPU compressor can append fresh host rows before uploading
             // its saved prefix. Only the original bytes belong to restoration.
-            s.keys.packed.resize(s.keys.packed.len() + INDEX_BYTES, 0);
+            let len = s.keys.packed.len() + INDEX_BYTES;
+            s.keys.packed.for_append().resize(len, 0);
             s.keys.on(dev, None)?;
             if owner == 20 {
                 assert_eq!(
@@ -337,13 +381,14 @@ mod tests {
 
     #[test]
     #[ignore = "set DS4_TEST_DEVICE to a visible inference GPU"]
-    fn cuda_live_target_rotation_round_trips_wrapped_rings_and_compressed_rows() -> Result<()> {
+    fn cuda_prefix_then_live_rotation_round_trip_wrapped_rings_and_compressed_rows() -> Result<()> {
         let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         let (pos, prompt, limit) = (275, 521, 612);
         let bytes = payload(pos)?;
-        let mut saved = bytes.clone();
-        for _ in 0..2 {
-            let mut state = AttentionState::restore_rotation(&saved, pos, prompt, limit)?;
+        let image = Bytes::copy_from_slice(&bytes);
+        let mut state = AttentionState::decode_prefix(&image, pos)?;
+        assert!(!image.is_unique());
+        for pass in 0..3 {
             for w in state.windows.values_mut() {
                 w.on(dev, None)?;
             }
@@ -354,9 +399,12 @@ mod tests {
                     assert!(rows.packed.is_empty());
                 }
             }
-            saved = state.encode_snapshot(pos)?;
-            drop(state);
+            assert!(image.is_unique());
+            let saved = state.encode_snapshot(pos)?;
             assert_eq!(saved, bytes);
+            if pass < 2 {
+                state = AttentionState::restore_rotation(&saved, pos, prompt, limit)?;
+            }
         }
         Ok(())
     }

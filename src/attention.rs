@@ -6,6 +6,7 @@ mod snapshot;
 use crate::restore_timing::Probe;
 use crate::runtime::{Dev, Runtime};
 use anyhow::{ensure, Context, Result};
+use bytes::Bytes;
 use half::bf16;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -274,13 +275,56 @@ impl RestoredPart {
     }
 }
 
+/// GPU uploads can read a range of the immutable prefix image directly.
+enum PackedRows {
+    Owned(Vec<u8>),
+    Prefix(Bytes),
+}
+
+impl Default for PackedRows {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl std::ops::Deref for PackedRows {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(rows) => rows,
+            Self::Prefix(rows) => rows,
+        }
+    }
+}
+
+impl PackedRows {
+    fn for_append(&mut self) -> &mut Vec<u8> {
+        if let Self::Prefix(rows) = self {
+            *self = Self::Owned(rows.to_vec());
+        }
+        match self {
+            Self::Owned(rows) => rows,
+            Self::Prefix(_) => unreachable!(),
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        match self {
+            Self::Owned(rows) => rows.truncate(len),
+            Self::Prefix(_) if len == 0 => *self = Self::default(),
+            Self::Prefix(rows) => rows.truncate(len),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Rows {
     restored: Option<RestoredPart>,
     initial_bytes: usize,
     max_bytes: usize,
     writer: Option<i32>,
-    packed: Vec<u8>,
+    packed: PackedRows,
     devices: HashMap<i32, (GpuBuffer, usize)>,
 }
 impl Rows {
@@ -337,7 +381,7 @@ impl Rows {
     fn finish_append(&mut self, dev: i32, bytes: usize) {
         self.devices.get_mut(&dev).unwrap().1 += bytes;
         self.writer = Some(dev);
-        self.packed = Vec::new();
+        self.packed = PackedRows::default();
     }
     fn truncate(&mut self, bytes: usize) {
         self.packed.truncate(bytes);
@@ -650,7 +694,7 @@ impl AttentionState {
         ensure!(self.verify.is_none(), "cannot snapshot active verification");
         fn host_rows(rows: &Rows) -> Result<Rows> {
             let mut copy = Rows::default();
-            rows.append_snapshot(&mut copy.packed)?;
+            rows.append_snapshot(copy.packed.for_append())?;
             Ok(copy)
         }
         let sources = self
@@ -967,8 +1011,8 @@ fn append_source(
         rotate(key, &freq, false);
         rotate(value, &freq, false);
     }
-    pack_index_keys(&keys, &mut src.keys.packed);
-    pack_values(&latent, &mut src.values.packed);
+    pack_index_keys(&keys, src.keys.packed.for_append());
+    pack_values(&latent, src.values.packed.for_append());
     Ok(())
 }
 
@@ -1959,8 +2003,8 @@ mod tests {
     fn host_snapshot_branches_from_an_unfinished_pair() {
         let mut original = AttentionState::default();
         let source = original.sources.entry(2).or_default();
-        source.keys.packed = vec![1; INDEX_BYTES];
-        source.values.packed = vec![2; KV_BYTES];
+        source.keys.packed = PackedRows::Owned(vec![1; INDEX_BYTES]);
+        source.values.packed = PackedRows::Owned(vec![2; KV_BYTES]);
         source.pending_kv = vec![1.0; DIM];
         source.pending_gate = vec![0.0; DIM];
         original.windows.insert(
@@ -1980,8 +2024,8 @@ mod tests {
         assert_eq!(branch.windows[&2].rows, original.windows[&2].rows);
         let copied = branch.sources.get_mut(&2).unwrap();
         assert!(copied.keys.devices.is_empty() && copied.values.devices.is_empty());
-        assert_eq!(copied.keys.packed, original.sources[&2].keys.packed);
-        assert_eq!(copied.values.packed, original.sources[&2].values.packed);
+        assert_eq!(&*copied.keys.packed, &*original.sources[&2].keys.packed);
+        assert_eq!(&*copied.values.packed, &*original.sources[&2].values.packed);
         let output = pool_pairs(
             &[3.; DIM],
             &[0.; DIM],
@@ -2029,8 +2073,14 @@ mod tests {
                     &mut src.pending_kv,
                     &mut src.pending_gate,
                 );
-                src.keys.packed.resize((pos + n) / 2 * INDEX_BYTES, 1);
-                src.values.packed.resize((pos + n) / 2 * KV_BYTES, 2);
+                src.keys
+                    .packed
+                    .for_append()
+                    .resize((pos + n) / 2 * INDEX_BYTES, 1);
+                src.values
+                    .packed
+                    .for_append()
+                    .resize((pos + n) / 2 * KV_BYTES, 2);
                 state.sources.insert(2, src);
                 for layer in 0..40 {
                     state.windows.insert(
@@ -2468,11 +2518,11 @@ mod tests {
         pack_values(&values, &mut ref_v);
         pack_index_keys(&keys, &mut ref_k);
         let mut vs = Rows {
-            packed: ref_v[..KV_BYTES].to_vec(),
+            packed: PackedRows::Owned(ref_v[..KV_BYTES].to_vec()),
             ..Rows::default()
         };
         let mut ks = Rows {
-            packed: ref_k[..INDEX_BYTES].to_vec(),
+            packed: PackedRows::Owned(ref_k[..INDEX_BYTES].to_vec()),
             ..Rows::default()
         };
         // Begin with a host snapshot. Append GPU rows, roll back three, and
@@ -2566,7 +2616,7 @@ mod tests {
                     let mut bytes = Vec::new();
                     got.append_snapshot(&mut bytes)?;
                     assert_eq!(
-                        bytes, want.packed,
+                        bytes, &*want.packed,
                         "checkpoint compressed rows owner={owner}, pos={pos}"
                     );
                 }
@@ -2755,7 +2805,7 @@ mod tests {
                 &(0..(width + 1) * DIM)
                     .map(|i| sample(i + 223))
                     .collect::<Vec<_>>(),
-                &mut source.packed,
+                source.packed.for_append(),
             );
             let cache = source.on(device, None)?;
             let prior = upload(device, &prior)?;
@@ -2860,7 +2910,7 @@ mod tests {
         key[1] = -0.25;
         key[2] = 3.;
         let mut rows = Rows::default();
-        pack_values(&key, &mut rows.packed);
+        pack_values(&key, rows.packed.for_append());
         let latent = rows.on(device, None)?;
         let mut query = vec![0.; HEADS * DIM];
         let sink = [-2.0f32; HEADS];
