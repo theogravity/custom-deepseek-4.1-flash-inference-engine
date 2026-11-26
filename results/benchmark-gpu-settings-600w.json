@@ -1,0 +1,47 @@
+{
+  "verified_at": "2026-11-25T20:26:00-08:00",
+  "lact_config_mtime": "2026-11-25T20:24:06.604-08:00",
+  "screenshot": "rtx-pro-6000-lact-600w.png",
+  "screenshot_sha256": "d9ae5f18d50bdf5bdd58ab0cb25dcf70a5db6cb591be0c0a74044b1b307b81bd",
+  "cards": [
+    {
+      "host_gpu": 1,
+      "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "pci": "00000000:E1:00.0",
+      "power_limit_w": 600.0,
+      "enforced_limit_w": 600.0,
+      "maximum_limit_w": 600.0,
+      "core_offset_mhz": 450,
+      "vram_offset_mhz": 4000,
+      "power_mizer": "Auto",
+      "sampled_sm_mhz": 427,
+      "sampled_vram_mhz": 405
+    },
+    {
+      "host_gpu": 2,
+      "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "pci": "00000000:F1:00.0",
+      "power_limit_w": 600.0,
+      "enforced_limit_w": 600.0,
+      "maximum_limit_w": 600.0,
+      "core_offset_mhz": 450,
+      "vram_offset_mhz": 4000,
+      "power_mizer": "Auto",
+      "sampled_sm_mhz": 427,
+      "sampled_vram_mhz": 405
+    }
+  ],
+  "screenshot_observations": {
+    "one_card_power_w": 347.0,
+    "core_mhz": 2992,
+    "memory_mhz": 15365,
+    "usage_percent": 42,
+    "core_temperature_c": 43,
+    "hotspot_temperature_c": 49,
+    "vram_temperature_c": 52,
+    "throttling": false,
+    "voltage_boost_percent": 0,
+    "locked_gpu_clocks": false,
+    "locked_vram_clocks": false
+  }
+}

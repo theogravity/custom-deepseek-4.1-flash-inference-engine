@@ -1,5 +1,5 @@
 {
-  "applies_to": "All benchmarks in this engine to date, as reported by the workstation owner; current settings were also read from LACT and nvidia-smi.",
+  "applies_to": "Historical 375 W profile verified on November 25. The C1 sweep and initial published decode replay preceded the change to 600 W. See benchmark-gpu-settings-600w.json for subsequent measurements.",
   "verified_at": "2026-11-25T18:42:25-08:00",
   "screenshot": "rtx-pro-6000-lact.png",
   "screenshot_sha256": "f692854b4bdce4bf460c444c7763e0463c192c12fb571ca1b8de0eebc506716a",

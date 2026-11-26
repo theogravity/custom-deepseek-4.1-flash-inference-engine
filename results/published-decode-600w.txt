@@ -1,0 +1,7 @@
+warm-up: prompt 25625 tokens, ttft 6.7s
+rep0 1 streams: per-stream [44] tok/s, aggregate 44 tok/s (1500 tokens)
+rep0 4 streams: per-stream [60, 60, 59, 59] tok/s, aggregate 236 tok/s (6000 tokens)
+rep0 6 streams: per-stream [65, 63, 63, 62, 62, 62] tok/s, aggregate 370 tok/s (9000 tokens)
+rep1 1 streams: per-stream [277] tok/s, aggregate 277 tok/s (1500 tokens)
+rep1 4 streams: per-stream [109, 108, 107, 105] tok/s, aggregate 420 tok/s (6000 tokens)
+rep1 6 streams: per-stream [79, 77, 77, 76, 76, 75] tok/s, aggregate 452 tok/s (9000 tokens)

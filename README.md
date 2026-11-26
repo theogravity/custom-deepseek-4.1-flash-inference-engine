@@ -2,6 +2,8 @@
 
 A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of DeepSeek V4.1 Flash on two RTX PRO 6000 Blackwell workstation cards. The server opens the original 48 safetensors shards and generates tokens locally. Rust owns checkpoint loading, tokenization, scheduling, sampling, and the model loop. The GPU runtime uses CUDA C++, tensor-core instructions and cuBLAS. The HTTP server uses Axum.
 
+The published 1-, 4- and 6-client workload has been replayed on this engine at both power limits. [Native and published benchmarks](UPSTREAM-COMPARISON.md)
+
 ## Run on this workstation
 
 The release build needs Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only.
@@ -123,7 +125,9 @@ docker compose --env-file ../models/.env up -d --wait
 
 For one active client generating 128 receipt tokens, direct and LiteLLM decode rates differed by at most 0.43% across eight context lengths. Both routes exceeded 300 tok/s through 65,536 input tokens and delivered about 238 tok/s at 524,160. The benchmark includes separate measurements for OpenAI Chat and Anthropic Messages. [C1 output tok/s by context length](C1-BENCHMARK.md)
 
-All workstation benchmarks in this repository used both RTX PRO 6000 Blackwell cards with a **375 W limit per card**, **+450 MHz P0 core offset**, **+4,000 MHz P0 VRAM offset**, **0% voltage boost**, and **PowerMizer Auto**. GPU and VRAM clock locking were disabled. The workstation owner confirmed the historical configuration. The saved LACT settings and a live power-limit readback agree on both cards. The screenshot’s 3,015 MHz core, 15,365 MHz VRAM, 320.1 W and temperature values were instantaneous readings. [GPU settings and saved voltage/frequency points](results/benchmark-gpu-settings.json) · [Owner’s screenshot](results/rtx-pro-6000-lact.png)
+The original workstation benchmarks and the full C1 proxy sweep used both RTX PRO 6000 Blackwell cards with a **375 W limit per card**, **+450 MHz P0 core offset**, **+4,000 MHz P0 VRAM offset**, **0% voltage boost**, and **PowerMizer Auto**. GPU and VRAM clock locking were disabled. The workstation owner confirmed the historical configuration. The saved LACT settings and a live power-limit readback agree on both cards. The screenshot’s 3,015 MHz core, 15,365 MHz VRAM, 320.1 W and temperature values were instantaneous readings. [GPU settings and saved voltage/frequency points](results/benchmark-gpu-settings.json) · [Owner’s screenshot](results/rtx-pro-6000-lact.png)
+
+On November 25 at about 20:24 Pacific, the workstation owner raised both inference cards to **600 W** with the same clock offsets. The driver reported 600 W requested and enforced on each. [600 W settings](results/benchmark-gpu-settings-600w.json) · [Updated screenshot](results/rtx-pro-6000-lact-600w.png)
 
 The serving binary and tested model revision are recorded in the [serving profile](results/serving-profile.json). The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, packed MXFP8 weights with BF16 tensor-core multiplication and FP32 accumulation, and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
 
