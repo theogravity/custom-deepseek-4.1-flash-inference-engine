@@ -64,7 +64,7 @@ __device__ __forceinline__ void mma(const unsigned (&a)[4], unsigned b0, unsigne
 // Four warps cover 64 output columns. Each job covers up to 16 inputs routed
 // to one expert, sharing the decoded weights. Split K keeps a one-token job
 // large enough to distribute across the SMs. Partials are reduced in order.
-template <int projection, bool mcg>
+template <int projection, bool mcg, bool paired = false>
 __global__ void project(const Job *jobs, const half *x, float *partial, int rows, int splits) {
     constexpr int K = projection == Down ? I : H;
     constexpr int N = projection == Down ? H : I;
@@ -72,7 +72,18 @@ __global__ void project(const Job *jobs, const half *x, float *partial, int rows
     int lane = threadIdx.x % 32;
     int nt = blockIdx.x * 4 + threadIdx.x / 32;
     Job job = jobs[blockIdx.y];
-    const uint32_t *tiles = reinterpret_cast<const uint32_t *>(job.expert + projection * TRELLIS);
+    int split = blockIdx.z;
+    int which = projection;
+    if constexpr (paired) {
+        static_assert(projection == Gate);
+        if (split >= splits) {
+            which = Up;
+            split -= splits;
+            x += size_t(rows) * K;
+            partial += size_t(splits) * rows * N;
+        }
+    }
+    const uint32_t *tiles = reinterpret_cast<const uint32_t *>(job.expert + which * TRELLIS);
     // Lane l owns stream bits [24*l,24*l+24), preceded by 13 history bits.
     // This interval always fits in two 32-bit words. Lane zero wraps to word 23.
     int end = (lane + 1) * 24;
@@ -81,8 +92,8 @@ __global__ void project(const Job *jobs, const half *x, float *partial, int rows
     int shift = (32 - (end & 31)) & 31;
     int ar0 = lane / 4, ar1 = ar0 + 8, ak = 2 * (lane % 4);
     float c[2][4] = {};
-    int kb = int(blockIdx.z) * KT / splits;
-    int ke = (int(blockIdx.z) + 1) * KT / splits;
+    int kb = split * KT / splits;
+    int ke = (split + 1) * KT / splits;
     for (int kt = kb; kt < ke; ++kt) {
         const uint32_t *tile = tiles + (kt * (N / 16) + nt) * 24;
         uint64_t windows = ((uint64_t(tile[first]) << 32) | tile[last]) >> shift;
@@ -105,7 +116,7 @@ __global__ void project(const Job *jobs, const half *x, float *partial, int rows
         mma(a, b[0], b[1], c[0]);
         mma(a, b[2], b[3], c[1]);
     }
-    float *out = partial + (size_t(blockIdx.z) * rows + job.begin) * N + nt * 16 + ak;
+    float *out = partial + (size_t(split) * rows + job.begin) * N + nt * 16 + ak;
 #pragma unroll
     for (int side = 0; side < 2; ++side) {
         if (ar0 < job.count)
@@ -139,13 +150,15 @@ __device__ __forceinline__ void had(float (&v)[4]) {
         v[i] *= HAD_SCALE;
 }
 
-template <int projection>
+template <int projection, bool paired = false>
 __global__ void rotate_input(const RoutedRow *routes, const float *in, half *out) {
     constexpr int K = projection == Down ? I : H;
     int row = blockIdx.y, k = 4 * (blockIdx.x * blockDim.x + threadIdx.x);
     if (k >= K)
         return;
-    const half *scale = suh(routes[row].expert, projection);
+    const int which = paired && blockIdx.z != 0 ? Up : projection;
+    if constexpr (paired) out += size_t(blockIdx.z) * gridDim.y * K;
+    const half *scale = suh(routes[row].expert, which);
     const int input_row = projection == Down ? row : routes[row].token;
     float v[4];
 #pragma unroll
@@ -186,15 +199,54 @@ __global__ void rotate_output(const RoutedRow *routes, const float *partial, flo
     }
 }
 
+__device__ __forceinline__ half routed_activation(half g, half u) {
+    const half limit = __float2half(10.f);
+    const half silu = __hmul(g, hrcp(__hadd(__float2half(1.f), hexp(__hneg(g)))));
+    return __hmul(__hmin(silu, limit), __hmin(limit, __hmax(__hneg(limit), u)));
+}
+
 __global__ void swiglu(float *gate, const float *up, int length) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < length) {
-        const half g = __float2half(gate[t]);
-        const half limit = __float2half(10.f);
-        const half silu = __hmul(g, hrcp(__hadd(__float2half(1.f), hexp(__hneg(g)))));
-        const half u = __hmin(limit, __hmax(__hneg(limit), __float2half(up[t])));
-        gate[t] = __half2float(__hmul(__hmin(silu, limit), u));
+    if (t < length)
+        gate[t] = __half2float(routed_activation(__float2half(gate[t]), __float2half(up[t])));
+}
+
+// Finish both output transforms and immediately run the input transform of
+// the down projection. Every Hadamard spans the same warp and 128 features.
+__global__ void prepare_down(const RoutedRow *routes, const float *partial, half *down,
+                             int rows, int splits) {
+    int row = blockIdx.y, col = 4 * (blockIdx.x * blockDim.x + threadIdx.x);
+    if (col >= I) return;
+    size_t off = size_t(row) * I + col;
+    size_t stride = size_t(rows) * I;
+    const float *gp = partial + off, *up = gp + size_t(splits) * stride;
+    float g[4] = {}, u[4] = {};
+    for (int split = 0; split < splits; ++split) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            g[j] += gp[size_t(split) * stride + j];
+            u[j] += up[size_t(split) * stride + j];
+        }
     }
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        g[j] = __half2float(__float2half(g[j]));
+        u[j] = __half2float(__float2half(u[j]));
+    }
+    had(g);
+    had(u);
+    const char *expert = routes[row].expert;
+    const half *gs = svh(expert, Gate), *us = svh(expert, Up), *ds = suh(expert, Down);
+    float d[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        half gate = __hmul(__float2half(g[j]), gs[col + j]);
+        half up_value = __hmul(__float2half(u[j]), us[col + j]);
+        d[j] = __half2float(__hmul(routed_activation(gate, up_value), ds[col + j]));
+    }
+    had(d);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) down[off+j] = __float2half(d[j]);
 }
 
 // Shared experts use FP32 SiLU on the clipped gate. Widen the exponential
@@ -274,6 +326,19 @@ void launch_ffn(Job *device_jobs, RoutedRow *device_rows, int n_jobs, int rows, 
     launch_projection<Down, mcg>(device_jobs, device_rows, n_jobs, rows, splits, gate, rotated,
                             partial, weighted);
 }
+template <bool mcg>
+void launch_fused(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows, int splits,
+                  const float *x, half *rotated, float *partial, float *weighted) {
+    // The partial allocation is sized for H down columns, sufficient for
+    // 2*I gate/up columns. The contiguous gate/up/rotated buffers hold 2*H halves.
+    static_assert(2 * I <= H && 2 * I * sizeof(float) >= H * sizeof(half));
+    rotate_input<Gate, true><<<dim3((H+511)/512,rows,2),128>>>(routes, x, rotated);
+    project<Gate, mcg, true><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
+    prepare_down<<<dim3((I+511)/512,rows),128>>>(routes, partial, rotated, rows, splits);
+    project<Down, mcg><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
+    rotate_output<Down><<<dim3((H+511)/512,rows),128>>>(routes, partial, weighted, rows, splits);
+}
+
 } // namespace
 
 extern "C" const char *ds_moe_error(int e) { return cudaGetErrorString(cudaError_t(e)); }
@@ -365,7 +430,7 @@ extern "C" int ds_moe_finish(const float *routed, float *shared_out, size_t coun
 // group also uses the default stream, including uploads into reused slots.
 extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *jobs, int n_jobs,
                               const RoutedRow *routes, int rows, const float *x, float *weighted,
-                              int mcg, int verify, int inline_metadata) {
+                              int mcg, int verify, int inline_metadata, int fused) {
     // Verifying several positions must use the same K-reduction boundaries as
     // serial decoding, even if the block touches 32 or more distinct experts.
     int splits = verify || n_jobs < 32 ? 8 : 2;
@@ -404,7 +469,11 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
         CHECK(cudaMemcpy(device_jobs, jobs, jobs_size, cudaMemcpyHostToDevice));
         CHECK(cudaMemcpy(device_rows, routes, size_t(rows) * sizeof(RoutedRow), cudaMemcpyHostToDevice));
     }
-    if (mcg)
+    if (fused) {
+        half *work = reinterpret_cast<half *>(gate);
+        if (mcg) launch_fused<true>(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
+        else launch_fused<false>(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
+    } else if (mcg)
         launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
     else
         launch_ffn<false>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
@@ -426,7 +495,7 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
     CHECK(cudaMalloc(&io.ptr, 2 * count * sizeof(float)));
     CHECK(cudaMemcpy(io.ptr, x, count * sizeof(float), cudaMemcpyHostToDevice));
     int code = ds_moe_run_dev(scratch, scratch_bytes, jobs, n_jobs, routes.data(), rows,
-                              io.ptr, io.ptr + count, 0, 0, 1);
+                              io.ptr, io.ptr + count, 0, 0, 1, 0);
     if (code)
         return code;
     return int(cudaMemcpy(y, io.ptr + count, count * sizeof(float), cudaMemcpyDeviceToHost));

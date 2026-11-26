@@ -67,6 +67,7 @@ unsafe extern "C" {
         mcg: i32,
         verify: i32,
         inline_metadata: i32,
+        fused: i32,
     ) -> i32;
     #[cfg(test)]
     fn ds_moe_run(
@@ -200,6 +201,7 @@ struct DeviceCache {
     cached_capacity: bool,
     packed_upload: bool,
     inline_metadata: bool,
+    fused: bool,
     metrics: bool,
 }
 
@@ -225,6 +227,7 @@ impl DeviceCache {
             cached_capacity: switch("DS4_MOE_CACHED_CAPACITY", true)?,
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
             inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
+            fused: switch("DS4_MOE_FUSED", false)?,
             metrics: switch("DS4_MOE_STATS", false)?,
         })
     }
@@ -477,6 +480,7 @@ fn run_group<const K: usize>(
             i32::from(matches!(layer, Layer::Draft(_))),
             i32::from(rt.verification && matches!(layer, Layer::Backbone(_))),
             device.inline_metadata.into(),
+            device.fused.into(),
         )
     };
     device.scratch = scratch as usize;
