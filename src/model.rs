@@ -191,6 +191,7 @@ impl Model {
         self.rt.layer(0)?;
         let mut h = residual::embed(&mut self.rt, &ids[pos..pos + b])?;
         let mut mix = residual::initial_mix(&mut self.rt, b)?;
+        let mut engram_rows: Option<crate::engram::EngramRows> = None;
         for layer in 0..40 {
             let stem = format!("layers.{layer}");
             if layer == 20 {
@@ -200,11 +201,8 @@ impl Model {
                 h = self.rt.to_device(&host_h)?;
                 mix = self.rt.to_device(&host_mix)?;
             }
-            if layer == 1 || layer == 14 {
-                let mut host_h = self.rt.to_host(&h)?;
-                self.engram
-                    .apply(&mut self.rt, layer, ids, pos, &mut host_h)?;
-                h = self.rt.to_device(&host_h)?;
+            if let Some(rows) = engram_rows.take() {
+                rows.apply(&mut self.rt, &mut h)?;
             }
             if capture_features && layer >= 37 {
                 if layer == 37 {
@@ -220,6 +218,15 @@ impl Model {
                     moe::forward_dev(&mut self.rt, layer, &input, b)?
                 };
                 residual::expand(&self.rt, &mut h, &output, &mix, b)?;
+                if branch == "attn" && (layer == 0 || layer == 13) {
+                    // Gather the next Engram's mmap rows while this layer's
+                    // attention output and residual expansion run on the GPU.
+                    engram_rows =
+                        Some(
+                            self.engram
+                                .gather(&self.rt.weights, layer + 1, ids, pos, b)?,
+                        );
+                }
             }
         }
         let logits = if logit_rows > 0 {
