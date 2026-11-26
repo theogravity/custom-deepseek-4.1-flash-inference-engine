@@ -23,6 +23,10 @@ fn payload_size(pos: usize) -> Result<usize> {
 }
 
 impl AttentionState {
+    pub(crate) fn snapshot_bytes(pos: usize) -> Result<usize> {
+        payload_size(pos)
+    }
+
     pub fn encode_snapshot(&self, pos: usize) -> Result<Vec<u8>> {
         self.encode_snapshot_with_tail(pos, 0)
     }

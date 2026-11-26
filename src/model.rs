@@ -433,13 +433,17 @@ impl Model {
             .map(|d| d.rotation_snapshot(&mut self.rt, session.pos))
             .transpose()?;
         let draft = draft.as_deref().unwrap_or_default();
-        let mut payload = session
-            .cache
-            .encode_snapshot_with_tail(session.pos, draft.len() + 16)?;
-        payload.extend_from_slice(draft);
-        payload.extend_from_slice(&(draft.len() as u64).to_le_bytes());
-        payload.extend_from_slice(b"DS4LIVE1");
-        let handle = backing.put(payload)?;
+        let tail = draft.len() + 16;
+        let bytes = AttentionState::snapshot_bytes(session.pos)?
+            .checked_add(tail)
+            .context("live KV image size overflow")?;
+        let handle = backing.put_with(bytes, || {
+            let mut payload = session.cache.encode_snapshot_with_tail(session.pos, tail)?;
+            payload.extend_from_slice(draft);
+            payload.extend_from_slice(&(draft.len() as u64).to_le_bytes());
+            payload.extend_from_slice(b"DS4LIVE1");
+            Ok(payload)
+        })?;
         session.suspended = Some(handle);
         session.cache = AttentionState::default();
         if let Some(draft) = session.draft.take() {
