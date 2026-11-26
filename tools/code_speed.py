@@ -16,13 +16,15 @@ PROMPTS = {
 }
 
 
-def request(args, prompt, limit, key):
+def request(args, prompt, limit, key, *, bypass_proxy_cache=False):
     payload = {
         "model": args.model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": limit, "temperature": args.temperature, "reasoning_effort": "none",
         "stream": True, "stream_options": {"include_usage": True},
     }
+    if bypass_proxy_cache:
+        payload["cache"] = {"no-cache": True, "no-store": True}
     req = Request(args.base.rstrip("/") + "/chat/completions", data=json.dumps(payload).encode(),
                   headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
     start = time.perf_counter()
@@ -71,6 +73,8 @@ def main():
     parser.add_argument("--model", default="DeepSeek V4.1 Flash")
     parser.add_argument("--rounds", type=int, default=3, help="first round warms up, later rounds are measured")
     parser.add_argument("--tokens", type=int, default=1024)
+    parser.add_argument("--bypass-proxy-cache", action="store_true",
+                        help="disable both LiteLLM response cache reads and writes")
     parser.add_argument("--temperature", type=float, default=0.)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--edit-source", type=Path, help="benchmark the selfupdate.go edit instead of new code")
@@ -87,7 +91,7 @@ def main():
     rates = []
     for rep in range(args.rounds):
         for name, prompt in prompts.items():
-            row, text = request(args, prompt, args.tokens, key)
+            row, text = request(args, prompt, args.tokens, key, bypass_proxy_cache=args.bypass_proxy_cache)
             print(json.dumps(dict(workload=name, warmup=rep == 0, **row)), flush=True)
             if args.save_output:
                 (args.save_output / f"{name}-{rep}.txt").write_text(text)
