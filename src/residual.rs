@@ -120,7 +120,7 @@ pub(super) fn capture(
 
 pub(crate) fn initial_mix(rt: &mut Runtime, batch: usize) -> Result<Dev> {
     let mut weights = vec![0.; batch * CONTROLS];
-    for row in weights.chunks_exact_mut(CONTROLS) {
+    for row in weights.as_chunks_mut::<CONTROLS>().0 {
         row[0] = 1.;
     }
     rt.to_device(&weights)
@@ -322,7 +322,7 @@ mod tests {
                 .map(|t| [0.125, -0.53, 0.8 + t as f32 / 8., 0.2])
                 .collect();
             let mut controls = vec![0.; batch * CONTROLS];
-            for (row, p) in controls.chunks_exact_mut(CONTROLS).zip(&pre) {
+            for (row, p) in controls.as_chunks_mut::<CONTROLS>().0.iter_mut().zip(&pre) {
                 row[..4].copy_from_slice(p);
             }
             let mut stream = rt.to_device(&h)?;
@@ -338,8 +338,10 @@ mod tests {
                 let projected = rt.to_device(&projection)?;
                 let inputs = collapse(&h, &pre, &norm);
                 let mixes: Vec<_> = h
-                    .chunks_exact(4 * DIM)
-                    .zip(projection.chunks_exact(CONTROLS))
+                    .as_chunks::<{ 4 * DIM }>()
+                    .0
+                    .iter()
+                    .zip(projection.as_chunks::<CONTROLS>().0.iter())
                     .map(|(row, p)| {
                         let inv = 1.
                             / (row.iter().map(|v| v * v).sum::<f32>() / (4 * DIM) as f32 + 1e-20)
@@ -374,7 +376,7 @@ mod tests {
                         close_bf16(&actual_input, &inputs);
                     }
                     let actual = rt.to_host(candidate)?;
-                    for (row, m) in actual.chunks_exact(CONTROLS).zip(&mixes) {
+                    for (row, m) in actual.as_chunks::<CONTROLS>().0.iter().zip(&mixes) {
                         for (&a, &b) in row
                             .iter()
                             .zip(m.pre.iter().chain(&m.post).chain(m.comb.iter().flatten()))

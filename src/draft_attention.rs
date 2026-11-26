@@ -470,7 +470,7 @@ mod tests {
             )?;
             let keys: Vec<_> = physical.into_iter().flatten().chain(fresh).collect();
             for t in 0..width {
-                for h in 0..HEADS {
+                for (h, &sink) in sinks.iter().enumerate() {
                     let offset = (t * HEADS + h) * DIM;
                     let query = queries[offset];
                     let mut max = -1e30;
@@ -491,7 +491,7 @@ mod tests {
                             sum += p;
                         }
                     }
-                    let expected = bf(value / (sum + (sinks[h] - max).exp()));
+                    let expected = bf(value / (sum + (sink - max).exp()));
                     assert!(
                         (actual[offset + 1] - expected).abs() < 1e-5,
                         "start {start}, rows {valid}, query {t}, head {h}: {} vs {expected}",
