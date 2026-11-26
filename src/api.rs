@@ -3,6 +3,8 @@ use crate::{
     chat::{self, Delta, Parser},
     model::{Model, Session, Step},
 };
+mod scheduler;
+use crate::swap::{SwapStats, SwapStore};
 use anyhow::{anyhow, ensure, Context, Result};
 use axum::{
     body::Bytes,
@@ -16,6 +18,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(test)]
+use scheduler::BatchEngine;
+use scheduler::{schedule, Limits, ServingModel};
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -71,6 +76,7 @@ struct ServerState {
     context: usize,
     encoders: Arc<Semaphore>,
     metrics: Arc<Mutex<Metrics>>,
+    swap: SwapStore,
 }
 struct Prepared {
     ids: Vec<u32>,
@@ -358,6 +364,19 @@ async fn models() -> Json<Value> {
 #[derive(Default, Clone, serde::Serialize)]
 struct Metrics {
     max_seqs: usize,
+    max_live_seqs: usize,
+    swap_quantum_steps: usize,
+    logical_active: usize,
+    peak_logical_active: usize,
+    resident: usize,
+    waiting: usize,
+    swapped: usize,
+    peak_swapped: usize,
+    rotations: u64,
+    resumes: u64,
+    suspend_failures: u64,
+    resume_failures: u64,
+    swap: SwapStats,
     active: usize,
     prefilling: usize,
     decoding: usize,
@@ -378,6 +397,7 @@ async fn metrics(State(s): State<Arc<ServerState>>) -> Json<Metrics> {
     (sample.multi_target_passes, sample.peak_target_batch) =
         crate::model::batch::target_batch_stats();
     sample.six_target_passes = crate::model::batch::six_target_passes();
+    sample.swap = s.swap.stats();
     Json(sample)
 }
 fn router(state: Arc<ServerState>) -> Router {
@@ -402,24 +422,17 @@ fn router(state: Arc<ServerState>) -> Router {
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
 }
-pub fn serve(mut model: Model, tokenizer: Tokenizer, addr: &str, key: String) -> Result<()> {
+pub fn serve(model: Model, tokenizer: Tokenizer, addr: &str, key: String) -> Result<()> {
     ensure!(!key.trim().is_empty(), "a nonempty API key is required");
     let mut plain = tokenizer.clone();
     plain.with_added_vocabulary(AddedVocabulary::new());
-    let max_seqs = match std::env::var("DS4_MAX_SEQS") {
-        Ok(s) => s
-            .parse::<usize>()
-            .context("DS4_MAX_SEQS must be an integer")?,
-        Err(std::env::VarError::NotPresent) => MAX_SEQS,
-        Err(err) => return Err(err.into()),
-    };
-    ensure!(
-        (1..=MAX_SEQS).contains(&max_seqs),
-        "DS4_MAX_SEQS must be between 1 and {MAX_SEQS}"
-    );
-    let (queue, jobs) = mpsc::channel(QUEUE);
+    let limits = Limits::configured()?;
+    let swap = SwapStore::configured()?;
+    let (queue, jobs) = mpsc::channel(limits.live.max(QUEUE));
     let metrics = Arc::new(Mutex::new(Metrics {
-        max_seqs,
+        max_seqs: limits.resident,
+        max_live_seqs: limits.live,
+        swap_quantum_steps: limits.quantum,
         ..Metrics::default()
     }));
     let state = Arc::new(ServerState {
@@ -428,7 +441,8 @@ pub fn serve(mut model: Model, tokenizer: Tokenizer, addr: &str, key: String) ->
         plain,
         queue,
         context: model.max_context(),
-        encoders: Arc::new(Semaphore::new(QUEUE)),
+        encoders: Arc::new(Semaphore::new(limits.live.max(QUEUE))),
+        swap: swap.clone(),
         metrics: metrics.clone(),
     });
     let tokenizer = state.tokenizer.clone();
@@ -437,9 +451,10 @@ pub fn serve(mut model: Model, tokenizer: Tokenizer, addr: &str, key: String) ->
         .build()?;
     let app = router(state);
     let handle = runtime.handle().clone();
+    let mut engine = ServingModel { model, swap };
     let worker = std::thread::Builder::new()
         .name("inference".into())
-        .spawn(move || schedule(&mut model, &tokenizer, jobs, max_seqs, &metrics, &handle))?;
+        .spawn(move || schedule(&mut engine, &tokenizer, jobs, limits, &metrics, &handle))?;
     let served = runtime.block_on(async move {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -687,28 +702,6 @@ fn done(tx: Option<&EventChannel>) -> Result<()> {
     }
     Ok(())
 }
-trait BatchEngine {
-    type Session;
-    fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Self::Session>;
-    fn prefill(session: &Self::Session) -> bool;
-    fn processed(session: &Self::Session) -> usize;
-    fn step(&mut self, sessions: &mut [&mut Self::Session]) -> Vec<Result<Step>>;
-}
-impl BatchEngine for Model {
-    type Session = Session;
-    fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Session> {
-        self.start_request(ids, limit, temperature)
-    }
-    fn prefill(session: &Session) -> bool {
-        session.is_prefill()
-    }
-    fn processed(session: &Session) -> usize {
-        session.processed_tokens()
-    }
-    fn step(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
-        self.step_batch(sessions)
-    }
-}
 type Decoder<'t> = DecodeStream<
     't,
     ModelWrapper,
@@ -726,6 +719,8 @@ struct Active<'t, S> {
     reply: Reply,
     count: usize,
     ready: bool,
+    slice_steps: usize,
+    suspend_retry: Option<(Instant, Duration)>,
 }
 impl<S> Active<'_, S> {
     fn consume(&mut self, step: Step) -> Result<Option<Value>> {
@@ -793,145 +788,6 @@ fn respond(reply: Reply, wire: Wire, result: Result<Value>, runtime: &tokio::run
         }
     }
 }
-fn admit<'t, E: BatchEngine>(
-    engine: &mut E,
-    tokenizer: &'t Tokenizer,
-    job: Job,
-    runtime: &tokio::runtime::Handle,
-) -> Option<Active<'t, E::Session>> {
-    let Job { input, wire, reply } = job;
-    if reply.closed() {
-        return None;
-    }
-    let output = Output::new(wire, &input);
-    let session = output
-        .start(reply.stream())
-        .and_then(|_| engine.start(input.ids, input.max_tokens, input.temperature));
-    match session {
-        Ok(session) => Some(Active {
-            session,
-            decoder: tokenizer.decode_stream(false),
-            parser: Parser::new(input.thinking, input.tools, input.stops),
-            output,
-            reply,
-            count: 0,
-            ready: true,
-        }),
-        Err(err) => {
-            respond(reply, wire, Err(err), runtime);
-            None
-        }
-    }
-}
-fn record<E: BatchEngine>(
-    metrics: &Mutex<Metrics>,
-    slots: &[Option<Active<'_, E::Session>>],
-    batch: bool,
-) {
-    let mut sample = metrics.lock().unwrap();
-    let mut runnable = 0;
-    let mut decode_rows = 0;
-    sample.active = 0;
-    sample.prefilling = 0;
-    sample.processed_tokens = 0;
-    for a in slots.iter().flatten() {
-        sample.active += 1;
-        let prefill = E::prefill(&a.session);
-        sample.prefilling += usize::from(prefill);
-        sample.processed_tokens += E::processed(&a.session);
-        if a.ready {
-            runnable += 1;
-            decode_rows += usize::from(!prefill);
-        }
-    }
-    sample.decoding = sample.active - sample.prefilling;
-    sample.peak_active = sample.peak_active.max(sample.active);
-    sample.peak_processed_tokens = sample.peak_processed_tokens.max(sample.processed_tokens);
-    if batch && runnable > 0 {
-        sample.batch_steps += 1;
-        sample.multi_sequence_steps += u64::from(runnable > 1);
-        sample.multi_decode_steps += u64::from(decode_rows > 1);
-        sample.peak_batch_size = sample.peak_batch_size.max(runnable);
-        sample.peak_decode_batch = sample.peak_decode_batch.max(decode_rows);
-    }
-}
-fn schedule<E: BatchEngine>(
-    engine: &mut E,
-    tokenizer: &Tokenizer,
-    mut jobs: mpsc::Receiver<Job>,
-    max_seqs: usize,
-    metrics: &Mutex<Metrics>,
-    runtime: &tokio::runtime::Handle,
-) {
-    let mut slots: Vec<_> = (0..max_seqs).map(|_| None).collect();
-    loop {
-        if slots.iter().all(Option::is_none) {
-            record::<E>(metrics, &slots, false);
-            let Some(job) = jobs.blocking_recv() else {
-                break;
-            };
-            slots[0] = admit(engine, tokenizer, job, runtime);
-        }
-        // Traverse the fixed number of slots once before each model step so an
-        // endless queue of cancelled requests cannot starve admitted sessions.
-        for slot in slots.iter_mut().filter(|s| s.is_none()) {
-            let Ok(job) = jobs.try_recv() else { break };
-            *slot = admit(engine, tokenizer, job, runtime);
-        }
-        for slot in &mut slots {
-            let Some(a) = slot else { continue };
-            if a.reply.closed() {
-                *slot = None;
-            } else if let Some(tx) = a.reply.stream() {
-                match tx.ready() {
-                    Ok(ready) => a.ready = ready,
-                    // The stream already stopped reading or disconnected. Closing
-                    // this sender signals EOF without blocking the other rows.
-                    Err(_) => *slot = None,
-                }
-            }
-        }
-        record::<E>(metrics, &slots, true);
-        let mut states: Vec<_> = slots
-            .iter_mut()
-            .flatten()
-            .filter(|a| a.ready)
-            .map(|a| &mut a.session)
-            .collect();
-        if states.is_empty() {
-            if slots.iter().any(Option::is_some) {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            continue;
-        }
-        let outcomes = engine.step(&mut states);
-        let expected = states.len();
-        // Include the newly committed target KV before removing any finished row.
-        record::<E>(metrics, &slots, false);
-        let cardinality_ok = outcomes.len() == expected;
-        let mut outcomes = outcomes.into_iter();
-        for slot in &mut slots {
-            let Some(a) = slot else { continue };
-            if !a.ready {
-                continue;
-            }
-            let result = if cardinality_ok {
-                outcomes.next().unwrap().and_then(|step| a.consume(step))
-            } else {
-                Err(anyhow!(
-                    "inference returned a different number of results than sessions"
-                ))
-            };
-            let terminal = match result {
-                Ok(None) => continue,
-                Ok(Some(v)) => Ok(v),
-                Err(e) => Err(e),
-            };
-            let a = slot.take().unwrap();
-            respond(a.reply, a.output.wire, terminal, runtime);
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,13 +797,22 @@ mod tests {
         id: u32,
         rounds: usize,
         limit: usize,
+        prefill_ticks: usize,
+        saved: Option<crate::swap::SwapHandle>,
     }
+    #[derive(Default)]
     struct TestEngine {
         calls: Vec<Vec<u32>>,
         // Inject requests after the first quantum of an existing request.
         arrivals: Option<(mpsc::Sender<Job>, Vec<Job>)>,
         stalled: Option<mpsc::Receiver<Result<Event, Infallible>>>,
         output_token: u32,
+        prefill_ticks: usize,
+        store: Option<SwapStore>,
+        fail_resume: Option<u32>,
+        large_state: Option<u32>,
+        cancel_on_suspend: Option<(u32, oneshot::Receiver<Result<Value>>)>,
+        restored: Vec<u32>,
     }
     impl BatchEngine for TestEngine {
         type Session = TestSession;
@@ -956,13 +821,43 @@ mod tests {
                 id: ids[0],
                 rounds: 0,
                 limit,
+                prefill_ticks: self.prefill_ticks,
+                saved: None,
             })
         }
         fn prefill(s: &TestSession) -> bool {
-            s.rounds == 0
+            s.rounds <= s.prefill_ticks
         }
         fn processed(s: &TestSession) -> usize {
             s.rounds
+        }
+        fn suspend(&mut self, s: &mut TestSession) -> Result<()> {
+            assert!(s.saved.is_none());
+            let store = self
+                .store
+                .as_ref()
+                .context("unexpected suspend in resident-only test")?;
+            let mut bytes = s.rounds.to_le_bytes().to_vec();
+            if self.large_state == Some(s.id) {
+                bytes.resize(1024, 0);
+            }
+            s.saved = Some(store.put(bytes)?);
+            s.rounds = 0;
+            if self
+                .cancel_on_suspend
+                .as_ref()
+                .is_some_and(|(id, _)| *id == s.id)
+            {
+                self.cancel_on_suspend.take();
+            }
+            Ok(())
+        }
+        fn resume(&mut self, s: &mut TestSession) -> Result<()> {
+            self.restored.push(s.id);
+            ensure!(self.fail_resume != Some(s.id), "unreadable test snapshot");
+            let image = s.saved.take().unwrap().read()?;
+            s.rounds = usize::from_le_bytes(image.as_ref().try_into()?);
+            Ok(())
         }
         fn step(&mut self, sessions: &mut [&mut TestSession]) -> Vec<Result<Step>> {
             self.calls.push(sessions.iter().map(|s| s.id).collect());
@@ -978,11 +873,16 @@ mod tests {
             sessions
                 .iter_mut()
                 .map(|s| {
+                    assert!(s.saved.is_none());
                     ensure!(s.id != 99, "bad session");
                     s.rounds += 1;
                     Ok(Step {
-                        tokens: vec![self.output_token],
-                        finished: s.rounds == s.limit,
+                        tokens: if s.rounds > s.prefill_ticks {
+                            vec![self.output_token]
+                        } else {
+                            vec![]
+                        },
+                        finished: s.rounds == s.limit + s.prefill_ticks,
                         eos: false,
                     })
                 })
@@ -1031,10 +931,22 @@ mod tests {
             arrivals: Some((tx, arrivals)),
             stalled: None,
             output_token: token,
+            ..Default::default()
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let metrics = Mutex::new(Metrics::default());
-        schedule(&mut engine, &tok, rx, MAX_SEQS, &metrics, runtime.handle());
+        schedule(
+            &mut engine,
+            &tok,
+            rx,
+            Limits {
+                resident: MAX_SEQS,
+                live: 12,
+                quantum: 32,
+            },
+            &metrics,
+            runtime.handle(),
+        );
         assert_eq!(engine.calls[0], [0]);
         assert_eq!(engine.calls[1], [0, 1, 2, 99, 4, 5]);
         assert!(engine.calls[2].contains(&0) && engine.calls[2].contains(&6));
@@ -1072,10 +984,22 @@ mod tests {
             arrivals: None,
             stalled: Some(stalled),
             output_token: token,
+            ..Default::default()
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let metrics = Mutex::new(Metrics::default());
-        schedule(&mut engine, &tok, rx, 2, &metrics, runtime.handle());
+        schedule(
+            &mut engine,
+            &tok,
+            rx,
+            Limits {
+                resident: 2,
+                live: 12,
+                quantum: 32,
+            },
+            &metrics,
+            runtime.handle(),
+        );
         assert_eq!(engine.calls[0], [1, 2]);
         assert!(engine.calls[1..].iter().all(|rows| rows == &[2]));
         assert_eq!(
@@ -1083,6 +1007,206 @@ mod tests {
             6
         );
     }
+    fn enqueue(
+        count: usize,
+        limit: usize,
+    ) -> (mpsc::Receiver<Job>, Vec<oneshot::Receiver<Result<Value>>>) {
+        let (tx, rx) = mpsc::channel(count);
+        let mut replies = Vec::new();
+        for id in 0..count {
+            let (job, reply) = job(id as u32, limit);
+            tx.try_send(job)
+                .unwrap_or_else(|_| panic!("test queue full"));
+            replies.push(reply);
+        }
+        (rx, replies)
+    }
+
+    #[test]
+    fn twelve_live_requests_take_fair_prefill_and_decode_quanta_across_both_tiers() {
+        let (tok, token) = tokenizer();
+        let (jobs, replies) = enqueue(12, 12);
+        let dir = tempfile::tempdir().unwrap();
+        let store = SwapStore::new(2 * size_of::<usize>(), 1024, Some(dir.path().into())).unwrap();
+        let mut engine = TestEngine {
+            output_token: token,
+            prefill_ticks: 16,
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let metrics = Mutex::new(Metrics::default());
+        schedule(
+            &mut engine,
+            &tok,
+            jobs,
+            Limits {
+                resident: 6,
+                live: 12,
+                quantum: 3,
+            },
+            &metrics,
+            runtime.handle(),
+        );
+        for (id, reply) in replies.into_iter().enumerate() {
+            let message = reply.blocking_recv().unwrap().unwrap();
+            assert_eq!(message["usage"]["completion_tokens"], 12);
+            // Every admitted job began prefill before an original resident could finish prefill.
+            assert!(engine.calls[..16]
+                .iter()
+                .any(|rows| rows.contains(&(id as u32))));
+            assert_eq!(
+                engine
+                    .calls
+                    .iter()
+                    .filter(|rows| rows.contains(&(id as u32)))
+                    .count(),
+                28
+            );
+        }
+        assert!(engine.calls.iter().all(|rows| rows.len() <= 6));
+        for pair in engine.calls[..16].windows(2) {
+            assert!(pair[1].iter().filter(|id| !pair[0].contains(id)).count() <= 1);
+        }
+        let m = metrics.into_inner().unwrap();
+        assert_eq!(
+            (m.peak_logical_active, m.peak_active, m.peak_swapped),
+            (12, 6, 6)
+        );
+        assert_eq!(
+            (m.logical_active, m.resident, m.waiting, m.swapped),
+            (0, 0, 0, 0)
+        );
+        assert!(m.rotations > 6 && m.resumes == m.rotations);
+        let tiers = store.stats();
+        assert!(tiers.ram_reads > 0 && tiers.disk_reads > 0);
+        assert_eq!((tiers.ram_bytes, tiers.disk_bytes), (0, 0));
+    }
+
+    #[test]
+    fn unreadable_and_cancelled_swap_handles_release_and_leave_peers_running() {
+        let (tok, token) = tokenizer();
+        let (jobs, mut replies) = enqueue(5, 12);
+        let store = SwapStore::new(128, 0, None).unwrap();
+        let mut engine = TestEngine {
+            output_token: token,
+            store: Some(store.clone()),
+            cancel_on_suspend: Some((0, replies.remove(0))),
+            fail_resume: Some(1),
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let metrics = Mutex::new(Metrics::default());
+        schedule(
+            &mut engine,
+            &tok,
+            jobs,
+            Limits {
+                resident: 2,
+                live: 5,
+                quantum: 2,
+            },
+            &metrics,
+            runtime.handle(),
+        );
+        assert!(format!(
+            "{:#}",
+            replies.remove(0).blocking_recv().unwrap().unwrap_err()
+        )
+        .contains("unreadable test snapshot"));
+        for reply in replies {
+            assert_eq!(
+                reply.blocking_recv().unwrap().unwrap()["usage"]["completion_tokens"],
+                12
+            );
+        }
+        assert!(!engine.restored.contains(&0));
+        assert_eq!(engine.restored.iter().filter(|&&id| id == 1).count(), 1);
+        let m = metrics.into_inner().unwrap();
+        assert_eq!((m.logical_active, m.swapped, m.resume_failures), (0, 0, 1));
+        assert_eq!(store.stats().ram_bytes, 0);
+    }
+
+    #[test]
+    fn full_backing_keeps_residents_runnable_and_bounds_failed_eviction_attempts() {
+        let (tok, token) = tokenizer();
+        let (jobs, replies) = enqueue(4, 25);
+        let store = SwapStore::new(0, 0, None).unwrap();
+        let mut engine = TestEngine {
+            output_token: token,
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let metrics = Mutex::new(Metrics::default());
+        schedule(
+            &mut engine,
+            &tok,
+            jobs,
+            Limits {
+                resident: 2,
+                live: 4,
+                quantum: 1,
+            },
+            &metrics,
+            runtime.handle(),
+        );
+        for reply in replies {
+            assert_eq!(
+                reply.blocking_recv().unwrap().unwrap()["usage"]["completion_tokens"],
+                25
+            );
+        }
+        let m = metrics.into_inner().unwrap();
+        assert_eq!(
+            (
+                m.peak_logical_active,
+                m.peak_active,
+                m.rotations,
+                m.suspend_failures
+            ),
+            (4, 2, 0, 2)
+        );
+        assert_eq!(store.stats().write_failures, 2);
+    }
+
+    #[test]
+    fn releasing_small_tickets_does_not_retry_an_oversized_resident_every_round() {
+        let (tok, token) = tokenizer();
+        let (jobs, replies) = enqueue(4, 32);
+        let store = SwapStore::new(64, 0, None).unwrap();
+        let mut engine = TestEngine {
+            output_token: token,
+            store: Some(store.clone()),
+            large_state: Some(0),
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let metrics = Mutex::new(Metrics::default());
+        schedule(
+            &mut engine,
+            &tok,
+            jobs,
+            Limits {
+                resident: 2,
+                live: 4,
+                quantum: 1,
+            },
+            &metrics,
+            runtime.handle(),
+        );
+        for reply in replies {
+            assert_eq!(
+                reply.blocking_recv().unwrap().unwrap()["usage"]["completion_tokens"],
+                32
+            );
+        }
+        let m = metrics.into_inner().unwrap();
+        assert!(m.resumes > 10);
+        assert_eq!((m.suspend_failures, m.resume_failures), (1, 0));
+        assert_eq!(store.stats().ram_bytes, 0);
+    }
+
     #[test]
     fn backed_up_stream_expires_without_waiting_on_the_compute_thread() {
         let (tx, _rx) = mpsc::channel(1);
