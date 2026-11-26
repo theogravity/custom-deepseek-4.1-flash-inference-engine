@@ -176,7 +176,7 @@ mod tests {
             *b = (i * 13 % 251) as u8;
         }
         let mut restored = AttentionState::decode_snapshot(&bytes, pos)?;
-        assert!(restored.scratch.is_empty() && restored.picks.is_empty());
+        assert!(restored.freqs.is_empty() && restored.picks.is_empty());
         assert_eq!(restored.windows[&0].rows[0], u16::from_le_bytes([0, 13]));
         assert!(restored
             .windows

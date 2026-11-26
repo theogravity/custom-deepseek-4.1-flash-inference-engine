@@ -24,9 +24,9 @@ struct Buffer {
     size_t capacity = 0;
     ~Buffer() { if (ptr) cudaFree(ptr); }
 
-    cudaError_t grow(size_t bytes, size_t preserve = 0) {
+    cudaError_t grow(size_t bytes, size_t preserve = 0, bool exact = false) {
         if (bytes <= capacity) return cudaSuccess;
-        size_t n = std::max(bytes, capacity + capacity / 2);
+        size_t n = exact ? bytes : std::max(bytes, capacity + capacity / 2);
         void *next = nullptr;
         cudaError_t rc = cudaMalloc(&next, n);
         if (rc != cudaSuccess) return rc;
@@ -280,7 +280,11 @@ __global__ void score_keys(const uint8_t *keys, const float *queries, const floa
 
 extern "C" void *ds4_attn_buffer_new() { return new(std::nothrow) Buffer; }
 extern "C" void ds4_attn_buffer_free(int dev, void *buffer) {
-    cudaSetDevice(dev); delete static_cast<Buffer *>(buffer);
+    int prior;
+    if (cudaGetDevice(&prior) != cudaSuccess) return;
+    if (cudaSetDevice(dev) != cudaSuccess) return;
+    delete static_cast<Buffer *>(buffer);
+    if (prior != dev) cudaSetDevice(prior);
 }
 extern "C" int ds4_attn_upload(int dev, void *buffer, const uint8_t *bytes,
                                 size_t old, size_t n) {
@@ -360,20 +364,34 @@ extern "C" int ds4_attn_sparse(int dev, void *scratch, const float *queries, con
     return (int)cudaGetLastError();
 }
 
+struct FastWorkspace {
+    Layout layout;
+    int tiles, cols;
+    size_t ko, so, po, mo, no;
+    FastWorkspace(int span, int width, int batch) {
+        tiles = (span + width + 63) / 64;
+        cols = tiles * 64;
+        const size_t nh = size_t(batch)*heads;
+        ko = layout.slice<__nv_bfloat16>(size_t(batch)*cols*dim);
+        so = layout.slice<float>(nh*cols);
+        po = layout.slice<__nv_bfloat16>(nh*cols);
+        mo = layout.slice<float>(nh*tiles);
+        no = layout.slice<float>(nh);
+    }
+};
+extern "C" size_t ds4_attn_sparse_bytes(int fast, int span, int width, int batch) {
+    return fast ? FastWorkspace(span,width,batch).layout.used : size_t(batch)*width*dim*sizeof(__nv_bfloat16);
+}
 extern "C" int ds4_attn_sparse_fast(int dev, void *scratch, const float *queries, const uint16_t *prior,
         const uint16_t *current, int pos, int tile, int span, int decode, const void *cache,
         const int *ids, int width, const float *sinks, int batch, float *out) {
     TRY(cudaSetDevice(dev));
     auto *buf = static_cast<Buffer *>(scratch);
-    int tiles = (span + width + 63) / 64, cols = tiles * 64;
-    Layout l;
-    size_t nh = size_t(batch)*heads;
-    auto ko = l.slice<__nv_bfloat16>(size_t(batch)*cols*dim);
-    auto so = l.slice<float>(nh*cols), po = l.slice<__nv_bfloat16>(nh*cols);
-    auto mo = l.slice<float>(nh*tiles), no = l.slice<float>(nh);
-    TRY(buf->grow(l.used));
-    auto *keys = at<__nv_bfloat16>(buf,ko), *probs = at<__nv_bfloat16>(buf,po);
-    auto *scores = at<float>(buf,so), *scales = at<float>(buf,mo), *norm = at<float>(buf,no);
+    FastWorkspace work(span,width,batch);
+    int cols=work.cols, tiles=work.tiles;
+    TRY(buf->grow(work.layout.used));
+    auto *keys = at<__nv_bfloat16>(buf,work.ko), *probs = at<__nv_bfloat16>(buf,work.po);
+    auto *scores = at<float>(buf,work.so), *scales = at<float>(buf,work.mo), *norm = at<float>(buf,work.no);
     const auto *kv = width ? static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr) : nullptr;
     fast_keys<<<dim3(cols,batch),block>>>(reinterpret_cast<const __nv_bfloat16 *>(prior),
         reinterpret_cast<const __nv_bfloat16 *>(current),kv,ids,width,pos,tile,span,decode,keys);
@@ -405,6 +423,9 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
 
 // The Rust caller reserves the full next allocation before growth. Both copies
 // coexist until the preserved prefix has moved to the larger allocation.
+extern "C" size_t ds4_attn_capacity(void *handle) {
+    return static_cast<const Buffer *>(handle)->capacity;
+}
 extern "C" size_t ds4_attn_growth(void *handle, size_t request) {
     auto capacity=static_cast<const Buffer *>(handle)->capacity;
     return request <= capacity ? 0 : std::max(request,capacity+capacity/2);
@@ -472,7 +493,7 @@ extern "C" int ds4_attn_normalize_raw(int dev, float *x, const float *g, int n) 
 }
 extern "C" int ds4_attn_prepare_tail(int dev,void *cache,size_t old,size_t bytes) {
     TRY(cudaSetDevice(dev));
-    return static_cast<Buffer *>(cache)->grow(old+bytes,old);
+    return static_cast<Buffer *>(cache)->grow(old+bytes,old,true);
 }
 extern "C" int ds4_attn_pack_compressed(int dev,const float *values,const float *keys,
         uint8_t *value_bytes,uint8_t *key_bytes,int n) {

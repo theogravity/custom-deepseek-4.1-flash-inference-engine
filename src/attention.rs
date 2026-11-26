@@ -30,6 +30,8 @@ const NOPE: usize = DIM - ROPE;
 const INDEX_BYTES: usize = INDEX_DIM + 4;
 
 unsafe extern "C" {
+    fn ds4_attn_sparse_bytes(fast: i32, span: i32, width: i32, batch: i32) -> usize;
+    fn ds4_attn_capacity(buf: *mut c_void) -> usize;
     fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
     fn ds4_attn_prepare_tail(dev: i32, cache: *mut c_void, old: usize, bytes: usize) -> i32;
     fn ds4_attn_normalize_raw(dev: i32, x: *mut f32, g: *const f32, n: i32) -> i32;
@@ -168,6 +170,13 @@ impl GpuBuffer {
         unsafe { ds4_attn_data(self.ptr.as_ptr()).cast() }
     }
 
+    fn reserve_growth(&self, cache: &mut crate::moe::MoeCache, bytes: usize) -> Result<()> {
+        let growth = unsafe { ds4_attn_growth(self.ptr.as_ptr(), bytes) };
+        if growth != 0 {
+            cache.reserve(self.device, growth)?;
+        }
+        Ok(())
+    }
     fn write<T: Copy>(&self, data: &[T]) -> Result<()> {
         if !data.is_empty() {
             cuda_ok(
@@ -199,11 +208,31 @@ fn cuda_ok(code: i32, op: &str) -> Result<()> {
 
 #[derive(Default)]
 struct Rows {
+    initial_bytes: usize,
+    max_bytes: usize,
     writer: Option<i32>,
     packed: Vec<u8>,
     devices: HashMap<i32, (GpuBuffer, usize)>,
 }
 impl Rows {
+    // Reserve the known prefill once, including at most one verification block
+    // beyond it. Long generation still grows on demand up to the request limit.
+    fn plan(&mut self, prompt: usize, limit: usize, ratio: usize, stride: usize) {
+        self.initial_bytes = prompt.saturating_add(WINDOW).min(limit) / ratio * stride;
+        self.max_bytes = limit / ratio * stride;
+    }
+    fn next_capacity(&self, current: usize, requested: usize) -> usize {
+        if current >= requested {
+            return current;
+        }
+        let geometric = current + current / 2;
+        let cap = if self.max_bytes > 0 {
+            geometric.min(self.max_bytes)
+        } else {
+            geometric
+        };
+        requested.max(self.initial_bytes).max(cap)
+    }
     fn len(&self) -> usize {
         self.writer
             .map_or_else(|| self.packed.len(), |d| self.devices[&d].1)
@@ -263,19 +292,23 @@ impl Rows {
             ensure!(writer == dev, "compressed source device changed");
         }
         let requested = self.len() + tail;
+        let current = self
+            .devices
+            .get(&dev)
+            .map_or(0, |(b, _)| unsafe { ds4_attn_capacity(b.ptr.as_ptr()) });
+        let capacity = self.next_capacity(current, requested);
         let (buf, old) = match self.devices.entry(dev) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert((GpuBuffer::new(dev)?, 0)),
         };
         // A restored host prefix and its first appended rows share one fresh
         // allocation. Reserve the complete new buffer while the old one lives.
-        let growth = unsafe { ds4_attn_growth(buf.ptr.as_ptr(), requested) };
-        if growth != 0 {
+        if capacity > current {
             if let Some(cache) = cache {
-                cache.reserve(dev, growth)?;
+                cache.reserve(dev, capacity)?;
             }
             cuda_ok(
-                unsafe { ds4_attn_prepare_tail(dev, buf.ptr.as_ptr(), *old, requested - *old) },
+                unsafe { ds4_attn_prepare_tail(dev, buf.ptr.as_ptr(), *old, capacity - *old) },
                 "growing compressed GPU rows",
             )?;
         }
@@ -313,9 +346,12 @@ const HOST_TO_DEVICE: i32 = 1;
 const DEVICE_TO_HOST: i32 = 2;
 const DEVICE_TO_DEVICE: i32 = 3;
 impl Window {
-    fn on(&mut self, dev: i32) -> Result<&GpuBuffer> {
+    fn on(&mut self, dev: i32, cache: Option<&mut crate::moe::MoeCache>) -> Result<&GpuBuffer> {
         if self.ring.is_none() {
             let ring = GpuBuffer::new(dev)?;
+            if let Some(cache) = cache {
+                ring.reserve_growth(cache, 2 * WINDOW * DIM * size_of::<u16>())?;
+            }
             let rows = self.next_pos.min(WINDOW - 1);
             ensure!(
                 self.rows.len() == rows * DIM,
@@ -409,10 +445,10 @@ struct Verification {
 #[derive(Default)]
 pub struct AttentionState {
     prompt_len: usize,
+    capacity_limit: usize,
     verify: Option<Verification>,
     windows: HashMap<usize, Window>,
     sources: HashMap<usize, Source>,
-    scratch: HashMap<i32, GpuBuffer>,
     selected: Vec<Vec<i32>>,
     picks: HashMap<i32, GpuBuffer>,
     device_picks: Option<Dev>,
@@ -500,8 +536,13 @@ impl AttentionState {
 
     /// Set the original prompt length once, including when restoring a prefix.
     /// All prefill chunks then share the reference's window-column layout.
-    pub fn begin_prefill(&mut self, prompt_len: usize) {
+    #[cfg(test)]
+    fn begin_prefill(&mut self, prompt_len: usize) {
+        self.begin_prefill_with_limit(prompt_len, MAX_POS);
+    }
+    pub fn begin_prefill_with_limit(&mut self, prompt_len: usize, available_positions: usize) {
         self.prompt_len = prompt_len;
+        self.capacity_limit = available_positions.clamp(prompt_len, MAX_POS);
     }
 
     fn window_layout(&self, pos: usize, batch: usize) -> (usize, bool) {
@@ -946,12 +987,17 @@ fn source(layer: usize) -> Option<(usize, usize)> {
     }
 }
 
-fn scratch(state: &mut AttentionState, dev: i32) -> Result<*mut c_void> {
+/// A runtime submits all attention operations to each card's default stream.
+/// Scratch can be reused immediately by the next chunk or another session.
+#[derive(Default)]
+pub(crate) struct Workspace(HashMap<i32, GpuBuffer>);
+fn scratch(rt: &mut Runtime, bytes: usize) -> Result<*mut c_void> {
     use std::collections::hash_map::Entry;
-    let buf = match state.scratch.entry(dev) {
+    let buf = match rt.attention_scratch.0.entry(rt.device) {
         Entry::Occupied(e) => e.into_mut(),
-        Entry::Vacant(e) => e.insert(GpuBuffer::new(dev)?),
+        Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
     };
+    buf.reserve_growth(&mut rt.moe_cache, bytes)?;
     Ok(buf.ptr.as_ptr())
 }
 
@@ -1060,7 +1106,6 @@ fn select(
             rt, layer, pos, n, ratio, max_len, keys, &q, &w, blocks, picks,
         );
     }
-    let work = scratch(state, rt.device)?;
     // Tile host scores to keep long-context prefill scratch bounded. After layer
     // 20, only the 2048 winning eight-token blocks need scoring.
     let filtered_width = TOP_BLOCKS * BLOCK;
@@ -1091,6 +1136,9 @@ fn select(
                 }
             }
         }
+        let bytes =
+            (rows * width * size_of::<f32>()).next_multiple_of(256) * (1 + usize::from(filtering));
+        let work = scratch(rt, bytes)?;
         let mut scores = vec![0.; rows * width];
         cuda_ok(
             unsafe {
@@ -1303,9 +1351,16 @@ pub fn forward_dev(
     let mut values = ptr::null_mut();
     if let Some((owner, ratio)) = group {
         if layer == owner {
+            let src = state.sources.entry(owner).or_default();
+            if state.capacity_limit > 0 {
+                src.values
+                    .plan(state.prompt_len, state.capacity_limit, ratio, KV_BYTES);
+                src.keys
+                    .plan(state.prompt_len, state.capacity_limit, ratio, INDEX_BYTES);
+            }
             append_source(
                 rt,
-                state.sources.entry(owner).or_default(),
+                src,
                 &prefix,
                 x,
                 pos,
@@ -1337,6 +1392,7 @@ pub fn forward_dev(
                         Entry::Occupied(e) => e.into_mut(),
                         Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
                     };
+                    picks.reserve_growth(&mut rt.moe_cache, flat.len() * size_of::<i32>())?;
                     picks.write(&flat)?;
                 }
             }
@@ -1367,10 +1423,9 @@ pub fn forward_dev(
     }
     drop(qr);
     let sink = rt.vector_ptr(&format!("{prefix}.attn_sink"), HEADS)?;
-    let work = scratch(state, rt.device)?;
     let (span, decode) = state.window_layout(pos, batch);
     let window = state.windows.entry(layer).or_default();
-    let ring = window.on(rt.device)?;
+    let ring = window.on(rt.device, Some(&mut rt.moe_cache))?;
     let mut o = rt.buffer(q.len())?;
     // Bound temporary expanded compressed values to 16 MiB per call.
     let fast = fast_attention();
@@ -1395,6 +1450,10 @@ pub fn forward_dev(
         if fast && !use_tensor {
             n = n.min(64 - (pos + t));
         }
+        let needed = unsafe {
+            ds4_attn_sparse_bytes(use_tensor.into(), span as i32, width as i32, n as i32)
+        };
+        let work = scratch(rt, needed)?;
         cuda_ok(
             unsafe {
                 sparse(
@@ -1465,6 +1524,31 @@ pub fn forward_dev(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn six_full_sessions_reserve_only_their_live_compressed_bytes() {
+        let limit = 524_288;
+        let mut six = [0; 2];
+        for (device, ratio, sources) in [(0, 2, 3), (1, 1, 1)] {
+            let mut cache = 0;
+            for stride in [INDEX_BYTES, KV_BYTES] {
+                let mut rows = Rows::default();
+                rows.plan(520_362, limit, ratio, stride);
+                let initial = rows.next_capacity(0, stride);
+                assert_eq!(initial, (520_362 + WINDOW) / ratio * stride);
+                let full = rows.next_capacity(initial, limit / ratio * stride);
+                assert_eq!(full, limit / ratio * stride);
+                cache += sources * full;
+            }
+            six[device] = 6 * (cache + 20 * 2 * WINDOW * DIM * size_of::<u16>());
+        }
+        assert_eq!(six, [3252 << 20, 2178 << 20]);
+        // A short request asking for a large output allocates incrementally.
+        let mut short = Rows::default();
+        short.plan(48, limit, 1, KV_BYTES);
+        assert_eq!(short.next_capacity(0, KV_BYTES), (48 + WINDOW) * KV_BYTES);
+        assert!(short.next_capacity(0, KV_BYTES) < limit * KV_BYTES);
+    }
 
     #[test]
     fn fp_quant_rounding_and_packed_scales() {
@@ -1561,9 +1645,7 @@ mod tests {
         original.selected = vec![vec![0]];
         original.blocks = vec![vec![0]];
         let mut branch = original.host_snapshot().unwrap();
-        assert!(
-            branch.scratch.is_empty() && branch.blocks.is_empty() && branch.selected.is_empty()
-        );
+        assert!(branch.blocks.is_empty() && branch.selected.is_empty());
         assert_eq!(branch.windows[&2].next_pos, 3);
         assert_eq!(branch.windows[&2].rows, original.windows[&2].rows);
         let copied = branch.sources.get_mut(&2).unwrap();
@@ -1662,7 +1744,7 @@ mod tests {
             next_pos: pos,
         };
         let new = upload(device, &rows[pos * DIM..])?;
-        let ring = window.on(device)?;
+        let ring = window.on(device, None)?;
         cuda_ok(
             unsafe {
                 ds4_attn_window(
