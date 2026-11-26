@@ -83,18 +83,18 @@ docker compose --env-file ../models/.env up -d --wait
 
 ## Measurements on this workstation
 
-The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, FP8 dense arithmetic and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
+The serving binary and tested model revision are recorded in the [serving profile](results/serving-profile.json). The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, FP8 dense arithmetic and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
 
 | Authenticated single-stream HTTP workload | Warm median output tok/s | Measurement |
 |---|---:|---|
-| New Python Tetris implementation | 303.4 | Six runs of 1,024 tokens |
-| New C JSON parser | 351.3 | Six runs of 1,024 tokens |
-| New Rust TTL cache | 330.6 | Six runs of 1,024 tokens |
-| Go source edit, returned in full | 846.6 | Two runs of 1,700 tokens after warm-up |
+| New Python Tetris implementation | 303.7 | Six runs of 1,024 tokens |
+| New C JSON parser | 351.1 | Six runs of 1,024 tokens |
+| New Rust TTL cache | 330.5 | Six runs of 1,024 tokens |
+| Go source edit, returned in full | 837.5 | Six runs of 1,700 tokens after warm-up |
 
-Across the 18 warm new-code samples the median was **330.6 tok/s**. Each of these generations reached its length limit. The Go edit had a natural stop, changed the requested behavior and passed the original and case-insensitivity tests. Before and after restarting the service, every Go output had the same SHA-256. On the first request after restart both target and drafter restored 1,728 of 1,734 prompt tokens from disk. First-token latency was 1.48 s with cold model allocations and 22 ms on the next request. [New-code samples](results/api-new-code.jsonl) · [Full edits](results/api-edit.jsonl) · [After restart](results/api-disk-edit.jsonl) · [KV counters](results/restart-kv.txt)
+Across the 18 warm new-code samples the median was **330.5 tok/s**. Each of these generations reached its length limit. The Go edit had a natural stop, changed the requested behavior and passed the original and case-insensitivity tests. Before and after restarting the service, every Go output had the same SHA-256. On the first request after restart both target and drafter restored 1,728 of 1,734 prompt tokens from disk. First-token latency was 1.48 s with cold model allocations and 22 ms on the next request. [New-code samples](results/clean-code.jsonl) · [Full edits](results/clean-edit.jsonl) · [After restart](results/api-disk-edit.jsonl) · [KV counters](results/restart-kv.txt)
 
-Throughput depends on what the drafter can predict. The source edit retained most of its input and 1,652 tokens were accepted from source lookup. An uncached opening, sampling at a different temperature, an essay, and a long transcript can produce very different rates. The first Tetris request in a fresh process measured 90.5 tok/s. [Experiment ledger](results/ledger.jsonl)
+Throughput depends on what the drafter can predict. The source edit retained most of its input and 1,652 tokens were accepted from source lookup. An uncached opening, sampling at a different temperature, an essay, and a long transcript can produce very different rates. A first Tetris request in a fresh process measured 90.5 tok/s in the initial HTTP qualification. [Experiment ledger](results/ledger.jsonl)
 
 Both DSpark variants reproduced the identical 256-token Tetris continuation as the undrafted target under the same deployment arithmetic. With source lookup disabled, one warm sample measured 84.4 tok/s target-only, 269.8 with the released weights, and 300.6 with the code-tuned weights. The engine passed all 48 release tests, including the real CUDA and checkpoint fixtures. [Drafter parity](results/drafter-parity.json) · [Pinned serving configuration](results/serving-profile.json)
 

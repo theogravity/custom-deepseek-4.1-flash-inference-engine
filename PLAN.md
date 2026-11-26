@@ -26,3 +26,5 @@ The optimization target was more than 300 target-verified output tokens/s for a 
 | Combined profile | Six interleaved warm runs per new-code prompt at 303.4 / 351.3 / 330.6 tok/s. All three prompts were shorter than the cache's 64-token chunk. |
 
 The confidence and staging experiments used shorter screening runs. The on-wire suite exercised the combination for six warm runs per prompt, with a first warm-up for each. Historical trials and their continuation digests are in the ledger. The numerical profile uses FP8 and BF16 rounding and grouped reductions, so generated text can differ from the original vLLM recipe. [Raw trials](results/ledger.jsonl) · [Confidence controls](results/confidence.json) · [Timing protocol](tools/code_speed.py)
+
+The pinned serving binary then repeated the 18-sample suite at 303.7, 351.1 and 330.5 tok/s (median 330.5). Its six warm full-edit trials reached 837.5 tok/s median with identical generated source. Both checkpoint drafters reproduced the undrafted 256-token target output at this profile. [Repeat new-code samples](results/clean-code.jsonl) · [Repeat edits](results/clean-edit.jsonl) · [Parity](results/drafter-parity.json)
