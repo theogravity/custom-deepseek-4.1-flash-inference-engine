@@ -86,14 +86,15 @@ docker compose --env-file ../models/.env up -d --wait
 
 The serving binary and tested model revision are recorded in the [serving profile](results/serving-profile.json). The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, packed MXFP8 weights with BF16 tensor-core multiplication and FP32 accumulation, and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
 
-| Authenticated single-stream HTTP workload | Warm median output tok/s | Measurement |
-|---|---:|---|
-| New Python Tetris implementation | 303.7 | Six runs of 1,024 tokens |
-| New C JSON parser | 351.1 | Six runs of 1,024 tokens |
-| New Rust TTL cache | 330.5 | Six runs of 1,024 tokens |
-| Go source edit, returned in full | 837.5 | Six runs of 1,700 tokens after warm-up |
+| Single-stream workload | Route | Warm median output tok/s | Measurement |
+|---|---|---:|---|
+| New Python Tetris implementation | LiteLLM | 303.6 | Six runs of 1,024 output tokens |
+| New C JSON parser | LiteLLM | 350.9 | Six runs of 1,024 output tokens |
+| New Rust TTL cache | LiteLLM | 331.0 | Six runs of 1,024 output tokens |
+| Python rewrite, 25,598 input tokens | Direct | 308.1 | Six runs capped at 512 output tokens |
+| Go source edit, returned in full | Direct | 866.5 | Six runs of 1,700 output tokens to a natural stop |
 
-Across the 18 warm new-code samples the median was **330.5 tok/s**. Each of these generations reached its length limit. The Go edit had a natural stop, changed the requested behavior and passed the original and case-insensitivity tests. Before and after restarting the service, every Go output had the same SHA-256. On the first request after restart both target and drafter restored 1,728 of 1,734 prompt tokens from disk. First-token latency was 1.48 s with cold model allocations and 22 ms on the next request. [New-code samples](results/clean-code.jsonl) · [Full edits](results/hybrid-go.jsonl) · [After restart](results/api-disk-edit.jsonl) · [KV counters](results/restart-kv.txt)
+Across the 18 warm new-code samples through LiteLLM the median was **331.0 tok/s**. Each of these generations reached its length limit. The Go edit had a natural stop, changed the requested behavior and passed the original and case-insensitivity tests. Before and after restarting the service, every Go output had the same SHA-256. On the first request after restart both target and drafter restored 1,728 of 1,734 prompt tokens from disk. First-token latency was 1.48 s with cold model allocations and 22 ms on the next request. [New-code samples](results/hybrid-proxy.jsonl) · [Full edits](results/hybrid-go.jsonl) · [After restart](results/api-disk-edit.jsonl) · [KV counters](results/restart-kv.txt)
 
 Throughput depends on what the drafter can predict. The source edit retained most of its input. On the adaptive profile, 1,625 output tokens matched source proposals. An uncached opening, sampling at a different temperature, an essay, and a long transcript can produce very different rates. A first Tetris request in a fresh process measured 90.5 tok/s in the initial HTTP qualification. [Experiment ledger](results/ledger.jsonl)
 
@@ -101,7 +102,7 @@ Both DSpark variants reproduced the identical 256-token Tetris continuation as t
 
 Codex, Claude Code, and Pi each read a fresh random file through a real tool call and returned the exact contents through LiteLLM. Native authentication, Anthropic thinking streams, and Pi's alternative DeepSeek route passed as well. A 28,538-token cold request retrieved a randomly chosen receipt in 37.23 s. A follow-up with a different instruction and 28,546 input tokens returned the same receipt in 0.319 s. [Client checks](results/drafter-clients.jsonl) · [Proxy retrieval](results/agent-retrieval.json)
 
-Through the existing LiteLLM OpenAI route, the same suite measured 303.3 tok/s for Tetris, 351.3 for the parser and 331.0 for the Rust cache. LiteLLM response-cache reads and writes were disabled. All 21 requests, including warm-ups, had a corresponding new backend prefill. Their prompt sizes, completion lengths and output hashes matched the direct requests in order. [Proxy timings](results/proxy-code.jsonl) · [Native execution counters](results/proxy-backend.txt)
+For the LiteLLM OpenAI route measurements, response-cache reads and writes were disabled. All 21 requests, including warm-ups, had a corresponding new backend prefill. Their prompt sizes, completion lengths and output hashes matched the direct control in order. [Proxy timings](results/hybrid-proxy.jsonl) · [Native execution counters](results/hybrid-proxy-backend.txt) · [Direct control](results/clean-code.jsonl)
 
 ```sh
 python3 tools/code_speed.py --base http://127.0.0.1:4000/v1 --model 'DeepSeek V4.1 Flash (openai)' --bypass-proxy-cache --rounds 7
@@ -113,4 +114,4 @@ A cold 266,174-token request returned three randomly generated vault receipts in
 
 ### Choosing between the learned and source drafters
 
-When DSpark is ready, the scheduler uses it if fewer than 16 consecutive tokens agree with a source occurrence. With 16–31 matches it can propose the next 16 source tokens, with 32–63 it can propose 64, and with at least 64 it can propose the configured maximum. The target verifies every proposal. The 25,598-token Python rewrite measured 166.2 tok/s with fixed 128-token lookup and 308.1 tok/s after this change, with identical generated text. The complete Go edit measured 866.5 tok/s and passed the same tests. [Partial rewrite before](results/long-edit-fixed.jsonl) · [Partial rewrite after](results/hybrid-long.jsonl) · [Source lookup controls](results/lookup-tuning.json) · [Generated Go diff and tests](results/edit-validation.json)
+When DSpark is ready, the scheduler uses it if fewer than 16 consecutive tokens agree with a source occurrence. With 16–31 matches it can propose the next 16 source tokens, with 32–63 it can propose 64, and with at least 64 it can propose the configured maximum. The target verifies every proposal. The Python rewrite used 25,598 input tokens and reached its 512-output-token limit in both modes. It measured 166.2 tok/s with fixed 128-token lookup and 308.1 tok/s after this change, with identical generated text. The complete Go edit measured 866.5 tok/s and passed the same tests. [Partial rewrite before](results/long-edit-fixed.jsonl) · [Partial rewrite after](results/hybrid-long.jsonl) · [Source lookup controls](results/lookup-tuning.json) · [Generated Go diff and tests](results/edit-validation.json)

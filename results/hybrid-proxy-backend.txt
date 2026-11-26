@@ -1,0 +1,42 @@
+prefill tokens=23 reused=0 seconds=0.478
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.148
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.147
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.041
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.042
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.041
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.042
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.041
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
+prefill tokens=23 reused=0 seconds=0.030
+speculative source=learned rounds=178 proposed=1104 accepted=845
+prefill tokens=37 reused=0 seconds=0.041
+speculative source=learned rounds=150 proposed=1004 accepted=873
+prefill tokens=27 reused=0 seconds=0.033
+speculative source=learned rounds=159 proposed=1049 accepted=863
