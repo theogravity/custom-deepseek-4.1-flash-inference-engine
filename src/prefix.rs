@@ -14,7 +14,7 @@ use std::{
 };
 
 type Key = [u8; 32];
-const MAGIC: &[u8; 8] = b"DS4KV002";
+const MAGIC: &[u8; 8] = b"DS4KV004";
 const HEADER: usize = 8 + 32 + 32;
 const MIB: usize = 1 << 20;
 

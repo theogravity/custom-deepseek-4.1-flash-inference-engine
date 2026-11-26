@@ -1815,7 +1815,12 @@ mod tests {
                 })
                 .collect();
             let mut packed = vec![0u8; width * INDEX_BYTES];
-            for (row, &score) in packed.chunks_exact_mut(INDEX_BYTES).zip(&scores) {
+            for (row, &score) in packed
+                .as_chunks_mut::<INDEX_BYTES>()
+                .0
+                .iter_mut()
+                .zip(&scores)
+            {
                 row[0] = 0x38; // E4M3 1.0
                 row[INDEX_DIM..].copy_from_slice(&score.to_le_bytes());
             }
@@ -2101,7 +2106,7 @@ mod tests {
         let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         for (width, n) in [(600, 129), (16391, 8), (524288, 1)] {
             let mut keys = vec![0u8; width * INDEX_BYTES];
-            for (k, row) in keys.chunks_exact_mut(INDEX_BYTES).enumerate() {
+            for (k, row) in keys.as_chunks_mut::<INDEX_BYTES>().0.iter_mut().enumerate() {
                 row[0] = 0x38;
                 let scale = ((k.wrapping_mul(6563) ^ (k / 19)) % 8191) as f32;
                 row[INDEX_DIM..].copy_from_slice(&scale.to_le_bytes());
