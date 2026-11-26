@@ -1,9 +1,11 @@
 //! DeepSeek V4.1 Flash latent attention. The checkpoint shares compressed KV and
 //! index keys at layers 2/8/14/20, while every backbone layer owns its window.
-use crate::runtime::Runtime;
+#[path = "attention_snapshot.rs"]
+mod snapshot;
+
+use crate::runtime::{Dev, Runtime};
 use anyhow::{ensure, Context, Result};
 use half::bf16;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -37,12 +39,43 @@ unsafe extern "C" {
         old: usize,
         len: usize,
     ) -> i32;
+    fn ds4_attn_data(buf: *mut c_void) -> *mut c_void;
+    #[cfg(test)]
+    fn ds4_attn_read(device: i32, src: *const c_void, dst: *mut c_void, bytes: usize) -> i32;
+    fn ds4_attn_window(
+        device: i32,
+        buf: *mut c_void,
+        start: i32,
+        rows: i32,
+        data: *mut c_void,
+        kind: i32,
+    ) -> i32;
+    fn ds4_attn_normalize(
+        device: i32,
+        x: *mut f32,
+        gamma: *const f32,
+        width: i32,
+        batch: i32,
+    ) -> i32;
+    fn ds4_attn_transform(
+        device: i32,
+        x: *mut f32,
+        window: *mut u16,
+        freqs: *const f32,
+        heads: i32,
+        cols: i32,
+        group: i32,
+        inverse: i32,
+        batch: i32,
+    ) -> i32;
     fn ds4_attn_sparse(
         device: i32,
         scratch: *mut c_void,
         q: *const f32,
-        window: *const u16,
-        history: i32,
+        prior: *const u16,
+        current: *const u16,
+        pos: i32,
+        tile: i32,
         span: i32,
         decode: i32,
         kv: *const c_void,
@@ -81,6 +114,27 @@ impl GpuBuffer {
                 .context("creating CUDA attention buffer")?,
         })
     }
+    fn data<T>(&self) -> *mut T {
+        unsafe { ds4_attn_data(self.ptr.as_ptr()).cast() }
+    }
+
+    fn write<T: Copy>(&self, data: &[T]) -> Result<()> {
+        if !data.is_empty() {
+            cuda_ok(
+                unsafe {
+                    ds4_attn_upload(
+                        self.device,
+                        self.ptr.as_ptr(),
+                        data.as_ptr().cast(),
+                        0,
+                        std::mem::size_of_val(data),
+                    )
+                },
+                "uploading attention buffer",
+            )?;
+        }
+        Ok(())
+    }
 }
 impl Drop for GpuBuffer {
     fn drop(&mut self) {
@@ -99,6 +153,13 @@ struct Rows {
     devices: HashMap<i32, (GpuBuffer, usize)>,
 }
 impl Rows {
+    fn truncate(&mut self, bytes: usize) {
+        self.packed.truncate(bytes);
+        for (_, uploaded) in self.devices.values_mut() {
+            *uploaded = (*uploaded).min(bytes);
+        }
+    }
+
     fn on(&mut self, dev: i32) -> Result<*mut c_void> {
         use std::collections::hash_map::Entry;
         let (buf, old) = match self.devices.entry(dev) {
@@ -127,23 +188,198 @@ struct Source {
     pending_gate: Vec<f32>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct Window {
-    rows: Vec<u16>, // Last WINDOW-1 chronological BF16 rows needed by the next call.
+    rows: Vec<u16>, // Chronological history in a host snapshot.
+    ring: Option<GpuBuffer>,
     next_pos: usize,
+}
+
+// Copies select a CUDA memcpy direction. The native helper splits wraparound.
+const HOST_TO_DEVICE: i32 = 1;
+const DEVICE_TO_HOST: i32 = 2;
+const DEVICE_TO_DEVICE: i32 = 3;
+impl Window {
+    fn on(&mut self, dev: i32) -> Result<&GpuBuffer> {
+        if self.ring.is_none() {
+            let ring = GpuBuffer::new(dev)?;
+            let rows = self.next_pos.min(WINDOW - 1);
+            ensure!(
+                self.rows.len() == rows * DIM,
+                "invalid restored attention window"
+            );
+            cuda_ok(
+                unsafe {
+                    ds4_attn_window(
+                        dev,
+                        ring.ptr.as_ptr(),
+                        (self.next_pos - rows) as i32,
+                        rows as i32,
+                        self.rows.as_mut_ptr().cast(),
+                        HOST_TO_DEVICE,
+                    )
+                },
+                "restoring attention window",
+            )?;
+            self.ring = Some(ring);
+            self.rows = Vec::new();
+        }
+        let ring = self.ring.as_ref().unwrap();
+        ensure!(ring.device == dev, "attention window device changed");
+        Ok(ring)
+    }
+
+    fn host_snapshot(&self) -> Result<Self> {
+        let rows = if let Some(ring) = &self.ring {
+            let n = self.next_pos.min(WINDOW - 1);
+            let mut rows = vec![0u16; n * DIM];
+            cuda_ok(
+                unsafe {
+                    ds4_attn_window(
+                        ring.device,
+                        ring.ptr.as_ptr(),
+                        (self.next_pos - n) as i32,
+                        n as i32,
+                        rows.as_mut_ptr().cast(),
+                        DEVICE_TO_HOST,
+                    )
+                },
+                "saving attention window",
+            )?;
+            rows
+        } else {
+            self.rows.clone()
+        };
+        Ok(Self {
+            rows,
+            ring: None,
+            next_pos: self.next_pos,
+        })
+    }
+}
+
+// A verification block may commit any prefix. Each even-position row can
+// become the unpaired half for the next decode at one of the ratio-two sources.
+#[derive(Default)]
+struct PendingPairs {
+    kv: Vec<f32>,
+    gates: Vec<f32>,
+}
+
+impl PendingPairs {
+    fn capture(pos: usize, src: &Source, kv: &[f32], gates: &[f32]) -> Self {
+        let mut rows = Self {
+            kv: src.pending_kv.clone(),
+            gates: src.pending_gate.clone(),
+        };
+        for (k, g) in kv
+            .chunks_exact(DIM)
+            .zip(gates.chunks_exact(DIM))
+            .skip(pos % 2)
+            .step_by(2)
+        {
+            rows.kv.extend_from_slice(k);
+            rows.gates.extend_from_slice(g);
+        }
+        rows
+    }
+}
+
+struct Verification {
+    pos: usize,
+    batch: usize,
+    pending: HashMap<usize, PendingPairs>,
 }
 
 #[derive(Default)]
 pub struct AttentionState {
     prompt_len: usize,
+    verify: Option<Verification>,
     windows: HashMap<usize, Window>,
     sources: HashMap<usize, Source>,
     scratch: HashMap<i32, GpuBuffer>,
     selected: Vec<Vec<i32>>,
+    picks: HashMap<i32, GpuBuffer>,
+    width: usize,
+    freqs: HashMap<(i32, bool), (usize, usize, Dev)>,
     blocks: Vec<Vec<usize>>,
 }
 
 impl AttentionState {
+    /// Start a speculative target forward. The device ring retains the prior
+    /// window and every tentative row until the caller commits an accepted prefix.
+    pub fn begin_verify(&mut self, pos: usize, batch: usize) -> Result<()> {
+        ensure!(
+            self.verify.is_none(),
+            "attention verification already active"
+        );
+        ensure!(
+            (1..=WINDOW).contains(&batch) && pos.checked_add(batch).is_some_and(|n| n <= MAX_POS),
+            "invalid attention verification block"
+        );
+        ensure!(
+            self.windows.values().all(|w| w.next_pos == pos),
+            "discontinuous verification start"
+        );
+        self.verify = Some(Verification {
+            pos,
+            batch,
+            pending: HashMap::new(),
+        });
+        Ok(())
+    }
+
+    /// Commit the first `accepted` inputs from the target forward, including
+    /// its input anchor when present. Subsequent proposals overwrite the suffix.
+    pub fn finish_verify(&mut self, accepted: usize) -> Result<()> {
+        let mark = self
+            .verify
+            .as_ref()
+            .context("no active attention verification")?;
+        ensure!(
+            accepted <= mark.batch,
+            "accepted prefix exceeds verified block"
+        );
+        let verified = mark.pos + mark.batch;
+        ensure!(
+            self.windows.len() == 40 && self.windows.values().all(|w| w.next_pos == verified),
+            "incomplete verification forward"
+        );
+        if accepted < mark.batch {
+            let next = mark.pos + accepted;
+            for (&owner, src) in &mut self.sources {
+                let (_, ratio) = source(owner).context("unknown compressed source")?;
+                if ratio == 2 && next % 2 == 1 {
+                    let pairs = mark
+                        .pending
+                        .get(&owner)
+                        .context("missing verified compressor rows")?;
+                    let start = ((next - 1) / 2 - mark.pos / 2) * DIM;
+                    src.pending_kv.clear();
+                    src.pending_gate.clear();
+                    src.pending_kv
+                        .extend_from_slice(&pairs.kv[start..start + DIM]);
+                    src.pending_gate
+                        .extend_from_slice(&pairs.gates[start..start + DIM]);
+                } else {
+                    src.pending_kv.clear();
+                    src.pending_gate.clear();
+                }
+                let rows = next / ratio;
+                src.keys.truncate(rows * INDEX_BYTES);
+                src.values.truncate(rows * KV_BYTES);
+            }
+            for w in self.windows.values_mut() {
+                w.next_pos = next;
+            }
+            self.selected.clear();
+            self.blocks.clear();
+            self.width = 0;
+        }
+        self.verify = None;
+        Ok(())
+    }
+
     /// Set the original prompt length once, including when restoring a prefix.
     /// All prefill chunks then share the reference's window-column layout.
     pub fn begin_prefill(&mut self, prompt_len: usize) {
@@ -164,7 +400,8 @@ impl AttentionState {
     /// Branch at a completed backbone forward. Each resumed request uploads its
     /// own device rows lazily. Top-k selections and candidate blocks belong to
     /// the past chunk and are rebuilt by their source layers on the next call.
-    pub fn host_snapshot(&self) -> Self {
+    pub fn host_snapshot(&self) -> Result<Self> {
+        ensure!(self.verify.is_none(), "cannot snapshot active verification");
         fn host_rows(rows: &Rows) -> Rows {
             Rows {
                 packed: rows.packed.clone(),
@@ -186,11 +423,16 @@ impl AttentionState {
                 )
             })
             .collect();
-        Self {
+        let windows = self
+            .windows
+            .iter()
+            .map(|(&layer, w)| Ok((layer, w.host_snapshot()?)))
+            .collect::<Result<_>>()?;
+        Ok(Self {
             sources,
-            windows: self.windows.clone(),
+            windows,
             ..Self::default()
-        }
+        })
     }
 }
 
@@ -208,8 +450,8 @@ fn normalize(x: &mut [f32], gamma: &[f32]) {
     }
 }
 
-type Freq = [(f32, f32); ROPE / 2];
-fn rotary_freqs(pos: usize, compressed: bool) -> Freq {
+pub(crate) type Freq = [[f32; 2]; ROPE / 2];
+pub(crate) fn rotary_freqs(pos: usize, compressed: bool) -> Freq {
     static BASE: OnceLock<[f32; ROPE / 2]> = OnceLock::new();
     static YARN: OnceLock<[f32; ROPE / 2]> = OnceLock::new();
     let cache = if compressed { &YARN } else { &BASE };
@@ -228,12 +470,15 @@ fn rotary_freqs(pos: usize, compressed: bool) -> Freq {
             raw / 16. * (1. - smooth) + raw * smooth
         })
     });
-    std::array::from_fn(|i| (pos as f32 * rates[i]).sin_cos())
+    std::array::from_fn(|i| {
+        let (s, c) = (pos as f32 * rates[i]).sin_cos();
+        [s, c]
+    })
 }
 
 fn rotate(row: &mut [f32], freq: &Freq, inverse: bool) {
     let tail = row.len() - ROPE;
-    for (pair, &(s, c)) in row[tail..].as_chunks_mut::<2>().0.iter_mut().zip(freq) {
+    for (pair, &[s, c]) in row[tail..].as_chunks_mut::<2>().0.iter_mut().zip(freq) {
         let (a, b) = (pair[0], pair[1]);
         let s = if inverse { -s } else { s };
         pair[0] = b16(a * c - b * s);
@@ -262,6 +507,7 @@ fn e4m3_code(x: f32) -> u8 {
     mag | ((x.to_bits() >> 24) as u8 & 128)
 }
 
+#[cfg(test)]
 fn e4m3(code: u8) -> f32 {
     static VALUES: OnceLock<[f32; 256]> = OnceLock::new();
     VALUES.get_or_init(|| {
@@ -287,6 +533,7 @@ fn fp8_scale(group: &[f32]) -> f32 {
     ceil_scale(peak * (1. / 448.))
 }
 
+#[cfg(test)]
 fn fp8_qdq(row: &mut [f32], block: usize) {
     for group in row.chunks_exact_mut(block) {
         let scale = fp8_scale(group);
@@ -342,6 +589,44 @@ fn linear(
     Ok(v)
 }
 
+pub(crate) fn project(
+    rt: &mut Runtime,
+    prefix: &str,
+    name: &str,
+    x: &Dev,
+    batch: usize,
+    out: usize,
+    groups: usize,
+) -> Result<Dev> {
+    let k = format!("{prefix}.{name}.weight");
+    let result = rt.linear_dev(&k, x, batch, groups)?;
+    ensure!(result.len() == batch * out, "{k} output shape mismatch");
+    Ok(result)
+}
+
+// A frame of angles is shared by every layer on a device with the same RoPE base.
+fn device_freqs(
+    rt: &mut Runtime,
+    state: &mut AttentionState,
+    pos: usize,
+    n: usize,
+    compressed: bool,
+) -> Result<*const f32> {
+    let key = (rt.device, compressed);
+    if let Some((p, len, freqs)) = state.freqs.get(&key) {
+        if (*p, *len) == (pos, n) {
+            return Ok(freqs.as_ptr());
+        }
+    }
+    let host: Vec<_> = (pos..pos + n)
+        .map(|p| rotary_freqs(p, compressed))
+        .collect();
+    let freqs = rt.to_device(host.as_flattened().as_flattened())?;
+    let ptr = freqs.as_ptr();
+    state.freqs.insert(key, (pos, n, freqs));
+    Ok(ptr)
+}
+
 fn pool_pairs(
     kv: &[f32],
     gates: &[f32],
@@ -372,25 +657,34 @@ fn pool_pairs(
     pooled
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_source(
     rt: &mut Runtime,
     src: &mut Source,
     prefix: &str,
-    x: &[f32],
+    x: &Dev,
     pos: usize,
     batch: usize,
     ratio: usize,
+    owner: usize,
+    verify: Option<&mut Verification>,
 ) -> Result<()> {
     ensure!(
         src.keys.packed.len() == pos / ratio * INDEX_BYTES
             && src.values.packed.len() == pos / ratio * KV_BYTES,
         "discontinuous compressed cache at {pos}"
     );
-    let kv = linear(rt, prefix, "compressor.wkv", x, batch, DIM)?;
+    let kv = project(rt, prefix, "compressor.wkv", x, batch, DIM, 1)?;
+    let kv = rt.to_host(&kv)?;
     let mut latent = if ratio == 1 {
         kv
     } else {
-        let gates = linear(rt, prefix, "compressor.wgate", x, batch, DIM)?;
+        let gates = project(rt, prefix, "compressor.wgate", x, batch, DIM, 1)?;
+        let gates = rt.to_host(&gates)?;
+        if let Some(mark) = verify {
+            mark.pending
+                .insert(owner, PendingPairs::capture(pos, src, &kv, &gates));
+        }
         pool_pairs(&kv, &gates, &mut src.pending_kv, &mut src.pending_gate)
     };
     if latent.is_empty() {
@@ -476,11 +770,11 @@ fn select(
     ratio: usize,
     prefix: &str,
     layer: usize,
-    x: &[f32],
-    qr: &[f32],
+    x: &Dev,
+    qr: &Dev,
     pos: usize,
     n: usize,
-    freqs: &[Freq],
+    freqs: *const f32,
 ) -> Result<()> {
     let max_len = (pos + n) / ratio;
     state.selected.clear();
@@ -496,23 +790,32 @@ fn select(
         }
         return Ok(());
     }
-    let mut q = linear(rt, prefix, "indexer.wq_b", qr, n, INDEX_HEADS * INDEX_DIM)?;
-    let mut w = linear(rt, prefix, "indexer.weights_proj", x, n, INDEX_HEADS)?;
-    for v in &mut w {
-        *v = b16(b16(*v) / 64.);
-    }
-    for (t, row) in q
-        .as_chunks_mut::<{ INDEX_HEADS * INDEX_DIM }>()
-        .0
-        .iter_mut()
-        .enumerate()
-    {
-        for head in row.as_chunks_mut::<INDEX_DIM>().0 {
-            head.iter_mut().for_each(|v| *v = b16(*v));
-            rotate(head, &freqs[t], false);
-            fp8_qdq(head, INDEX_DIM);
-        }
-    }
+    let mut q = project(
+        rt,
+        prefix,
+        "indexer.wq_b",
+        qr,
+        n,
+        INDEX_HEADS * INDEX_DIM,
+        1,
+    )?;
+    let w = project(rt, prefix, "indexer.weights_proj", x, n, INDEX_HEADS, 1)?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_transform(
+                rt.device,
+                q.as_mut_ptr(),
+                ptr::null_mut(),
+                freqs,
+                INDEX_HEADS as i32,
+                INDEX_DIM as i32,
+                INDEX_DIM as i32,
+                0,
+                n as i32,
+            )
+        },
+        "rotating and quantizing index queries",
+    )?;
     let keys = state
         .sources
         .get_mut(&owner)
@@ -557,8 +860,8 @@ fn select(
                     rt.device,
                     work,
                     keys,
-                    q[t * INDEX_HEADS * INDEX_DIM..].as_ptr(),
-                    w[t * INDEX_HEADS..].as_ptr(),
+                    q.as_ptr().add(t * INDEX_HEADS * INDEX_DIM),
+                    w.as_ptr().add(t * INDEX_HEADS),
                     if filtering { ids.as_ptr() } else { ptr::null() },
                     width as i32,
                     rows as i32,
@@ -592,14 +895,14 @@ fn select(
 
 /// Process one contiguous prompt chunk or one decode token in token-major order.
 /// A new request owns a fresh state. Layers are invoked in model order.
-pub fn forward(
+pub fn forward_dev(
     rt: &mut Runtime,
     state: &mut AttentionState,
     layer: usize,
     pos: usize,
-    x: &[f32],
+    x: &Dev,
     batch: usize,
-) -> Result<Vec<f32>> {
+) -> Result<Dev> {
     ensure!(
         layer < 40 && batch > 0 && pos.checked_add(batch).is_some_and(|end| end <= MAX_POS),
         "invalid backbone attention layer or position"
@@ -608,6 +911,12 @@ pub fn forward(
         x.len() == batch * HIDDEN,
         "attention input has incorrect shape"
     );
+    if let Some(mark) = &state.verify {
+        ensure!(
+            mark.pos == pos && mark.batch == batch,
+            "attention verification block changed"
+        );
+    }
     let prior = state.windows.get(&layer);
     ensure!(
         prior.map_or(0, |w| w.next_pos) == pos,
@@ -615,34 +924,58 @@ pub fn forward(
     );
     let prefix = format!("layers.{layer}.attn");
     let group = source(layer);
-    let freqs: Vec<_> = (pos..pos + batch)
-        .map(|p| rotary_freqs(p, group.is_some()))
-        .collect();
-    let mut qr = linear(rt, &prefix, "wq_a", x, batch, 1280)?;
-    qr.iter_mut().for_each(|v| *v = b16(*v));
-    normalize(&mut qr, &weights(rt, &prefix, "q_norm.weight", 1280)?);
-    let mut q = linear(rt, &prefix, "wq_b", &qr, batch, HEADS * DIM)?;
-    q.par_chunks_exact_mut(HEADS * DIM)
-        .zip(&freqs)
-        .for_each(|(row, f)| {
-            for head in row.as_chunks_mut::<DIM>().0 {
-                head.iter_mut().for_each(|v| *v = b16(*v));
-                rotate(head, f, false);
-            }
-        });
-    let mut kv = linear(rt, &prefix, "wkv", x, batch, DIM)?;
-    kv.iter_mut().for_each(|v| *v = b16(*v));
-    normalize(&mut kv, &weights(rt, &prefix, "kv_norm.weight", DIM)?);
-    let mut window = prior.map(|w| w.rows.clone()).unwrap_or_default();
-    let history = window.len() / DIM;
-    for (row, f) in kv.as_chunks_mut::<DIM>().0.iter_mut().zip(&freqs) {
-        rotate(row, f, false);
-        fp8_qdq(&mut row[..NOPE], 64);
-        window.extend(row.iter().map(|&v| bf16::from_f32(v).to_bits()));
-    }
+    let freqs = device_freqs(rt, state, pos, batch, group.is_some())?;
+    let mut qr = project(rt, &prefix, "wq_a", x, batch, 1280, 1)?;
+    let gamma = rt.vector_ptr(&format!("{prefix}.q_norm.weight"), 1280)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize(rt.device, qr.as_mut_ptr(), gamma, 1280, batch as i32) },
+        "normalizing attention query projection",
+    )?;
+    let mut q = project(rt, &prefix, "wq_b", &qr, batch, HEADS * DIM, 1)?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_transform(
+                rt.device,
+                q.as_mut_ptr(),
+                ptr::null_mut(),
+                freqs,
+                HEADS as i32,
+                DIM as i32,
+                0,
+                0,
+                batch as i32,
+            )
+        },
+        "rotating attention queries",
+    )?;
+    let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
+    let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32) },
+        "normalizing window keys",
+    )?;
+    // Storage is packed BF16, with two values in each pooled four-byte element.
+    let mut current = rt.buffer(batch * DIM / 2)?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_transform(
+                rt.device,
+                kv.as_mut_ptr(),
+                current.as_mut_ptr().cast(),
+                freqs,
+                1,
+                DIM as i32,
+                64,
+                0,
+                batch as i32,
+            )
+        },
+        "packing attention window",
+    )?;
+    drop(kv);
 
     let mut width = 0;
-    let mut ids = Vec::new();
+    let mut ids: *const i32 = ptr::null();
     let mut values = ptr::null_mut();
     if let Some((owner, ratio)) = group {
         if layer == owner {
@@ -654,23 +987,40 @@ pub fn forward(
                 pos,
                 batch,
                 ratio,
+                owner,
+                state.verify.as_mut(),
             )?;
         }
         if layer == owner || [24, 28, 32, 36].contains(&layer) {
             select(
-                rt, state, owner, ratio, &prefix, layer, x, &qr, pos, batch, &freqs,
+                rt, state, owner, ratio, &prefix, layer, x, &qr, pos, batch, freqs,
             )?;
+            ensure!(
+                state.selected.len() == batch,
+                "missing shared top-k index rows"
+            );
+            state.width = state.selected.iter().map(Vec::len).max().unwrap_or(0);
+            if state.width > 0 {
+                let mut flat = Vec::with_capacity(batch * state.width);
+                for row in &state.selected {
+                    flat.extend_from_slice(row);
+                    flat.resize(flat.len() + state.width - row.len(), -1);
+                }
+                use std::collections::hash_map::Entry;
+                let picks = match state.picks.entry(rt.device) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
+                };
+                picks.write(&flat)?;
+            }
         }
-        ensure!(
-            state.selected.len() == batch,
-            "missing shared top-k index rows"
-        );
-        width = state.selected.iter().map(Vec::len).max().unwrap_or(0);
-        for row in &state.selected {
-            ids.extend_from_slice(row);
-            ids.resize(ids.len() + width - row.len(), -1);
-        }
+        width = state.width;
         if width != 0 {
+            ids = state
+                .picks
+                .get(&rt.device)
+                .context("missing selected attention indices")?
+                .data();
             values = state
                 .sources
                 .get_mut(&owner)
@@ -679,55 +1029,80 @@ pub fn forward(
                 .on(rt.device)?;
         }
     }
-    let sink = weights(rt, &prefix, "attn_sink", HEADS)?;
+    drop(qr);
+    let sink = rt.vector_ptr(&format!("{prefix}.attn_sink"), HEADS)?;
     let work = scratch(state, rt.device)?;
-    let mut o = vec![0f32; q.len()];
-    let (window_span, decode) = state.window_layout(pos, batch);
+    let (span, decode) = state.window_layout(pos, batch);
+    let window = state.windows.entry(layer).or_default();
+    let ring = window.on(rt.device)?;
+    let mut o = rt.buffer(q.len())?;
     // Bound temporary expanded compressed values to 16 MiB per call.
-    let step = (16 * 1024 * 1024 / ((width.max(1) * DIM * 2) + HEADS * DIM * 8)).max(1);
+    let step = (16 * 1024 * 1024 / (width.max(1) * DIM * 2)).max(1);
     for t in (0..batch).step_by(step) {
         let n = step.min(batch - t);
-        let h = (history + t).min(WINDOW - 1);
-        let w = &window[(history + t - h) * DIM..];
         cuda_ok(
             unsafe {
                 ds4_attn_sparse(
                     rt.device,
                     work,
-                    q[t * HEADS * DIM..].as_ptr(),
-                    w.as_ptr(),
-                    h as i32,
-                    window_span as i32,
+                    q.as_ptr().add(t * HEADS * DIM),
+                    ring.data(),
+                    current.as_ptr().cast(),
+                    pos as i32,
+                    t as i32,
+                    span as i32,
                     i32::from(decode),
                     values,
-                    ids[t * width..].as_ptr(),
+                    ids.wrapping_add(t * width),
                     width as i32,
-                    sink.as_ptr(),
+                    sink,
                     n as i32,
-                    o[t * HEADS * DIM..].as_mut_ptr(),
+                    o.as_mut_ptr().add(t * HEADS * DIM),
                 )
             },
             "sparse attention",
         )?;
     }
-    o.par_chunks_exact_mut(HEADS * DIM)
-        .zip(&freqs)
-        .for_each(|(row, f)| {
-            for head in row.as_chunks_mut::<DIM>().0 {
-                rotate(head, f, true);
-                fp8_qdq(head, 32);
-            }
-        });
-    let mut down = rt.group_linear(&format!("{prefix}.wo_a.weight"), &o, batch, 8)?;
-    ensure!(down.len() == batch * 8 * 1024, "wo_a output shape mismatch");
-    down.iter_mut().for_each(|v| *v = b16(*v));
-    let mut out = linear(rt, &prefix, "wo_b", &down, batch, HIDDEN)?;
-    out.iter_mut().for_each(|v| *v = b16(*v));
-    let start = window.len().saturating_sub((WINDOW - 1) * DIM);
-    let w = state.windows.entry(layer).or_default();
-    w.rows.clear();
-    w.rows.extend_from_slice(&window[start..]);
-    w.next_pos = pos + batch;
+    drop(q);
+    let kept = batch.min(2 * WINDOW);
+    cuda_ok(
+        unsafe {
+            ds4_attn_window(
+                rt.device,
+                ring.ptr.as_ptr(),
+                (pos + batch - kept) as i32,
+                kept as i32,
+                current
+                    .as_mut_ptr()
+                    .cast::<u16>()
+                    .add((batch - kept) * DIM)
+                    .cast(),
+                DEVICE_TO_DEVICE,
+            )
+        },
+        "updating attention window",
+    )?;
+    drop(current);
+    cuda_ok(
+        unsafe {
+            ds4_attn_transform(
+                rt.device,
+                o.as_mut_ptr(),
+                ptr::null_mut(),
+                freqs,
+                HEADS as i32,
+                DIM as i32,
+                32,
+                1,
+                batch as i32,
+            )
+        },
+        "rotating and quantizing attention output",
+    )?;
+    let down = project(rt, &prefix, "wo_a", &o, batch, 8 * 1024, 8)?;
+    drop(o);
+    let out = project(rt, &prefix, "wo_b", &down, batch, HIDDEN, 1)?;
+    window.next_pos = pos + batch;
     Ok(out)
 }
 
@@ -823,12 +1198,13 @@ mod tests {
             2,
             Window {
                 rows: vec![17; DIM * 3],
+                ring: None,
                 next_pos: 3,
             },
         );
         original.selected = vec![vec![0]];
         original.blocks = vec![vec![0]];
-        let mut branch = original.host_snapshot();
+        let mut branch = original.host_snapshot().unwrap();
         assert!(
             branch.scratch.is_empty() && branch.blocks.is_empty() && branch.selected.is_empty()
         );
@@ -861,6 +1237,199 @@ mod tests {
     }
 
     #[test]
+    fn verification_restores_compressed_bytes_and_each_possible_pending_pair() -> Result<()> {
+        for pos in [3, 4] {
+            let n = 7;
+            let raw: Vec<_> = (0..(pos + n) * DIM).map(|i| (i % 3741) as f32).collect();
+            let gate: Vec<_> = raw.iter().map(|v| -v).collect();
+            for accepted in 0..=n {
+                let mut state = AttentionState::default();
+                let mut src = Source::default();
+                let base = pos * DIM;
+                pool_pairs(
+                    &raw[..base],
+                    &gate[..base],
+                    &mut src.pending_kv,
+                    &mut src.pending_gate,
+                );
+                state.begin_verify(pos, n)?;
+                let pending = PendingPairs::capture(pos, &src, &raw[base..], &gate[base..]);
+                state.verify.as_mut().unwrap().pending.insert(2, pending);
+                pool_pairs(
+                    &raw[base..],
+                    &gate[base..],
+                    &mut src.pending_kv,
+                    &mut src.pending_gate,
+                );
+                src.keys.packed.resize((pos + n) / 2 * INDEX_BYTES, 1);
+                src.values.packed.resize((pos + n) / 2 * KV_BYTES, 2);
+                state.sources.insert(2, src);
+                for layer in 0..40 {
+                    state.windows.insert(
+                        layer,
+                        Window {
+                            next_pos: pos + n,
+                            ..Default::default()
+                        },
+                    );
+                }
+                state.finish_verify(accepted)?;
+                let next = pos + accepted;
+                assert!(state.windows.values().all(|w| w.next_pos == next));
+                let src = &state.sources[&2];
+                assert_eq!(src.values.packed.len(), next / 2 * KV_BYTES);
+                assert_eq!(src.keys.packed.len(), next / 2 * INDEX_BYTES);
+                let mut kv = Vec::new();
+                let mut gates = Vec::new();
+                pool_pairs(&raw[..next * DIM], &gate[..next * DIM], &mut kv, &mut gates);
+                assert_eq!(src.pending_kv, kv);
+                assert_eq!(src.pending_gate, gates);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "set DS4_TEST_DEVICE to a visible CUDA sm_120 inference GPU ordinal"]
+    fn cuda_window_wrap_snapshot_and_speculative_rewind() -> Result<()> {
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let pos = 291;
+        let batch = WINDOW;
+        let rows: Vec<_> = (0..(pos + batch) * DIM)
+            .map(|i| (i * 613 % 65521) as u16)
+            .collect();
+        let mut window = Window {
+            rows: rows[(pos - WINDOW + 1) * DIM..pos * DIM].to_vec(),
+            ring: None,
+            next_pos: pos,
+        };
+        let new = upload(device, &rows[pos * DIM..])?;
+        let ring = window.on(device)?;
+        cuda_ok(
+            unsafe {
+                ds4_attn_window(
+                    device,
+                    ring.ptr.as_ptr(),
+                    pos as i32,
+                    batch as i32,
+                    new.data(),
+                    DEVICE_TO_DEVICE,
+                )
+            },
+            "writing tentative window",
+        )?;
+        for keep in 0..=batch {
+            let end = pos + keep;
+            window.next_pos = end;
+            let snapshot = window.host_snapshot()?;
+            assert_eq!(snapshot.rows, rows[(end - WINDOW + 1) * DIM..end * DIM]);
+        }
+        Ok(())
+    }
+
+    fn upload<T: Copy>(device: i32, host: &[T]) -> Result<GpuBuffer> {
+        let buf = GpuBuffer::new(device)?;
+        buf.write(host)?;
+        Ok(buf)
+    }
+
+    fn read<T: Copy>(buf: &GpuBuffer, host: &mut [T]) -> Result<()> {
+        cuda_ok(
+            unsafe {
+                ds4_attn_read(
+                    buf.device,
+                    buf.data(),
+                    host.as_mut_ptr().cast(),
+                    std::mem::size_of_val(host),
+                )
+            },
+            "reading test output",
+        )
+    }
+
+    #[test]
+    #[ignore = "set DS4_TEST_DEVICE to a visible CUDA sm_120 inference GPU ordinal"]
+    fn cuda_normalization_rope_and_quantization_match_reference() -> Result<()> {
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let n = 3;
+        let sample = |i: usize| ((i * 7057 % 19009) as f32 - 9000.) / 307.;
+        for width in [512, 1280, 5120] {
+            let x: Vec<_> = (0..n * width).map(sample).collect();
+            let gamma: Vec<_> = (0..width).map(|i| b16(sample(i + 302) / 19.)).collect();
+            let values = upload(device, &x)?;
+            let g = upload(device, &gamma)?;
+            let mut expected: Vec<_> = x.iter().copied().map(b16).collect();
+            normalize(&mut expected, &gamma);
+            cuda_ok(
+                unsafe {
+                    ds4_attn_normalize(device, values.data(), g.data(), width as i32, n as i32)
+                },
+                "normalization regression",
+            )?;
+            let mut actual = vec![0.; x.len()];
+            read(&values, &mut actual)?;
+            assert_eq!(actual, expected);
+        }
+        let angles: Vec<_> = (524284..524284 + n)
+            .map(|pos| rotary_freqs(pos, true))
+            .collect();
+        let freqs = upload(device, &angles)?;
+        for (heads, cols, group, inverse, window) in [
+            (HEADS, DIM, 0, false, false),
+            (HEADS, DIM, 32, true, false),
+            (1, DIM, 64, false, true),
+            (INDEX_HEADS, INDEX_DIM, INDEX_DIM, false, false),
+        ] {
+            let x: Vec<_> = (0..n * heads * cols).map(sample).collect();
+            let mut expected: Vec<_> = x.iter().copied().map(b16).collect();
+            for (i, row) in expected.chunks_exact_mut(cols).enumerate() {
+                rotate(row, &angles[i / heads], inverse);
+                if group > 0 {
+                    fp8_qdq(&mut row[..if window { NOPE } else { cols }], group);
+                }
+            }
+            let values = upload(device, &x)?;
+            let packed = upload(device, &vec![0u16; x.len()])?;
+            cuda_ok(
+                unsafe {
+                    ds4_attn_transform(
+                        device,
+                        values.data(),
+                        if window {
+                            packed.data()
+                        } else {
+                            ptr::null_mut()
+                        },
+                        freqs.data(),
+                        heads as i32,
+                        cols as i32,
+                        group as i32,
+                        i32::from(inverse),
+                        n as i32,
+                    )
+                },
+                "rotation regression",
+            )?;
+            if window {
+                let mut actual = vec![0u16; x.len()];
+                read(&packed, &mut actual)?;
+                assert_eq!(
+                    actual,
+                    expected
+                        .iter()
+                        .map(|x| bf16::from_f32(*x).to_bits())
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                let mut actual = vec![0.; x.len()];
+                read(&values, &mut actual)?;
+                assert_eq!(actual, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "set DS4_TEST_DEVICE to a visible CUDA sm_120 inference GPU ordinal"]
     fn cuda_sparse_places_compressed_values_after_masked_window_columns() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
@@ -880,11 +1449,16 @@ mod tests {
         pack_values(&key, &mut rows.packed);
         let latent = rows.on(device)?;
         let mut query = vec![0.; HEADS * DIM];
-        let sink = [-2.; HEADS];
+        let sink = [-2.0f32; HEADS];
         for h in 0..HEADS {
             query[h * DIM] = b16((h + 1) as f32 * 0.75);
         }
         let mut actual = vec![0.; query.len()];
+        let q_dev = upload(device, &query)?;
+        let win_dev = upload(device, &window)?;
+        let ids_dev = upload(device, &[0i32])?;
+        let sink_dev = upload(device, &sink)?;
+        let out = upload(device, &actual)?;
         let mut distinguished = 0;
         for decode in [0, 1] {
             cuda_ok(
@@ -892,21 +1466,24 @@ mod tests {
                     ds4_attn_sparse(
                         device,
                         work.ptr.as_ptr(),
-                        query.as_ptr(),
-                        window.as_ptr(),
+                        q_dev.data(),
+                        ptr::null(),
+                        win_dev.data(),
+                        0,
                         1,
                         128,
                         decode,
                         latent,
-                        [0].as_ptr(),
+                        ids_dev.data(),
                         1,
-                        sink.as_ptr(),
+                        sink_dev.data(),
                         1,
-                        actual.as_mut_ptr(),
+                        out.data(),
                     )
                 },
                 "padded window regression",
             )?;
+            read(&out, &mut actual)?;
             for h in 0..HEADS {
                 let q = query[h * DIM] / (DIM as f32).sqrt();
                 let scores = [1.5 * q, q, 2. * q];

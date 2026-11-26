@@ -9,6 +9,8 @@
 namespace {
 constexpr int dim = 512, heads = 64, win = 128, top = 512;
 constexpr int ih = 32, idim = 128;
+// Retains up to 128 tentative rows alongside the 127 committed rows needed by attention.
+constexpr int ring_rows = 2 * win;
 constexpr int block = 256;
 constexpr int align = 256;
 
@@ -54,6 +56,71 @@ __device__ float fp8_value(uint8_t code) {
     __nv_fp8_e4m3 v; v.__x = code; return float(v);
 }
 
+__device__ float bf16(float x) {
+    return __bfloat162float(__float2bfloat16_rn(x));
+}
+
+// The CPU reference accumulates squares in feature order without contraction.
+// Compute the products in parallel, then preserve that order for the single sum.
+__global__ void normalize_rows(float *x, const float *gamma, int width) {
+    extern __shared__ float squares[];
+    __shared__ float inv;
+    float *row = x + size_t(blockIdx.x) * width;
+    for (int j = threadIdx.x; j < width; j += blockDim.x) {
+        const float v = bf16(row[j]);
+        squares[j] = __fmul_rn(v, v);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sum = 0;
+        for (int j = 0; j < width; ++j) sum = __fadd_rn(sum, squares[j]);
+        inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(sum, float(width)), 1e-20f)));
+    }
+    __syncthreads();
+    for (int j = threadIdx.x; j < width; j += blockDim.x)
+        row[j] = bf16(__fmul_rn(__fmul_rn(bf16(row[j]), inv), gamma[j]));
+}
+
+// One block per head. The sine/cosine pairs come from the same host sin_cos
+// implementation as the compressed source. Quantization groups span whole warps.
+__global__ void transform_heads(float *data, __nv_bfloat16 *window, const float2 *freqs,
+                                int nheads, int cols, int group, bool inverse) {
+    __shared__ float row[dim];
+    const size_t off = size_t(blockIdx.x) * cols;
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) row[j] = bf16(data[off + j]);
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        const int k = cols - 64 + threadIdx.x * 2;
+        const float2 f = freqs[size_t(blockIdx.x / nheads) * 32 + threadIdx.x];
+        const float s = inverse ? -f.x : f.x;
+        const float a = row[k], b = row[k + 1];
+        row[k] = bf16(__fsub_rn(__fmul_rn(a, f.y), __fmul_rn(b, s)));
+        row[k + 1] = bf16(__fadd_rn(__fmul_rn(a, s), __fmul_rn(b, f.y)));
+    }
+    __syncthreads();
+    const int quant_cols = window ? cols - 64 : cols;
+    if (group) {
+        const int lane = threadIdx.x % 32;
+        for (int start = (threadIdx.x / 32) * group; start < quant_cols;
+             start += (blockDim.x / 32) * group) {
+            float peak = 1e-4f;
+            for (int j = lane; j < group; j += 32) peak = fmaxf(peak, fabsf(row[start+j]));
+            for (int d = 16; d; d /= 2) peak = fmaxf(peak, __shfl_xor_sync(0xffffffffu, peak, d));
+            const unsigned bits = __float_as_uint(__fmul_rn(peak, 1.f / 448.f));
+            const float scale = __uint_as_float((bits + 0x7fffffu) & 0x7f800000u);
+            for (int j = lane; j < group; j += 32) {
+                const float v = __fdiv_rn(row[start+j], scale);
+                row[start+j] = float(__nv_fp8_e4m3(v)) * scale;
+            }
+        }
+        __syncthreads();
+    }
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        if (window) window[off+j] = __float2bfloat16_rn(row[j]);
+        else data[off+j] = row[j];
+    }
+}
+
 __device__ float unpack_value(const uint8_t *row, int col) {
     if (col < 448) {
         const float scale = __uint_as_float(unsigned(row[576+col/64]) << 23);
@@ -79,19 +146,25 @@ __device__ float warp_sum(float v) {
     return v;
 }
 
-__global__ void attend(const float *queries, const __nv_bfloat16 *window, int history, int span, bool decode,
+__device__ const __nv_bfloat16 *window_row(const __nv_bfloat16 *prior, const __nv_bfloat16 *current,
+                                        int pos, int token) {
+    return token < pos ? prior + (token % ring_rows) * dim : current + size_t(token - pos) * dim;
+}
+
+__global__ void attend(const float *queries, const __nv_bfloat16 *prior,
+                       const __nv_bfloat16 *current, int pos, int tile, int span, bool decode,
                        const __nv_bfloat16 *selected, const int *picks, int width,
                        const float *sink, float *out) {
     const int h = blockIdx.x, t = blockIdx.y, tid = threadIdx.x;
     const int lane = tid % 32, warp = tid / 32;
-    const int nwindow = min(win, history + t + 1);
+    const int end = pos + tile + t + 1;
+    const int nwindow = min(win, end);
     // The reference reserves window columns before compressed columns, even
     // while the ring is filling. Prefill pads on the right. Decode traverses
     // the ring oldest-first, putting unfilled slots on the left.
     const int first = decode ? span - nwindow : 0;
     const int n = span + width;
-    const __nv_bfloat16 *w = window + size_t(history + t + 1 - nwindow) * dim;
-    const __nv_bfloat16 *c = selected + size_t(t) * width * dim;
+    const __nv_bfloat16 *c = width ? selected + size_t(t) * width * dim : nullptr;
     const size_t qoff = (size_t(t) * heads + h) * dim;
     __shared__ float q[dim], scores[win + top], probs[win + top], divisor;
     q[tid] = queries[qoff + tid]; q[tid + block] = queries[qoff + tid + block];
@@ -100,7 +173,7 @@ __global__ void attend(const float *queries, const __nv_bfloat16 *window, int hi
         float dot = 0.f;
         bool valid = (p >= first && p < first + nwindow) || (p >= span && picks[t * width + p - span] >= 0);
         if (valid) {
-            const __nv_bfloat16 *k = p < span ? w + (p-first) * dim : c + (p-span) * dim;
+            const __nv_bfloat16 *k = p < span ? window_row(prior, current, pos, end - nwindow + p - first) : c + (p-span) * dim;
             for (int j = lane; j < dim; j += 32) dot = fmaf(q[j], __bfloat162float(k[j]), dot);
         }
         dot = warp_sum(dot);
@@ -142,7 +215,7 @@ __global__ void attend(const float *queries, const __nv_bfloat16 *window, int hi
     float a = 0, b = 0;
     for (int p = 0; p < n; ++p) {
         if (probs[p] == 0) continue;
-        const __nv_bfloat16 *v = p < span ? w + (p-first) * dim : c + (p-span) * dim;
+        const __nv_bfloat16 *v = p < span ? window_row(prior, current, pos, end - nwindow + p - first) : c + (p-span) * dim;
         a = fmaf(probs[p], __bfloat162float(v[tid]), a);
         b = fmaf(probs[p], __bfloat162float(v[tid + block]), b);
     }
@@ -168,7 +241,7 @@ __global__ void score_keys(const uint8_t *keys, const float *queries, const floa
         for (int j = 0; j < 4; ++j) dot = fmaf(key[j], q[lane + j*32], dot);
         dot = warp_sum(dot);
         if (!lane) {
-            score = fmaf(fmaxf(0, dot), weights[t * ih + h], score);
+            score = fmaf(fmaxf(0, dot), bf16(bf16(weights[t * ih + h]) / 64.f), score);
         }
     }
     if (!lane) scores[t * width + slot] = score;
@@ -188,31 +261,73 @@ extern "C" int ds4_attn_upload(int dev, void *buffer, const uint8_t *bytes,
     return 0;
 }
 
-extern "C" int ds4_attn_sparse(int dev, void *scratch, const float *queries,
-        const uint16_t *window, int history, int span, int decode, const void *cache, const int *ids, int width,
-        const float *sinks, int batch, float *out) {
+extern "C" void *ds4_attn_data(void *handle) {
+    return static_cast<Buffer *>(handle)->ptr;
+}
+
+extern "C" int ds4_attn_read(int dev, const void *src, void *dst, size_t bytes) {
+    TRY(cudaSetDevice(dev));
+    TRY(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// The persistent BF16 window is indexed by absolute token position modulo ring_rows.
+// Only its live suffix is serialized. Prefill chunks may exceed ring capacity.
+extern "C" int ds4_attn_window(int dev, void *handle, int start, int rows,
+                               void *data, cudaMemcpyKind kind) {
+    TRY(cudaSetDevice(dev));
+    auto *b = static_cast<Buffer *>(handle);
+    constexpr size_t row_bytes = dim * sizeof(__nv_bfloat16);
+    TRY(b->grow(ring_rows * row_bytes));
+    auto *ring = at<uint8_t>(b, 0);
+    auto *chunk = static_cast<uint8_t *>(data);
+    const int slot = start % ring_rows;
+    const int first = std::min(rows, ring_rows - slot);
+    auto copy = [&](int offset, int slot, int n) {
+        if (!n) return cudaSuccess;
+        void *r = ring + slot * row_bytes, *c = chunk + offset * row_bytes;
+        if (kind == cudaMemcpyDeviceToHost) return cudaMemcpy(c, r, n * row_bytes, kind);
+        if (kind == cudaMemcpyDeviceToDevice) return cudaMemcpyAsync(r, c, n * row_bytes, kind);
+        return cudaMemcpy(r, c, n * row_bytes, kind);
+    };
+    TRY(copy(0, slot, first));
+    TRY(copy(first, 0, rows - first));
+    return 0;
+}
+
+extern "C" int ds4_attn_normalize(int dev, float *x, const float *gamma, int width, int batch) {
+    TRY(cudaSetDevice(dev));
+    if (width < 1 || width > 5120) return (int)cudaErrorInvalidValue;
+    normalize_rows<<<batch,256,width * sizeof(float)>>>(x, gamma, width);
+    return (int)cudaGetLastError();
+}
+
+extern "C" int ds4_attn_transform(int dev, float *x, uint16_t *window, const float *freqs,
+                                   int nheads, int cols, int group, int inverse, int batch) {
+    TRY(cudaSetDevice(dev));
+    transform_heads<<<batch * nheads,128>>>(x, reinterpret_cast<__nv_bfloat16 *>(window),
+        reinterpret_cast<const float2 *>(freqs), nheads, cols, group, inverse != 0);
+    return (int)cudaGetLastError();
+}
+
+extern "C" int ds4_attn_sparse(int dev, void *scratch, const float *queries, const uint16_t *prior,
+        const uint16_t *current, int pos, int tile, int span, int decode, const void *cache,
+        const int *ids, int width, const float *sinks, int batch, float *out) {
     TRY(cudaSetDevice(dev));
     auto *b = static_cast<Buffer *>(scratch);
-    Layout l;
-    const size_t nq = size_t(batch) * heads * dim, nw = size_t(batch + history) * dim;
     const size_t np = size_t(batch) * width;
-    auto qo=l.slice<float>(nq), wo=l.slice<uint16_t>(nw), io=l.slice<int>(np);
-    auto so=l.slice<float>(heads), co=l.slice<uint16_t>(np * dim), oo=l.slice<float>(nq);
-    TRY(b->grow(l.used));
-    TRY(cudaMemcpy(at<float>(b,qo),queries,nq*4,cudaMemcpyHostToDevice));
-    TRY(cudaMemcpy(at<uint16_t>(b,wo),window,nw*2,cudaMemcpyHostToDevice));
-    TRY(cudaMemcpy(at<float>(b,so),sinks,heads*4,cudaMemcpyHostToDevice));
+    __nv_bfloat16 *selected = nullptr;
     if (np) {
-        TRY(cudaMemcpy(at<int>(b,io),ids,np*4,cudaMemcpyHostToDevice));
+        TRY(b->grow(np * dim * sizeof(__nv_bfloat16)));
+        selected = at<__nv_bfloat16>(b, 0);
         const auto *kv = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
-        gather<<<unsigned(np),block>>>(kv,at<int>(b,io),width,at<__nv_bfloat16>(b,co),int(np));
+        gather<<<unsigned(np),block>>>(kv, ids, width, selected, int(np));
         TRY(cudaGetLastError());
     }
-    attend<<<dim3(heads,batch),block>>>(at<float>(b,qo),at<__nv_bfloat16>(b,wo),history,span,decode != 0,
-        at<__nv_bfloat16>(b,co),at<int>(b,io),width,at<float>(b,so),at<float>(b,oo));
-    TRY(cudaGetLastError());
-    TRY(cudaMemcpy(out,at<float>(b,oo),nq*4,cudaMemcpyDeviceToHost));
-    return 0;
+    attend<<<dim3(heads,batch),block>>>(queries, reinterpret_cast<const __nv_bfloat16 *>(prior),
+        reinterpret_cast<const __nv_bfloat16 *>(current), pos, tile, span, decode != 0,
+        selected, ids, width, sinks, out);
+    return (int)cudaGetLastError();
 }
 
 extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const float *queries,
@@ -220,15 +335,13 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
     TRY(cudaSetDevice(dev));
     auto *b = static_cast<Buffer *>(scratch);
     Layout l;
-    const size_t nq = size_t(batch) * ih * idim, nw = size_t(batch) * ih, ns = size_t(batch) * width;
-    auto qo=l.slice<float>(nq), wo=l.slice<float>(nw), io=l.slice<int>(ids ? ns : 0), so=l.slice<float>(ns);
+    const size_t ns = size_t(batch) * width;
+    auto io=l.slice<int>(ids ? ns : 0), so=l.slice<float>(ns);
     TRY(b->grow(l.used));
-    TRY(cudaMemcpy(at<float>(b,qo),queries,nq*4,cudaMemcpyHostToDevice));
-    TRY(cudaMemcpy(at<float>(b,wo),weights,nw*4,cudaMemcpyHostToDevice));
     if (ids) TRY(cudaMemcpy(at<int>(b,io),ids,ns*4,cudaMemcpyHostToDevice));
     auto *keys = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
-    score_keys<<<dim3((width+block/32-1)/(block/32),batch),block>>>(keys,at<float>(b,qo),
-        at<float>(b,wo),ids ? at<int>(b,io) : nullptr,width,at<float>(b,so));
+    score_keys<<<dim3((width+block/32-1)/(block/32),batch),block>>>(keys,queries,
+        weights,ids ? at<int>(b,io) : nullptr,width,at<float>(b,so));
     TRY(cudaGetLastError());
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
     return 0;
