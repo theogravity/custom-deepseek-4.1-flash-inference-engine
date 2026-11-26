@@ -23,6 +23,29 @@ fn payload_size(pos: usize) -> Result<usize> {
 }
 
 impl AttentionState {
+    /// Observe initialized host payloads that still need their first GPU
+    /// installation. Pending unpaired compressor rows remain on the host.
+    pub(crate) fn profile_restore(&mut self, probe: Probe) {
+        let (mut count, mut bytes) = (0, 0);
+        for w in self.windows.values_mut().filter(|w| w.ring.is_none()) {
+            w.restored = RestoredPart::attach(
+                &probe,
+                std::mem::size_of_val(w.rows.as_slice()),
+                &mut count,
+                &mut bytes,
+            );
+        }
+        for source in self.sources.values_mut() {
+            for r in [&mut source.keys, &mut source.values] {
+                if r.writer.is_none() && r.devices.is_empty() {
+                    r.restored =
+                        RestoredPart::attach(&probe, r.packed.len(), &mut count, &mut bytes);
+                }
+            }
+        }
+        probe.expect(count, bytes);
+    }
+
     pub(crate) fn snapshot_bytes(pos: usize) -> Result<usize> {
         payload_size(pos)
     }
@@ -155,6 +178,7 @@ impl AttentionState {
             state.windows.insert(
                 layer,
                 Window {
+                    restored: None,
                     rows,
                     next_pos: pos,
                     ring: None,
@@ -206,6 +230,75 @@ mod tests {
             *b = (i * 13 % 251) as u8;
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn restore_profile_counts_only_initialized_gpu_payloads() -> Result<()> {
+        for (pos, parts) in [(0, 0), (1, 42), (2, 48), (257, 48)] {
+            let bytes = payload(pos)?;
+            let mut state = AttentionState::decode_snapshot(&bytes, pos)?;
+            let probe = Probe::for_test();
+            state.profile_restore(probe.clone());
+            let transfer = 40 * pos.min(WINDOW - 1) * DIM * 2
+                + (3 * (pos / 2) + pos) * (KV_BYTES + INDEX_BYTES);
+            assert_eq!(probe.progress(), (parts, 0, transfer, 0, parts == 0));
+            assert_eq!(state.encode_snapshot(pos)?, bytes);
+            drop(state);
+            assert_eq!(probe.progress(), (parts, 0, transfer, 0, parts == 0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires both inference GPUs"]
+    fn cuda_restore_profile_completes_once_after_the_last_successful_install() -> Result<()> {
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "mask to both inference GPUs"
+        );
+        let pos = 257;
+        let mut state = AttentionState::decode_snapshot(&payload(pos)?, pos)?;
+        // A previously installed window and host-backed key cache are excluded.
+        state.windows.get_mut(&0).unwrap().on(0, None)?;
+        state.sources.get_mut(&2).unwrap().keys.on(0, None)?;
+        let prefix_bytes = 39 * (WINDOW - 1) * DIM * 2
+            + (3 * (pos / 2) + pos) * (KV_BYTES + INDEX_BYTES)
+            - pos / 2 * INDEX_BYTES;
+        let probe = Probe::for_test();
+        state.profile_restore(probe.clone());
+        assert_eq!(probe.progress(), (46, 0, prefix_bytes, 0, false));
+        let w = state.windows.get_mut(&1).unwrap();
+        let missing = w.rows.pop().unwrap();
+        assert!(w.on(0, None).is_err());
+        assert_eq!(probe.progress(), (46, 0, prefix_bytes, 0, false));
+        w.rows.push(missing);
+        for (layer, w) in &mut state.windows {
+            w.on(i32::from(*layer >= 20), None)?;
+            w.on(i32::from(*layer >= 20), None)?;
+        }
+        for owner in OWNERS {
+            let s = state.sources.get_mut(&owner).unwrap();
+            let dev = i32::from(owner >= 20);
+            // The CPU compressor can append fresh host rows before uploading
+            // its saved prefix. Only the original bytes belong to restoration.
+            s.keys.packed.resize(s.keys.packed.len() + INDEX_BYTES, 0);
+            s.keys.on(dev, None)?;
+            if owner == 20 {
+                assert_eq!(
+                    probe.progress(),
+                    (46, 45, prefix_bytes, prefix_bytes - pos * KV_BYTES, false)
+                );
+            }
+            s.values.on(dev, None)?;
+            s.values.on(dev, None)?;
+        }
+        assert_eq!(probe.progress(), (46, 46, prefix_bytes, prefix_bytes, true));
+        let window_bytes = (WINDOW - 1) * DIM * 2;
+        let first = 19 * window_bytes + pos / 2 * (3 * KV_BYTES + 2 * INDEX_BYTES);
+        let second = 20 * window_bytes + pos * (KV_BYTES + INDEX_BYTES);
+        assert_eq!(probe.card_bytes(0), (first, first + 2 * INDEX_BYTES));
+        assert_eq!(probe.card_bytes(1), (second, second + INDEX_BYTES));
+        Ok(())
     }
 
     #[test]

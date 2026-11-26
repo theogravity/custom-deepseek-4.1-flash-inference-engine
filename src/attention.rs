@@ -3,6 +3,7 @@
 #[path = "attention_snapshot.rs"]
 mod snapshot;
 
+use crate::restore_timing::Probe;
 use crate::runtime::{Dev, Runtime};
 use anyhow::{ensure, Context, Result};
 use half::bf16;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 const HIDDEN: usize = 5120;
 const HEADS: usize = 64;
@@ -247,8 +249,34 @@ fn cuda_ok(code: i32, op: &str) -> Result<()> {
     Ok(())
 }
 
+// Each tag describes only bytes present in the saved image. A CPU compressor
+// can append fresh host rows before the same allocation and upload take place.
+struct RestoredPart {
+    probe: Probe,
+    bytes: usize,
+}
+impl RestoredPart {
+    fn attach(probe: &Probe, bytes: usize, count: &mut usize, total: &mut usize) -> Option<Self> {
+        if bytes == 0 {
+            return None;
+        }
+        *count += 1;
+        *total += bytes;
+        Some(Self {
+            probe: probe.clone(),
+            bytes,
+        })
+    }
+
+    fn installed(self, device: i32, transferred: usize, start: Instant) {
+        self.probe
+            .installed(device, self.bytes, transferred, start.elapsed());
+    }
+}
+
 #[derive(Default)]
 struct Rows {
+    restored: Option<RestoredPart>,
     initial_bytes: usize,
     max_bytes: usize,
     writer: Option<i32>,
@@ -332,6 +360,7 @@ impl Rows {
         if let Some(writer) = self.writer {
             require_state!(writer == dev, "compressed source device changed");
         }
+        let started = self.restored.as_ref().map(|_| Instant::now());
         let requested = self.len() + tail;
         let current = self
             .devices
@@ -362,6 +391,12 @@ impl Rows {
                 "uploading compressed attention rows",
             )?;
             *old = self.packed.len();
+            if let Some(start) = started {
+                self.restored
+                    .take()
+                    .unwrap()
+                    .installed(dev, extra.len(), start);
+            }
         }
         Ok(buf.ptr.as_ptr())
     }
@@ -377,6 +412,7 @@ struct Source {
 
 #[derive(Default)]
 struct Window {
+    restored: Option<RestoredPart>,
     rows: Vec<u16>, // Chronological history in a host snapshot.
     ring: Option<GpuBuffer>,
     next_pos: usize,
@@ -389,6 +425,7 @@ const DEVICE_TO_DEVICE: i32 = 3;
 impl Window {
     fn on(&mut self, dev: i32, cache: Option<&mut crate::moe::MoeCache>) -> Result<&GpuBuffer> {
         if self.ring.is_none() {
+            let started = self.restored.as_ref().map(|_| Instant::now());
             let ring = GpuBuffer::new(dev)?;
             if let Some(cache) = cache {
                 ring.reserve_growth(cache, 2 * WINDOW * DIM * size_of::<u16>())?;
@@ -412,6 +449,13 @@ impl Window {
                 "restoring attention window",
             )?;
             self.ring = Some(ring);
+            if let Some(start) = started {
+                self.restored.take().unwrap().installed(
+                    dev,
+                    self.rows.len() * size_of::<u16>(),
+                    start,
+                );
+            }
             self.rows = Vec::new();
         }
         let ring = self.ring.as_ref().unwrap();
@@ -441,6 +485,7 @@ impl Window {
             self.rows.clone()
         };
         Ok(Self {
+            restored: None,
             rows,
             ring: None,
             next_pos: self.next_pos,
@@ -1921,6 +1966,7 @@ mod tests {
         original.windows.insert(
             2,
             Window {
+                restored: None,
                 rows: vec![17; DIM * 3],
                 ring: None,
                 next_pos: 3,
@@ -2023,6 +2069,7 @@ mod tests {
             .map(|i| (i * 613 % 65521) as u16)
             .collect();
         let mut window = Window {
+            restored: None,
             rows: rows[(pos - WINDOW + 1) * DIM..pos * DIM].to_vec(),
             ring: None,
             next_pos: pos,
