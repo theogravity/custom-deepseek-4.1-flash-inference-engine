@@ -1,0 +1,71 @@
+[
+  {
+    "drafter": "none",
+    "sha256": "02661c4460daa24622a4f51ee0e000113b66701b8311903798eca520f4646e85",
+    "exact_target_text": true,
+    "decode_tok_s": 84.37622097044846,
+    "runs": [
+      {
+        "warmup": true,
+        "visible_tokens": 256,
+        "ttft_s": 7.551046649,
+        "decode_tok_s": 14.235281763149768
+      },
+      {
+        "warmup": false,
+        "visible_tokens": 256,
+        "ttft_s": 0.032955909,
+        "decode_tok_s": 84.37622097044846
+      }
+    ],
+    "counts": []
+  },
+  {
+    "drafter": "released",
+    "sha256": "02661c4460daa24622a4f51ee0e000113b66701b8311903798eca520f4646e85",
+    "exact_target_text": true,
+    "decode_tok_s": 269.7754337873131,
+    "runs": [
+      {
+        "warmup": true,
+        "visible_tokens": 256,
+        "ttft_s": 2.766238428,
+        "decode_tok_s": 39.339756467327064
+      },
+      {
+        "warmup": false,
+        "visible_tokens": 256,
+        "ttft_s": 0.032372325,
+        "decode_tok_s": 269.7754337873131
+      }
+    ],
+    "counts": [
+      "speculative source=learned rounds=54 proposed=257 accepted=201",
+      "speculative source=learned rounds=54 proposed=257 accepted=201"
+    ]
+  },
+  {
+    "drafter": "code",
+    "sha256": "02661c4460daa24622a4f51ee0e000113b66701b8311903798eca520f4646e85",
+    "exact_target_text": true,
+    "decode_tok_s": 300.55943906311364,
+    "runs": [
+      {
+        "warmup": true,
+        "visible_tokens": 256,
+        "ttft_s": 2.673412763,
+        "decode_tok_s": 42.8603988643983
+      },
+      {
+        "warmup": false,
+        "visible_tokens": 256,
+        "ttft_s": 0.033062989,
+        "decode_tok_s": 300.55943906311364
+      }
+    ],
+    "counts": [
+      "speculative source=learned rounds=46 proposed=284 accepted=209",
+      "speculative source=learned rounds=46 proposed=284 accepted=209"
+    ]
+  }
+]

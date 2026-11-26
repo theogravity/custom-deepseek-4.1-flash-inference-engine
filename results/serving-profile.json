@@ -1,0 +1,54 @@
+{
+  "source_commit": "5e31a73ab0ac5599b3d14a5abd6446a6945f1269",
+  "checkpoint": "diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
+  "weights_tokenizer_and_code_overlay_revision": "451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae",
+  "image_id": "sha256:128711a0b5c12336202ac5cba20ea1f19b610384de3ccce261ba689077108565",
+  "binary_sha256": "37cbc04083d0336e371357e7e5f28fa6a19090fab1fcc7535d496fe0635f237a",
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "nvcc": "13.5.37",
+  "arch": "sm_120f",
+  "device_ids": [
+    "1",
+    "2"
+  ],
+  "memory_mib_per_card": 97887,
+  "args": [
+    "serve",
+    "--bind",
+    "0.0.0.0:8001",
+    "--max-context",
+    "524288",
+    "--chunk-size",
+    "64"
+  ],
+  "environment": {
+    "DS4_PROMPT_LOOKUP": "1",
+    "DS4_PACKED_DENSE": "1",
+    "DS4_GPU_COMPRESS": "1",
+    "DS4_FAST_RMS": "1",
+    "DS4_DRAFTER": "code",
+    "DS4_GPU_INDEX": "1",
+    "DS4_MOE_PACKED_DECODE": "1",
+    "DS4_MOE_CACHE_GIB": "92",
+    "DS4_PREFIX_RAM_MIB": "2048",
+    "CUDA_VISIBLE_DEVICES": "0,1",
+    "DS4_LOOKUP_K": "128",
+    "DS4_FAST_ATTN": "1",
+    "DS4_MOE_FUSED": "1",
+    "DS4_EXPERT_PARALLEL": "1",
+    "DS4_PREFIX_DISK_MIB": "65536",
+    "DS4_PREFIX_DIR": "/prefix",
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+    "DS4_CONFIDENCE_THRESHOLD": "0.4",
+    "DS4_EXPERT_STAGED": "1",
+    "RAYON_NUM_THREADS": "12",
+    "DS4_EXPERT_PARALLEL_DRAFT": "0"
+  },
+  "tests": {
+    "passed": 48,
+    "ignored": 0,
+    "failed": 0,
+    "format": true,
+    "clippy_warnings": 0
+  }
+}
