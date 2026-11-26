@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{bail, ensure, Context, Result};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use tokenizers::Tokenizer;
 
 #[path = "batch.rs"]
@@ -259,7 +259,8 @@ pub struct Model {
     lookup: prompt_lookup::Config,
     batch_drafter: bool,
     rt: Runtime,
-    engram: Engram,
+    engram: Arc<Engram>,
+    overlap_prefill_engram: bool,
     max_ctx: usize,
     chunk: usize,
 }
@@ -294,7 +295,12 @@ impl Model {
                 _ => bail!("DS4_BATCH_DRAFT must be 0 or 1"),
             },
             rt: Runtime::open(pack, devices)?,
-            engram: Engram::new(tok)?,
+            engram: Arc::new(Engram::new(tok)?),
+            overlap_prefill_engram: match std::env::var("DS4_OVERLAP_PREFILL_ENGRAM").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => bail!("DS4_OVERLAP_PREFILL_ENGRAM must be 0 or 1"),
+            },
             max_ctx,
             chunk,
         })

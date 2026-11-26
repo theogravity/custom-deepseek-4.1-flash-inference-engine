@@ -3,7 +3,7 @@
 use super::{residual, ForwardItem, Model, Target, DIM};
 use crate::{
     attention,
-    engram::EngramRows,
+    engram::{with_prefetched_engrams, EngramRows},
     moe,
     runtime::{Dev, Runtime},
 };
@@ -112,6 +112,26 @@ impl Model {
         items: &mut [&mut ForwardItem<'_>],
         ids: &[u32],
     ) -> Result<Vec<Result<Target>>> {
+        if self.overlap_prefill_engram && self.rt.target_prefill && ids.len() >= 32 {
+            if let [item] = items {
+                let (history, pos, rows) = (item.ids, item.pos, item.rows);
+                let weights = self.rt.weights.clone();
+                let engram = self.engram.clone();
+                return with_prefetched_engrams(
+                    move |layer| engram.gather(&weights, layer, history, pos, rows),
+                    |source| self.forward_layers(items, ids, Some(source)),
+                );
+            }
+        }
+        self.forward_layers(items, ids, None)
+    }
+
+    fn forward_layers(
+        &mut self,
+        items: &mut [&mut ForwardItem<'_>],
+        ids: &[u32],
+        engram_rows: Option<std::sync::mpsc::Receiver<Result<EngramRows>>>,
+    ) -> Result<Vec<Result<Target>>> {
         let mut errors = (0..items.len()).map(|_| None).collect::<Vec<_>>();
         let rows = ids.len();
         let capture = items.iter().any(|s| s.capture_features);
@@ -129,6 +149,15 @@ impl Model {
                 h = self.rt.to_device(&host_h)?;
                 mix = self.rt.to_device(&host_mix)?;
             }
+            if matches!(layer, 1 | 14) {
+                if let Some(source) = &engram_rows {
+                    gathered = Some(
+                        source
+                            .recv()
+                            .context("prefill Engram worker ended early")??,
+                    );
+                }
+            }
             if let Some(engram) = gathered.take() {
                 engram.apply(&mut self.rt, &mut h)?;
             }
@@ -145,7 +174,7 @@ impl Model {
             }
             residual::expand(&self.rt, &mut h, &y, &mix, rows)?;
             drop((x, y));
-            if layer == 0 || layer == 13 {
+            if engram_rows.is_none() && matches!(layer, 0 | 13) {
                 for s in items.iter() {
                     let next =
                         self.engram

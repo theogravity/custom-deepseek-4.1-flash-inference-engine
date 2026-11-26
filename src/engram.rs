@@ -52,6 +52,33 @@ pub struct EngramRows {
     records: Vec<[PackedRow; HEADS]>,
 }
 
+/// Source IDs and immutable mmap data determine both gathers. CUDA work stays
+/// on the caller's thread. Join the worker even if the forward exits early.
+pub(crate) fn with_prefetched_engrams<T>(
+    mut gather: impl FnMut(usize) -> Result<EngramRows> + Send,
+    forward: impl FnOnce(std::sync::mpsc::Receiver<Result<EngramRows>>) -> Result<T>,
+) -> Result<T> {
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::sync_channel(2);
+        let worker = std::thread::Builder::new().spawn_scoped(scope, move || {
+            for layer in [1, 14] {
+                let rows = gather(layer);
+                let failed = rows.is_err();
+                if send.send(rows).is_err() || failed {
+                    break;
+                }
+            }
+        })?;
+        let result = forward(receive);
+        let joined = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("prefill Engram worker panicked"));
+        let output = result?;
+        joined?;
+        Ok(output)
+    })
+}
+
 impl EngramRows {
     pub(crate) fn append(&mut self, mut other: Self) {
         debug_assert_eq!(self.prefix, other.prefix);
@@ -233,6 +260,40 @@ mod tests {
         fn ds_alloc_f32(dev: i32, out: *mut *mut f32, n: usize) -> i32;
         fn ds_copy_f32(dev: i32, dst: *mut f32, src: *const f32, n: usize, kind: i32) -> i32;
         fn ds_free(dev: i32, p: *mut c_void);
+    }
+
+    #[test]
+    fn overlapping_engram_gathers_preserve_order_and_join_on_failures() -> Result<()> {
+        let gather = |layer: usize| {
+            Ok(EngramRows {
+                prefix: layer.to_string(),
+                records: vec![],
+            })
+        };
+        with_prefetched_engrams(gather, |source| {
+            assert_eq!(source.recv()??.prefix, "1");
+            assert_eq!(source.recv()??.prefix, "14");
+            Ok(())
+        })?;
+        let error: Result<()> = with_prefetched_engrams(
+            |_| panic!("injected gather failure"),
+            |_source| anyhow::bail!("injected forward failure"),
+        );
+        assert_eq!(error.unwrap_err().to_string(), "injected forward failure");
+        let error = with_prefetched_engrams(|_| panic!("injected gather failure"), |_| Ok(()));
+        assert_eq!(
+            error.unwrap_err().to_string(),
+            "prefill Engram worker panicked"
+        );
+        let error = with_prefetched_engrams(
+            |_| anyhow::bail!("bad gather"),
+            |source| {
+                source.recv()??;
+                Ok(())
+            },
+        );
+        assert_eq!(error.unwrap_err().to_string(), "bad gather");
+        Ok(())
     }
 
     struct Fixture {

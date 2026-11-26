@@ -175,7 +175,7 @@ impl Drop for Matrix {
     }
 }
 pub struct Runtime {
-    pub weights: Weights,
+    pub weights: Arc<Weights>,
     pub device: i32,
     pub moe_cache: MoeCache,
     pub(crate) attention_scratch: crate::attention::Workspace,
@@ -212,7 +212,7 @@ impl Runtime {
             _ => anyhow::bail!("DS4_PREFILL_MX_TILES must be 1, 2 or 4"),
         };
         let mut rt = Self {
-            weights,
+            weights: Arc::new(weights),
             device: devices[0],
             devices,
             moe_cache: MoeCache::default(),
