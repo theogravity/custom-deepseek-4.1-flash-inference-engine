@@ -37,7 +37,6 @@ pub(super) fn configured() -> Result<Config> {
 pub(super) struct PromptLookup<'a> {
     prompt: &'a [u32],
     config: Config,
-    width: usize,
     latest: HashMap<[u32; 4], usize>,
     previous: Vec<u32>,
 }
@@ -49,11 +48,6 @@ impl<'a> PromptLookup<'a> {
         let mut lookup = Self {
             prompt,
             config,
-            width: if config.adaptive {
-                config.max_width.min(16)
-            } else {
-                config.max_width
-            },
             latest: HashMap::new(),
             previous: vec![],
         };
@@ -67,7 +61,7 @@ impl<'a> PromptLookup<'a> {
         }
         lookup
     }
-    pub(super) fn propose(&self, ids: &[u32], remaining: usize) -> Vec<u32> {
+    pub(super) fn propose(&self, ids: &[u32], remaining: usize, learned_ready: bool) -> Vec<u32> {
         let width = self.config.max_width.min(remaining);
         if ids.len() < 4 || width == 0 {
             return vec![];
@@ -94,26 +88,16 @@ impl<'a> PromptLookup<'a> {
             }
             end = self.previous[end - 4] as usize;
         }
-        self.prompt[source..source + best.1.min(self.width)].to_vec()
-    }
-
-    /// Feedback is request-local and applies only to verified source proposals.
-    pub(super) fn observe(&mut self, proposed: usize, accepted: usize) {
-        if !self.config.adaptive {
-            return;
-        }
-        if accepted == proposed {
-            // A source ending or generation limit can truncate an otherwise
-            // short probe. Only grow when the current width was actually tested.
-            if proposed == self.width {
-                self.width = (self.width * 4).min(self.config.max_width);
-            }
-        } else {
-            // Retain a small margin above the observed copy length and cut an
-            // overlong failed probe immediately. Four rows bound near misses.
-            let margin = 4.max(accepted.div_ceil(4));
-            self.width = self.width.min(accepted + margin);
-        }
+        // Choose the source using the full available suffix, then spend more
+        // verification rows only when recent output follows that source closely.
+        let (matched, available) = best;
+        let length = match (self.config.adaptive, matched) {
+            (true, 0..16) if learned_ready => 0,
+            (true, 0..32) => available.min(16),
+            (true, 32..64) => available.min(64),
+            _ => available,
+        };
+        self.prompt[source..source + length].to_vec()
     }
 }
 #[cfg(test)]
@@ -127,61 +111,67 @@ mod tests {
     }
 
     #[test]
-    fn lookup_width_adapts_to_verified_copies_and_resets_for_each_request() {
-        let prompt: Vec<_> = (0..200).collect();
-        let mut lookup = PromptLookup::new(&prompt, config(true));
-        let prefix = &prompt[..4];
-        for (proposed, accepted) in [(16, 16), (64, 64), (128, 10), (14, 0), (4, 4), (16, 16)] {
-            assert_eq!(lookup.propose(prefix, 200), prompt[4..4 + proposed]);
-            lookup.observe(proposed, accepted);
-        }
-        assert_eq!(lookup.propose(prefix, 200).len(), 64);
-        assert_eq!(lookup.propose(prefix, 3), prompt[4..7]);
-        lookup.observe(3, 3);
-        assert_eq!(lookup.propose(&prompt[194..198], 200), prompt[198..]);
-        lookup.observe(2, 2);
-        assert_eq!(lookup.propose(prefix, 200).len(), 64);
-        assert_eq!(
-            PromptLookup::new(&prompt, config(true))
-                .propose(prefix, 200)
-                .len(),
-            16
-        );
-        let mut fixed = PromptLookup::new(&prompt, config(false));
-        fixed.observe(128, 0);
-        assert_eq!(fixed.propose(prefix, 200).len(), 128);
-        for cap in [1, 3, 9] {
-            let mut short = PromptLookup::new(
-                &prompt,
-                Config {
-                    max_width: cap,
-                    adaptive: true,
-                },
+    fn lookup_width_tracks_the_contiguous_source_match() {
+        let prompt: Vec<_> = (0..260).collect();
+        let lookup = PromptLookup::new(&prompt, config(true));
+        let fixed = PromptLookup::new(&prompt, config(false));
+        let end = 100;
+        for (matched, width) in [
+            (4, 16),
+            (15, 16),
+            (16, 16),
+            (31, 16),
+            (32, 64),
+            (63, 64),
+            (64, 128),
+            (95, 128),
+        ] {
+            let mut history = vec![9000; 40];
+            history.extend_from_slice(&prompt[end - matched..end]);
+            assert_eq!(
+                lookup.propose(&history, 150, false),
+                prompt[end..end + width]
             );
-            short.observe(cap, cap);
-            assert_eq!(short.propose(prefix, 200).len(), cap);
-            short.observe(cap, 0);
-            assert_eq!(short.propose(prefix, 200).len(), cap.min(4));
+            let ready_width = if matched < 16 { 0 } else { width };
+            assert_eq!(
+                lookup.propose(&history, 150, true),
+                prompt[end..end + ready_width]
+            );
+            assert_eq!(fixed.propose(&history, 150, true), prompt[end..end + 128]);
+            assert_eq!(lookup.propose(&history, 3, false), prompt[end..end + 3]);
         }
+        // A long match at the end of the prompt has only a short continuation.
+        assert_eq!(lookup.propose(&prompt[160..258], 128, false), prompt[258..]);
+        let capped = PromptLookup::new(
+            &prompt,
+            Config {
+                max_width: 9,
+                adaptive: true,
+            },
+        );
+        assert_eq!(capped.propose(&prompt[..64], 128, false), prompt[64..73]);
+        assert!(PromptLookup::new(&prompt, Config::default())
+            .propose(&prompt[..64], 128, false)
+            .is_empty());
     }
 
     #[test]
     fn longest_source_suffix_wins_and_never_crosses_prompt_end() {
         let prompt = [9, 8, 0, 1, 2, 3, 4, 5, 6, 7, 9, 9, 0, 1, 2, 3, 77];
         let lookup = PromptLookup::new(&prompt, config(false));
-        assert_eq!(lookup.propose(&[9, 8, 0, 1, 2, 3], 4), [4, 5, 6, 7]);
-        assert_eq!(lookup.propose(&[9, 9, 0, 1, 2, 3], 128), [77]);
+        assert_eq!(lookup.propose(&[9, 8, 0, 1, 2, 3], 4, false), [4, 5, 6, 7]);
+        assert_eq!(lookup.propose(&[9, 9, 0, 1, 2, 3], 128, false), [77]);
         assert!(lookup
-            .propose(&[101, 102, 103, 104, 101, 102, 103, 104], 128)
+            .propose(&[101, 102, 103, 104, 101, 102, 103, 104], 128, false)
             .is_empty());
-        assert!(lookup.propose(&[1, 2, 3], 128).is_empty());
+        assert!(lookup.propose(&[1, 2, 3], 128, false).is_empty());
         let prompt: Vec<_> = (0..140).collect();
         assert_eq!(
-            PromptLookup::new(&prompt, config(false)).propose(&[0, 1, 2, 3], 128),
+            PromptLookup::new(&prompt, config(false)).propose(&[0, 1, 2, 3], 128, false),
             (4..132).collect::<Vec<_>>()
         );
         assert!(PromptLookup::new(&prompt, Config::default())
-            .propose(&[0, 1, 2, 3], 128)
+            .propose(&[0, 1, 2, 3], 128, false)
             .is_empty());
     }
 }

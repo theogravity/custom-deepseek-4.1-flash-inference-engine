@@ -315,7 +315,7 @@ impl Model {
             }
         }
         let mut draft_stats = DraftStats::default();
-        let mut lookup = prompt_lookup::PromptLookup::new(input, self.lookup);
+        let lookup = prompt_lookup::PromptLookup::new(input, self.lookup);
         cache.begin_prefill(input.len());
         let reused = pos;
         let started = std::time::Instant::now();
@@ -373,15 +373,16 @@ impl Model {
             // Seed the complete visible history before generating its first proposal.
             ids.push(token);
             let remaining = limit - emitted - 1;
-            let mut proposed = lookup.propose(&ids, remaining);
+            let width = self.spec_k.min(remaining);
+            let learned = draft.as_mut().filter(|d| width > 0 && d.ready(pos));
+            let mut proposed = lookup.propose(&ids, remaining, learned.is_some());
             let mut source = if proposed.is_empty() {
                 ProposalSource::Target
             } else {
                 ProposalSource::Lookup
             };
-            let width = self.spec_k.min(remaining);
-            if source == ProposalSource::Target && width > 0 {
-                if let Some(draft) = draft.as_mut().filter(|d| d.ready(pos)) {
+            if source == ProposalSource::Target {
+                if let Some(draft) = learned {
                     source = ProposalSource::Learned;
                     proposed = draft.propose(&mut self.rt, pos, token, width)?;
                     ensure!(
@@ -404,9 +405,6 @@ impl Model {
             let committed = accepted + 1; // the previously emitted input anchor is always committed
             if batch > 1 {
                 cache.finish_verify(committed)?;
-            }
-            if source == ProposalSource::Lookup {
-                lookup.observe(proposed.len(), accepted);
             }
             draft_stats.record(source, proposed.len(), accepted);
             if let Some(draft) = draft.as_mut() {
