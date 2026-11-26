@@ -121,7 +121,74 @@ pub struct DraftAttention {
     proposal_freqs: Option<(usize, usize, Dev)>,
 }
 
+pub(crate) fn validate_snapshot(pos: usize, bytes: &[u8]) -> Result<usize> {
+    let words = pos.min(WINDOW) * DIM / 2;
+    ensure!(
+        pos > 0 && pos <= i32::MAX as usize && bytes.len() == 16 + STAGES * words * 4,
+        "invalid DSpark snapshot dimensions"
+    );
+    ensure!(
+        &bytes[..8] == b"DS4DRF01" && bytes[8..16] == (pos as u64).to_le_bytes(),
+        "incompatible DSpark snapshot position or layout"
+    );
+    Ok(words)
+}
+
 impl DraftAttention {
+    pub fn ready(&self, pos: usize) -> bool {
+        pos > 0
+            && self.end == pos
+            && self.start == pos.saturating_sub(WINDOW)
+            && self.rings.iter().all(Option::is_some)
+    }
+
+    // The ring is physical-order BF16 packed two per f32 storage word.
+    // Before the first wrap only slots 0..pos have been written.
+    pub fn snapshot(&self, rt: &mut Runtime, pos: usize) -> Result<Vec<u8>> {
+        ensure!(self.ready(pos), "incomplete DSpark prefix window");
+        rt.layer(39)?;
+        let words = pos.min(WINDOW) * DIM / 2;
+        let mut bytes = Vec::with_capacity(16 + STAGES * words * 4);
+        bytes.extend_from_slice(b"DS4DRF01");
+        bytes.extend_from_slice(&(pos as u64).to_le_bytes());
+        for stage in &self.rings {
+            let ring = stage.as_ref().context("missing DSpark prefix ring")?;
+            let subset;
+            let live = if words == ring.len() {
+                ring
+            } else {
+                subset = rt.slice(ring, 0, words)?;
+                &subset
+            };
+            for word in rt.to_host(live)? {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+
+    pub fn restore(rt: &mut Runtime, pos: usize, bytes: &[u8]) -> Result<Self> {
+        let words = validate_snapshot(pos, bytes)?;
+        rt.layer(39)?;
+        let mut state = Self {
+            start: pos.saturating_sub(WINDOW),
+            end: pos,
+            ..Self::default()
+        };
+        for (slot, packed) in state
+            .rings
+            .iter_mut()
+            .zip(bytes[16..].chunks_exact(4 * words))
+        {
+            let mut ring = vec![0.; WINDOW * DIM / 2];
+            for (dst, src) in ring.iter_mut().zip(packed.as_chunks::<4>().0) {
+                *dst = f32::from_le_bytes(*src);
+            }
+            *slot = Some(rt.to_device(&ring)?);
+        }
+        Ok(state)
+    }
+
     /// Input can contain all verification rows. Only the committed prefix and
     /// at most its most recent window are projected into persistent KV.
     pub fn observe(
@@ -263,6 +330,46 @@ impl DraftAttention {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_snapshot_checks_position_and_window_layout() {
+        for pos in [1usize, 127, 128, 129, 524287] {
+            let words = pos.min(WINDOW) * DIM / 2;
+            let mut bytes = vec![0; 16 + words * STAGES * 4];
+            bytes[..8].copy_from_slice(b"DS4DRF01");
+            bytes[8..16].copy_from_slice(&(pos as u64).to_le_bytes());
+            assert_eq!(validate_snapshot(pos, &bytes).unwrap(), words);
+            assert!(validate_snapshot(pos + 1, &bytes).is_err());
+            assert!(validate_snapshot(pos, &bytes[1..]).is_err());
+            bytes[6] ^= 1;
+            assert!(validate_snapshot(pos, &bytes).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and CUDA_VISIBLE_DEVICES set to both inference GPUs"]
+    fn draft_prefix_round_trips_packed_words_across_window_wrap() -> Result<()> {
+        use std::path::PathBuf;
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "select both inference GPUs"
+        );
+        let mut rt = Runtime::open(&PathBuf::from(std::env::var("DS4_TEST_PACK")?), [0, 1])?;
+        for pos in [7usize, 128, 241] {
+            let mut bytes = vec![0; 16 + pos.min(WINDOW) * DIM * 2 * STAGES];
+            bytes[..8].copy_from_slice(b"DS4DRF01");
+            bytes[8..16].copy_from_slice(&(pos as u64).to_le_bytes());
+            for (i, byte) in bytes[16..].iter_mut().enumerate() {
+                *byte = (i.wrapping_mul(111) + i / 129) as u8;
+            }
+            rt.layer(0)?;
+            let restored = DraftAttention::restore(&mut rt, pos, &bytes)?;
+            assert!(restored.ready(pos));
+            assert!(!restored.ready(pos + 1));
+            assert_eq!(restored.snapshot(&mut rt, pos)?, bytes);
+        }
+        Ok(())
+    }
 
     // Exercise the native kernels without opening the checkpoint or a cuBLAS
     // context. These buffers use the same single default stream as the engine.

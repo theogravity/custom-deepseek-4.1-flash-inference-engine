@@ -44,6 +44,34 @@ pub(crate) fn spec_k() -> Result<usize> {
     Ok(width)
 }
 
+// Geometric boundaries bound the number of snapshots on long prefills while
+// retaining branches well before the final complete chunk.
+fn checkpoints(prompt: usize, chunk: usize) -> Vec<usize> {
+    let last = (prompt - 1) / chunk * chunk;
+    let mut points = Vec::new();
+    let mut boundary = chunk;
+    while boundary < last {
+        if boundary >= 256 {
+            points.push(boundary);
+        }
+        boundary *= 2;
+    }
+    if last > 0 {
+        points.push(last);
+    }
+    points
+}
+
+fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            eprintln!("prefix {operation} skipped: {error:#}");
+            None
+        }
+    }
+}
+
 enum Scores {
     Greedy(Vec<u32>),
     Logits(Vec<f32>),
@@ -276,13 +304,30 @@ impl Model {
         let mut ids = input.to_vec();
         // Cache a completed prefill chunk. Reusing the same chunk boundaries preserves
         // the sparse attention and projection rounding seen by a fresh request.
-        let snapshot_pos = (input.len() - 1) / self.chunk * self.chunk;
+        let points = if self.prefix.enabled() {
+            checkpoints(input.len(), self.chunk)
+        } else {
+            vec![]
+        };
+        let snapshot_pos = points.last().copied().unwrap_or(0);
         let span = input.len().min(128);
-        let (mut pos, mut cache) = self
-            .prefix
-            .restore(input, snapshot_pos, span)?
-            .unwrap_or_default();
+        let (mut pos, mut cache) =
+            cached(self.prefix.restore(input, snapshot_pos, span), "restore")
+                .flatten()
+                .unwrap_or_default();
+        let mut next_point = points.partition_point(|&at| at <= pos);
         let mut draft = (self.spec_k > 0 && limit > 2).then(DraftState::new);
+        if pos > 0 && draft.is_some() {
+            let restored = self.prefix.read_draft(input, pos, span).and_then(|bytes| {
+                bytes
+                    .map(|bytes| DraftState::restore(&mut self.rt, pos, &bytes))
+                    .transpose()
+            });
+            if let Some(state) = cached(restored, "DSpark restore").flatten() {
+                eprintln!("prefix DSpark tokens={pos}");
+                draft = Some(state);
+            }
+        }
         let mut draft_stats = DraftStats::default();
         let mut lookup = prompt_lookup::PromptLookup::default();
         cache.begin_prefill(input.len());
@@ -291,13 +336,22 @@ impl Model {
         let mut first = None;
         while pos < input.len() {
             ensure!(!cancelled(), "request cancelled");
-            if pos > 0 && pos == snapshot_pos && pos != reused {
-                self.prefix.store(input, pos, span, &cache)?;
+            if points.get(next_point) == Some(&pos) {
+                if cached(self.prefix.store(input, pos, span, &cache), "store").is_some() {
+                    if let Some(state) = draft.as_ref().filter(|d| d.ready(pos)) {
+                        let saved = state
+                            .snapshot(&mut self.rt, pos)
+                            .and_then(|data| self.prefix.write_draft(input, pos, span, &data));
+                        cached(saved, "DSpark store");
+                    }
+                }
+                next_point += 1;
             }
             let n = self.chunk.min(input.len() - pos);
             let last = pos + n == input.len();
-            // Only the drafter's final sliding window survives the prefill.
-            let observe = draft.is_some() && pos + n > input.len().saturating_sub(128);
+            // Seed only chunks needed by the next saved window or the actual decode.
+            let horizon = points.get(next_point).copied().unwrap_or(input.len());
+            let observe = draft.is_some() && pos + n > horizon.saturating_sub(128);
             let target = self.forward(&mut cache, &ids, pos, n, usize::from(last), observe)?;
             if let Some(draft) = draft.as_mut().filter(|_| observe) {
                 draft.observe(
@@ -340,8 +394,8 @@ impl Model {
             let mut proposed = lookup.propose(&ids, self.lookup_k.min(remaining));
             let from_lookup = !proposed.is_empty();
             let width = self.spec_k.min(remaining);
-            if !from_lookup && width > 0 && pos - reused >= pos.min(128) {
-                if let Some(draft) = draft.as_mut() {
+            if !from_lookup && width > 0 {
+                if let Some(draft) = draft.as_mut().filter(|d| d.ready(pos)) {
                     proposed = draft.propose(&mut self.rt, pos, token, width)?;
                     ensure!(
                         proposed.len() <= width && proposed.iter().all(|&t| t < 129280),
@@ -401,6 +455,32 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_boundaries_and_draft_observations_cover_each_live_window() {
+        assert_eq!(checkpoints(1025, 64), [256, 512, 1024]);
+        assert_eq!(checkpoints(1050, 48), [384, 768, 1008]);
+        assert_eq!(checkpoints(33, 32), [32]);
+        assert!(checkpoints(32, 32).is_empty());
+        // For each saved point and the final decode, every live row lies in
+        // an observed chunk even for widths that do not divide 128.
+        for chunk in [1, 3, 48, 64, 255, 512] {
+            let prompt: usize = 1803;
+            let mut observed = vec![false; prompt];
+            let mut horizons = checkpoints(prompt, chunk);
+            horizons.push(prompt);
+            for pos in (0..prompt).step_by(chunk) {
+                let end = (pos + chunk).min(prompt);
+                let next = horizons.iter().copied().find(|&h| h > pos).unwrap();
+                if end > next.saturating_sub(128) {
+                    observed[pos..end].fill(true);
+                }
+            }
+            for h in horizons {
+                assert!(observed[h.saturating_sub(128)..h].iter().all(|&v| v));
+            }
+        }
+    }
 
     #[test]
     fn speculative_acceptance_draws_once_per_position_until_mismatch_or_eos() -> Result<()> {
