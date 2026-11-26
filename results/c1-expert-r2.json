@@ -1,0 +1,1018 @@
+{
+  "checkpoint": "checkpoint-2026-11-26-c1-02-expert",
+  "decision": "Keep the deployed expert kernel. Sharing packed words failed to establish a repeatable improvement over the current service.",
+  "suite": "One warm-up and six warm waves per workload on a freshly started process for each leg. Edit first, then coding.",
+  "devices": "host GPUs 1, 2; RTX PRO 6000 Blackwell, 375 W per GPU, 225 W CPU socket",
+  "edit": "25,625 input, 1,500 output, published first-token-to-end metric including reasoning; deterministic edit of functions 50\u201390.",
+  "long": "404,151 input, 512 output, first-to-last visible text excluding first token; frozen coding history.",
+  "gpu_tests_passed": 86,
+  "base_profile": "compose.yml + compose.decode-optimized.yml; DS4_BATCH_TOPK=1, DS4_EXPERT_EVICTION=lfu. Each leg additionally sets the flags in config.",
+  "config": [
+    [
+      "off-a",
+      "ds4-flash-rs:c1-expert-r2",
+      {
+        "DS4_EXPERT_WORD_SHUFFLE": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "on",
+      "ds4-flash-rs:c1-expert-r2",
+      {
+        "DS4_EXPERT_WORD_SHUFFLE": "1"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "off-b",
+      "ds4-flash-rs:c1-expert-r2",
+      {
+        "DS4_EXPERT_WORD_SHUFFLE": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ]
+  ],
+  "legs": {
+    "off-a": {
+      "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+      "env": {
+        "DS4_EXPERT_WORD_SHUFFLE": "0"
+      },
+      "edit": {
+        "rates": [
+          293.87327592964726,
+          293.4308878877892,
+          293.99070296871594,
+          293.90319068368865,
+          293.8289023761314,
+          293.97301164561054
+        ],
+        "median": 293.888233306668,
+        "whole": 290.33794850264997,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "21069e262ea2c3135b450f4e047b77d1968c7d08a8ef68716b042139bb1c2088",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          236.89590000623375,
+          235.7600458265984,
+          235.7044442738217,
+          234.7593771345283,
+          236.80679726821452,
+          235.94306357660625
+        ],
+        "median": 235.8515547016023,
+        "whole": 185.2514687805775,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "08a7e4902dd0a00479d39aff86f9606e8483603ae75350b3c110be6463194b2d",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    },
+    "on": {
+      "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+      "env": {
+        "DS4_EXPERT_WORD_SHUFFLE": "1"
+      },
+      "edit": {
+        "rates": [
+          293.74768342851326,
+          293.92207730217194,
+          293.177536210335,
+          293.8284297773034,
+          293.8025175889374,
+          294.1008278358317
+        ],
+        "median": 293.81547368312044,
+        "whole": 290.24475907470526,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "9aa74f9412801b8d8aa54fbf333533a645b6819634fc24f519633b903e6160cf",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          237.76011630704258,
+          237.2101652115707,
+          236.89196170132158,
+          236.86097565811153,
+          238.30640430646744,
+          236.06126496365025
+        ],
+        "median": 237.05106345644614,
+        "whole": 186.90040657568198,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "10458c22644eced1d75c16cde9204a914a71f3a0760d4dc5b5d74eb1d60da22f",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    },
+    "off-b": {
+      "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+      "env": {
+        "DS4_EXPERT_WORD_SHUFFLE": "0"
+      },
+      "edit": {
+        "rates": [
+          293.44213101738285,
+          293.28658524508756,
+          293.4461511244536,
+          293.85641325960984,
+          293.23687101810697,
+          293.45142469256905
+        ],
+        "median": 293.44414107091825,
+        "whole": 289.85975752039724,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "ff55112fef8185a1d897b8875ccf1f8a01c00f45b3beb622a50b05e7a7429cd0",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          236.53959525117307,
+          236.13577590076528,
+          236.54645628949854,
+          236.73804465252147,
+          236.93784145134273,
+          235.9768011680685
+        ],
+        "median": 236.54302577033582,
+        "whole": 185.74582712541314,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "0801b80044c0f5cb0db2fb4f1b07bd77826456c5b7c966e73f7ce6e3155d9f5d",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    }
+  },
+  "micro-summary": {
+    "method": "CUDA events on GPU 1, alternating mode order, nine samples of 40 sequential launches, median microseconds per launch. Full FP32 partial buffers compared bitwise for baseline vs shuffle before each shape; five-job fixture covers 1,8,9,15,16 routed rows per expert. Synthetic repeated weights, not serving throughput.",
+    "raw_sha256": "14387e1ae8a089e29e24492f5d5644c8c22287b0a449429d36084006f5e0759a",
+    "cells": [
+      {
+        "projection": "gate+up",
+        "jobs": 4,
+        "rows": 7,
+        "control_us": 20.4816,
+        "shuffle_us": 19.3576,
+        "change_pct": -5.49
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 5,
+        "rows": 49,
+        "control_us": 31.232,
+        "shuffle_us": 30.236,
+        "change_pct": -3.19
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 8,
+        "rows": 15,
+        "control_us": 40.1712,
+        "shuffle_us": 39.9616,
+        "change_pct": -0.52
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 10,
+        "rows": 19,
+        "control_us": 75.8192,
+        "shuffle_us": 76.58241,
+        "change_pct": 1.01
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 11,
+        "rows": 21,
+        "control_us": 63.7392,
+        "shuffle_us": 64.0968,
+        "change_pct": 0.56
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 12,
+        "rows": 24,
+        "control_us": 83.9104,
+        "shuffle_us": 84.6272,
+        "change_pct": 0.85
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 14,
+        "rows": 27,
+        "control_us": 109.4288,
+        "shuffle_us": 110.91599,
+        "change_pct": 1.36
+      },
+      {
+        "projection": "gate+up",
+        "jobs": 16,
+        "rows": 31,
+        "control_us": 140.9608,
+        "shuffle_us": 143.3656,
+        "change_pct": 1.71
+      },
+      {
+        "projection": "down",
+        "jobs": 4,
+        "rows": 7,
+        "control_us": 10.8848,
+        "shuffle_us": 10.5776,
+        "change_pct": -2.82
+      },
+      {
+        "projection": "down",
+        "jobs": 5,
+        "rows": 49,
+        "control_us": 15.9784,
+        "shuffle_us": 15.2352,
+        "change_pct": -4.65
+      },
+      {
+        "projection": "down",
+        "jobs": 8,
+        "rows": 15,
+        "control_us": 26.8248,
+        "shuffle_us": 26.5944,
+        "change_pct": -0.86
+      },
+      {
+        "projection": "down",
+        "jobs": 10,
+        "rows": 19,
+        "control_us": 32.252,
+        "shuffle_us": 31.9456,
+        "change_pct": -0.95
+      },
+      {
+        "projection": "down",
+        "jobs": 11,
+        "rows": 21,
+        "control_us": 34.8624,
+        "shuffle_us": 34.66,
+        "change_pct": -0.58
+      },
+      {
+        "projection": "down",
+        "jobs": 12,
+        "rows": 24,
+        "control_us": 40.4424,
+        "shuffle_us": 40.2176,
+        "change_pct": -0.56
+      },
+      {
+        "projection": "down",
+        "jobs": 14,
+        "rows": 27,
+        "control_us": 48.0696,
+        "shuffle_us": 47.8152,
+        "change_pct": -0.53
+      },
+      {
+        "projection": "down",
+        "jobs": 16,
+        "rows": 31,
+        "control_us": 54.6752,
+        "shuffle_us": 54.42,
+        "change_pct": -0.47
+      }
+    ]
+  },
+  "repeat-summary": {
+    "config": [
+      [
+        "repeat-off-a",
+        "ds4-flash-rs:c1-expert-r2",
+        {
+          "DS4_EXPERT_WORD_SHUFFLE": "0"
+        },
+        [
+          "long"
+        ],
+        6
+      ],
+      [
+        "repeat-on",
+        "ds4-flash-rs:c1-expert-r2",
+        {
+          "DS4_EXPERT_WORD_SHUFFLE": "1"
+        },
+        [
+          "long"
+        ],
+        6
+      ],
+      [
+        "repeat-off-b",
+        "ds4-flash-rs:c1-expert-r2",
+        {
+          "DS4_EXPERT_WORD_SHUFFLE": "0"
+        },
+        [
+          "long"
+        ],
+        6
+      ]
+    ],
+    "legs": {
+      "repeat-off-a": {
+        "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+        "env": {
+          "DS4_EXPERT_WORD_SHUFFLE": "0"
+        },
+        "long": {
+          "rates": [
+            240.49927646007993,
+            239.7760088152267,
+            239.618378649433,
+            238.3957818424517,
+            238.92885611065,
+            239.6687545916006
+          ],
+          "median": 239.6435666205168,
+          "whole": 188.61590800520594,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "dc63282e989936990f9719b8a9a7ac88ed490188effb67a89075c252d7f04ba4",
+          "spec_including_warmup": {
+            "learned": [
+              588,
+              3696,
+              2877
+            ],
+            "lookup": [
+              49,
+              588,
+              56
+            ]
+          }
+        }
+      },
+      "repeat-on": {
+        "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+        "env": {
+          "DS4_EXPERT_WORD_SHUFFLE": "1"
+        },
+        "long": {
+          "rates": [
+            239.33170102290086,
+            239.6258374694845,
+            240.06229085622303,
+            239.6204157891082,
+            240.17408344020888,
+            239.67004393328605
+          ],
+          "median": 239.64794070138527,
+          "whole": 188.50402302950863,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "a9d97b32e240577c65c53de361b563ac960446fb21323cce73b355681c6d32f4",
+          "spec_including_warmup": {
+            "learned": [
+              588,
+              3696,
+              2877
+            ],
+            "lookup": [
+              49,
+              588,
+              56
+            ]
+          }
+        }
+      },
+      "repeat-off-b": {
+        "image": "sha256:3779e451ecd7515818a1bc2d3ebee36541d51184d2ee17045cffbed9ed81495f",
+        "env": {
+          "DS4_EXPERT_WORD_SHUFFLE": "0"
+        },
+        "long": {
+          "rates": [
+            239.46262536180467,
+            238.18100178904984,
+            239.15410274679942,
+            240.3046767987724,
+            239.61634379095943,
+            238.5642258853507
+          ],
+          "median": 239.30836405430205,
+          "whole": 187.71546184903318,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "dc12164eb7d5eee41048d7df8e936e43b93df1eaa1bda74c561a7a8cbc917142",
+          "spec_including_warmup": {
+            "learned": [
+              588,
+              3696,
+              2877
+            ],
+            "lookup": [
+              49,
+              588,
+              56
+            ]
+          }
+        }
+      }
+    }
+  },
+  "detail": {
+    "fresh_deployed_c1_trace": {
+      "source": "stable-2026-11-26-decode-375w",
+      "nsys_sha256": "7ddb91edd4ad019af650fb19c1b1ac87eb24620538bc5ce8bc421c300095f794",
+      "GPU_kernel_sum_percentage": {
+        "project": 40.76,
+        "mx_project": 26.94,
+        "prepare": 5.86,
+        "stable_dot": 4.2,
+        "mx_sum": 2.76,
+        "fast_qk": 2.62,
+        "fast_pv": 2.04,
+        "normalize_rows": 2.02,
+        "score_packed_keys": 1.8,
+        "prepare_down": 1.64,
+        "transform_heads": 1.46,
+        "select_tile": 1.26
+      },
+      "central_span_ms": 1163.007936,
+      "single_client_observed": {
+        "first_sample": {
+          "t": 86593.770142251,
+          "started": 2,
+          "decoding": 1,
+          "active": 1,
+          "processed": 25657,
+          "joint": 0
+        },
+        "last_sample": {
+          "t": 86595.582727669,
+          "started": 2,
+          "decoding": 1,
+          "active": 1,
+          "processed": 25986,
+          "joint": 0
+        },
+        "sample_count": 25
+      }
+    },
+    "disassembly": {
+      "method": "nvcc -arch=sm_120f -std=c++17 -O3 -cubin <moe.cu>, cuobjdump -sass. Compare disassembled opcodes, operands and order for each project specialization, excluding encoded scheduling metadata.",
+      "matching_disabled_specializations_initial": 0,
+      "matching_disabled_specializations_final": 12,
+      "matching_enabled_specializations_vs_initial": 2,
+      "reference_sha256": {
+        "(2, 0, 0, 0)": "935eb0426f7e01e74e29f791588baea38e48d3f8ec56ff0672aa317329d7a707",
+        "(0, 0, 0, 0)": "77a0355c2d3d478758f439a7aa5c997021ada2328321f27506bcd025654d73d5",
+        "(2, 1, 0, 0)": "bce763f428d2283d646188cb0bb953d639eec3590d00e71ef3a608aee424cb7a",
+        "(0, 1, 0, 0)": "65bb2b5bc0b001aa3d22b31c1946f08f8cd5cce77820e16d37494825eec9eaa6",
+        "(1, 0, 0, 0)": "fefe61f652ff805427cd0a3f127a15d5a102bd14e6a1145e35cffa92a207b389",
+        "(0, 0, 1, 0)": "4e903c3905fa35adc76bebe6f526c5a3f774038bab242f4d75554184f3de38ca",
+        "(1, 0, 0, 1)": "c8d5fcc4300f664a56c20760e21e153f88aa8640d22bdd57bdbbec91f3dc8cc4",
+        "(0, 0, 1, 1)": "2ca58738756df4f4174b25aa4efee15a5c388292f0ab87e05bf51297caf1fbeb",
+        "(1, 1, 0, 0)": "ecd66c456452d10140b9f60a1121b5b538696b0f1640c61d1a22fd6f7239a5cd",
+        "(0, 1, 1, 0)": "09c01bc070d230454191936d9a6ec3fd71e8b69521631d2c1c835d562c182349",
+        "(1, 1, 0, 1)": "ca3c04036c224d4638549d14e75864502d1a2b16127f5e2cf14ddf3853d02844",
+        "(0, 1, 1, 1)": "0cea06a8eda50e0d68de01329a39bdb26df2cfeac97cb2fbec08acc0b11c56fc"
+      }
+    },
+    "revision_1": {
+      "description": "First implementation changed generated code even with the switch disabled. Timed it in its own binary and directly against the production image. The final revision restored the original load expression in every disabled kernel.",
+      "same_image_legs": {
+        "off-a": {
+          "image": "sha256:2e32effd42c0f642366e803b29617719a30ef537707c81f79931305299496221",
+          "env": {
+            "DS4_EXPERT_WORD_SHUFFLE": "0"
+          },
+          "edit": {
+            "rates": [
+              289.49504300205996,
+              290.13541571113365,
+              290.31247679678944,
+              291.09457222117004,
+              290.56352281669456,
+              290.6431885086624
+            ],
+            "median": 290.437999806742,
+            "whole": 286.97500180523855,
+            "hashes": [
+              [
+                "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+              ]
+            ],
+            "raw_sha256": "7a2687b51ac016cfd4a662074e0536e8ed20285edf748f0fff909c12617fab5d",
+            "spec_including_warmup": {
+              "learned": [
+                1477,
+                7602,
+                6006
+              ],
+              "lookup": [
+                259,
+                3661,
+                2751
+              ]
+            }
+          },
+          "long": {
+            "rates": [
+              234.6914729540953,
+              234.07798435607975,
+              234.8677070116951,
+              234.1921633690646,
+              234.3244033698189,
+              235.12036318562326
+            ],
+            "median": 234.5079381619571,
+            "whole": 184.868621171442,
+            "hashes": [
+              "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+            ],
+            "raw_sha256": "710b6c81be009be793baa3d43e51e28a88366b6589cecf0fbee0d2ab153c90eb",
+            "spec_including_warmup": {
+              "learned": [
+                588,
+                3696,
+                2877
+              ],
+              "lookup": [
+                49,
+                588,
+                56
+              ]
+            }
+          }
+        },
+        "on": {
+          "image": "sha256:2e32effd42c0f642366e803b29617719a30ef537707c81f79931305299496221",
+          "env": {
+            "DS4_EXPERT_WORD_SHUFFLE": "1"
+          },
+          "edit": {
+            "rates": [
+              292.38071766982955,
+              290.3747518646454,
+              291.336371710836,
+              291.70161913261757,
+              292.6329104114182,
+              292.24296693155964
+            ],
+            "median": 291.9722930320886,
+            "whole": 288.42160937923865,
+            "hashes": [
+              [
+                "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+              ]
+            ],
+            "raw_sha256": "3160a5b3d47f90e038a3fff2b436175e8512c27eb78ff337a11e675ba136f911",
+            "spec_including_warmup": {
+              "learned": [
+                1477,
+                7602,
+                6006
+              ],
+              "lookup": [
+                259,
+                3661,
+                2751
+              ]
+            }
+          },
+          "long": {
+            "rates": [
+              236.2828632128941,
+              234.1784225235804,
+              236.47959040513663,
+              235.80329532699585,
+              236.2796751775885,
+              233.86720934869453
+            ],
+            "median": 236.04148525229218,
+            "whole": 185.05284424105494,
+            "hashes": [
+              "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+            ],
+            "raw_sha256": "3c8fee536e063c9ccc63f40d9c2d9428ca08208fe876cd99ca886f7dea15a808",
+            "spec_including_warmup": {
+              "learned": [
+                588,
+                3696,
+                2877
+              ],
+              "lookup": [
+                49,
+                588,
+                56
+              ]
+            }
+          }
+        },
+        "off-b": {
+          "image": "sha256:2e32effd42c0f642366e803b29617719a30ef537707c81f79931305299496221",
+          "env": {
+            "DS4_EXPERT_WORD_SHUFFLE": "0"
+          },
+          "edit": {
+            "rates": [
+              290.92304709075637,
+              290.8794578450319,
+              290.9151292493028,
+              290.6013935022995,
+              290.8480224981584,
+              290.65289714336365
+            ],
+            "median": 290.86374017159517,
+            "whole": 287.3772068918978,
+            "hashes": [
+              [
+                "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+              ]
+            ],
+            "raw_sha256": "bd6c1ba6c9bca7035910d0bc0674239708af85ec9cf9e88e69ca457e4979bba4",
+            "spec_including_warmup": {
+              "learned": [
+                1477,
+                7602,
+                6006
+              ],
+              "lookup": [
+                259,
+                3661,
+                2751
+              ]
+            }
+          },
+          "long": {
+            "rates": [
+              233.78775641805166,
+              234.48372816929833,
+              234.32115299333276,
+              234.33376506083965,
+              234.46711287003248,
+              234.55005025997596
+            ],
+            "median": 234.40043896543608,
+            "whole": 184.49216187476082,
+            "hashes": [
+              "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+            ],
+            "raw_sha256": "89366846f324a46c44a15e19d5e3af09dee9f4c26d93d8d5b381156d7ad3e536",
+            "spec_including_warmup": {
+              "learned": [
+                588,
+                3696,
+                2877
+              ],
+              "lookup": [
+                49,
+                588,
+                56
+              ]
+            }
+          }
+        }
+      },
+      "production_bracket": {
+        "config": [
+          [
+            "direct-off-a",
+            "ds4-flash-rs:attention-topk-checkpoint",
+            {},
+            [
+              "edit",
+              "long"
+            ],
+            6
+          ],
+          [
+            "direct-on",
+            "ds4-flash-rs:c1-expert",
+            {
+              "DS4_EXPERT_WORD_SHUFFLE": "1"
+            },
+            [
+              "edit",
+              "long"
+            ],
+            6
+          ],
+          [
+            "direct-off-b",
+            "ds4-flash-rs:attention-topk-checkpoint",
+            {},
+            [
+              "edit",
+              "long"
+            ],
+            6
+          ]
+        ],
+        "legs": {
+          "direct-off-a": {
+            "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+            "env": {},
+            "edit": {
+              "rates": [
+                293.6873901953763,
+                292.71416465691215,
+                293.3498159948416,
+                295.17624881008015,
+                294.25969608074917,
+                293.681156529503
+              ],
+              "median": 293.6842733624396,
+              "whole": 289.9959870022569,
+              "hashes": [
+                [
+                  "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                  "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                  "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+                ]
+              ],
+              "raw_sha256": "7260880ac377bf9753c0386af872901cfcd933bb86022c4525b81260a456cc07",
+              "spec_including_warmup": {
+                "learned": [
+                  1477,
+                  7602,
+                  6006
+                ],
+                "lookup": [
+                  259,
+                  3661,
+                  2751
+                ]
+              }
+            },
+            "long": {
+              "rates": [
+                236.89297325196452,
+                236.80496132474457,
+                236.76925645577296,
+                234.9092021934548,
+                230.662302940695,
+                236.75581156231198
+              ],
+              "median": 236.76253400904247,
+              "whole": 185.96830855806968,
+              "hashes": [
+                "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+              ],
+              "raw_sha256": "d1f626a4009391464572e35514c1198ed9d3659d379918607f717b409b5ee065",
+              "spec_including_warmup": {
+                "learned": [
+                  588,
+                  3696,
+                  2877
+                ],
+                "lookup": [
+                  49,
+                  588,
+                  56
+                ]
+              }
+            }
+          },
+          "direct-on": {
+            "image": "sha256:2e32effd42c0f642366e803b29617719a30ef537707c81f79931305299496221",
+            "env": {
+              "DS4_EXPERT_WORD_SHUFFLE": "1"
+            },
+            "edit": {
+              "rates": [
+                292.83128161332456,
+                293.23830014371833,
+                293.1400773784059,
+                292.78221593459267,
+                292.6694871610964,
+                292.81434287707975
+              ],
+              "median": 292.82281224520216,
+              "whole": 289.27108283520704,
+              "hashes": [
+                [
+                  "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                  "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                  "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+                ]
+              ],
+              "raw_sha256": "1cd601579fa3c524a6d8e0953ccb2bf47386faf4d003b87a241df2955cf63c88",
+              "spec_including_warmup": {
+                "learned": [
+                  1477,
+                  7602,
+                  6006
+                ],
+                "lookup": [
+                  259,
+                  3661,
+                  2751
+                ]
+              }
+            },
+            "long": {
+              "rates": [
+                237.03627307857863,
+                235.62871997809413,
+                236.17336615876812,
+                236.51858418590635,
+                235.74430737314867,
+                236.60884396400635
+              ],
+              "median": 236.34597517233723,
+              "whole": 185.98433313426784,
+              "hashes": [
+                "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+              ],
+              "raw_sha256": "40797bc6be766f38b21a18aa302b812ae7c37349f0ad2cec80ca2fcda0ce40af",
+              "spec_including_warmup": {
+                "learned": [
+                  588,
+                  3696,
+                  2877
+                ],
+                "lookup": [
+                  49,
+                  588,
+                  56
+                ]
+              }
+            }
+          },
+          "direct-off-b": {
+            "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+            "env": {},
+            "edit": {
+              "rates": [
+                293.8712953289045,
+                293.73386700095926,
+                294.1608404254592,
+                293.9472272348537,
+                293.9138790446547,
+                295.1057146314431
+              ],
+              "median": 293.93055313975424,
+              "whole": 290.38121896683384,
+              "hashes": [
+                [
+                  "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+                  "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+                  "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+                ]
+              ],
+              "raw_sha256": "18710905df7f991d5d41a6a1329e06251faadb156de40c65a542df47dd886953",
+              "spec_including_warmup": {
+                "learned": [
+                  1477,
+                  7602,
+                  6006
+                ],
+                "lookup": [
+                  259,
+                  3661,
+                  2751
+                ]
+              }
+            },
+            "long": {
+              "rates": [
+                236.63061498719517,
+                234.9038871005554,
+                236.06955431078606,
+                236.56231627038522,
+                237.34361834126577,
+                237.59528335157714
+              ],
+              "median": 236.5964656287902,
+              "whole": 185.90407520600047,
+              "hashes": [
+                "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+              ],
+              "raw_sha256": "955cc7da08db90740a6d458ef1c63644fb132ae78aef414065984557676d505d",
+              "spec_including_warmup": {
+                "learned": [
+                  588,
+                  3696,
+                  2877
+                ],
+                "lookup": [
+                  49,
+                  588,
+                  56
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
