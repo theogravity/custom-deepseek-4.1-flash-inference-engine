@@ -30,8 +30,17 @@ extern "C" {
         mix: *mut f32,
         norm: *const f32,
         out: *mut f32,
-        last: c_int,
+        start: c_int,
+        rows: c_int,
     ) -> c_int;
+    fn ds_hc_capture(
+        device: c_int,
+        h: *const f32,
+        features: *mut f32,
+        slot: c_int,
+        batch: c_int,
+    ) -> c_int;
+    fn ds_hc_broadcast(device: c_int, embeddings: *const f32, h: *mut f32, batch: c_int) -> c_int;
     fn cudaGetErrorString(code: c_int) -> *const c_char;
 }
 
@@ -43,7 +52,66 @@ fn checked(code: c_int, op: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn initial_mix(rt: &mut Runtime, batch: usize) -> Result<Dev> {
+pub(crate) fn embed(rt: &mut Runtime, ids: &[u32]) -> Result<Dev> {
+    let e = rt.weights.tensor("embed.weight")?;
+    ensure!(
+        e.dtype == "BF16" && e.shape == [129280, DIM],
+        "invalid token embedding"
+    );
+    let mut values = Vec::with_capacity(ids.len() * DIM);
+    for &id in ids {
+        ensure!((id as usize) < e.shape[0], "invalid embedding token {id}");
+        let start = id as usize * 2 * DIM;
+        values.extend(
+            e.data[start..start + 2 * DIM]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|v| half::bf16::from_le_bytes(*v).to_f32()),
+        );
+    }
+    let embedding = rt.to_device(&values)?;
+    let mut h = rt.buffer(ids.len() * 4 * DIM)?;
+    checked(
+        unsafe {
+            ds_hc_broadcast(
+                rt.device,
+                embedding.as_ptr(),
+                h.as_mut_ptr(),
+                ids.len().try_into()?,
+            )
+        },
+        "broadcast token embeddings",
+    )?;
+    Ok(h)
+}
+
+pub(super) fn capture(
+    rt: &Runtime,
+    h: &Dev,
+    features: &mut Dev,
+    slot: usize,
+    batch: usize,
+) -> Result<()> {
+    ensure!(
+        slot < 3 && h.len() == batch * 4 * DIM && features.len() == batch * 3 * DIM,
+        "invalid DSpark capture"
+    );
+    checked(
+        unsafe {
+            ds_hc_capture(
+                rt.device,
+                h.as_ptr(),
+                features.as_mut_ptr(),
+                slot.try_into()?,
+                batch.try_into()?,
+            )
+        },
+        "capture DSpark target activations",
+    )
+}
+
+pub(crate) fn initial_mix(rt: &mut Runtime, batch: usize) -> Result<Dev> {
     let mut weights = vec![0.; batch * CONTROLS];
     for row in weights.chunks_exact_mut(CONTROLS) {
         row[0] = 1.;
@@ -51,15 +119,14 @@ pub(super) fn initial_mix(rt: &mut Runtime, batch: usize) -> Result<Dev> {
     rt.to_device(&weights)
 }
 
-pub(super) fn prepare(
+pub(crate) fn prepare(
     rt: &mut Runtime,
-    layer: usize,
+    stem: &str,
     branch: &str,
     h: &Dev,
     mix: &mut Dev,
     batch: usize,
 ) -> Result<Dev> {
-    let stem = format!("layers.{layer}");
     let projection = rt.linear_dev(&format!("{stem}.hc_{branch}_fn"), h, batch, 1)?;
     ensure!(
         projection.len() == batch * CONTROLS
@@ -90,7 +157,7 @@ pub(super) fn prepare(
     Ok(input)
 }
 
-pub(super) fn expand(rt: &Runtime, h: &mut Dev, x: &Dev, mix: &Dev, batch: usize) -> Result<()> {
+pub(crate) fn expand(rt: &Runtime, h: &mut Dev, x: &Dev, mix: &Dev, batch: usize) -> Result<()> {
     ensure!(
         h.len() == batch * 4 * DIM && x.len() == batch * DIM && mix.len() == batch * CONTROLS,
         "invalid residual branch output dimensions"
@@ -109,14 +176,23 @@ pub(super) fn expand(rt: &Runtime, h: &mut Dev, x: &Dev, mix: &Dev, batch: usize
     )
 }
 
-// A single token's final normalized hidden row, suitable for the vocabulary head.
-pub(super) fn readout(rt: &mut Runtime, h: &Dev, mix: &mut Dev, row: usize) -> Result<Dev> {
+// Normalize any contiguous range of final hidden rows for the vocabulary head.
+pub(crate) fn readout(
+    rt: &mut Runtime,
+    h: &Dev,
+    mix: &mut Dev,
+    norm_name: &str,
+    start: usize,
+    rows: usize,
+) -> Result<Dev> {
     ensure!(
-        row < h.len() / (4 * DIM) && row < mix.len() / CONTROLS,
+        rows > 0
+            && start.saturating_add(rows) <= h.len() / (4 * DIM)
+            && start.saturating_add(rows) <= mix.len() / CONTROLS,
         "final residual row out of bounds"
     );
-    let norm = rt.vector_ptr("norm.weight", DIM)?;
-    let mut input = rt.buffer(DIM)?;
+    let norm = rt.vector_ptr(norm_name, DIM)?;
+    let mut input = rt.buffer(rows * DIM)?;
     checked(
         unsafe {
             ds_hc_final(
@@ -125,7 +201,8 @@ pub(super) fn readout(rt: &mut Runtime, h: &Dev, mix: &mut Dev, row: usize) -> R
                 mix.as_mut_ptr(),
                 norm,
                 input.as_mut_ptr(),
-                row.try_into()?,
+                start.try_into()?,
+                rows.try_into()?,
             )
         },
         "collapse final residual",
@@ -298,6 +375,7 @@ mod tests {
                         dev_norm.as_ptr(),
                         projected.as_mut_ptr(),
                         t.try_into()?,
+                        1,
                     )
                 },
                 "final test readout",

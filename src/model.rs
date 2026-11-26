@@ -10,12 +10,17 @@ use std::path::Path;
 use tokenizers::Tokenizer;
 
 #[path = "residual.rs"]
-mod residual;
+pub(crate) mod residual;
 
 pub const DIM: usize = 5120;
 #[inline(always)]
 pub fn bf(x: f32) -> f32 {
     half::bf16::from_f32(x).to_f32()
+}
+
+struct Target {
+    logits: Option<Dev>,
+    features: Option<Dev>,
 }
 
 struct PromptCache {
@@ -63,35 +68,25 @@ impl Model {
     pub fn max_context(&self) -> usize {
         self.max_ctx
     }
-    fn forward_hidden(
+    fn forward(
         &mut self,
         cache: &mut AttentionState,
         ids: &[u32],
         pos: usize,
         b: usize,
-    ) -> Result<(Dev, Dev)> {
-        let e = self.rt.weights.tensor("embed.weight")?;
+        logit_rows: usize,
+        capture_features: bool,
+    ) -> Result<Target> {
         ensure!(
-            e.dtype == "BF16" && e.shape == [129280, DIM],
-            "invalid token embedding"
+            logit_rows <= b,
+            "requested more logit rows than target inputs"
         );
-        let mut h = Vec::with_capacity(b * 4 * DIM);
-        for &id in &ids[pos..pos + b] {
-            let offset = id as usize * 2 * DIM;
-            let row: Vec<f32> = e.data[offset..offset + 2 * DIM]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|v| f32::from_bits((u16::from_le_bytes([v[0], v[1]]) as u32) << 16))
-                .collect();
-            for _ in 0..4 {
-                h.extend_from_slice(&row);
-            }
-        }
+        let mut features = None;
         self.rt.layer(0)?;
-        let mut h = self.rt.to_device(&h)?;
+        let mut h = residual::embed(&mut self.rt, &ids[pos..pos + b])?;
         let mut mix = residual::initial_mix(&mut self.rt, b)?;
         for layer in 0..40 {
+            let stem = format!("layers.{layer}");
             if layer == 20 {
                 let host_h = self.rt.to_host(&h)?;
                 let host_mix = self.rt.to_host(&mix)?;
@@ -105,8 +100,14 @@ impl Model {
                     .apply(&mut self.rt, layer, ids, pos, &mut host_h)?;
                 h = self.rt.to_device(&host_h)?;
             }
+            if capture_features && layer >= 37 {
+                if layer == 37 {
+                    features = Some(self.rt.buffer(b * 3 * DIM)?);
+                }
+                residual::capture(&self.rt, &h, features.as_mut().unwrap(), layer - 37, b)?;
+            }
             for branch in ["attn", "ffn"] {
-                let input = residual::prepare(&mut self.rt, layer, branch, &h, &mut mix, b)?;
+                let input = residual::prepare(&mut self.rt, &stem, branch, &h, &mut mix, b)?;
                 let output = if branch == "attn" {
                     attention::forward_dev(&mut self.rt, cache, layer, pos, &input, b)?
                 } else {
@@ -115,24 +116,20 @@ impl Model {
                 residual::expand(&self.rt, &mut h, &output, &mix, b)?;
             }
         }
-        Ok((h, mix))
-    }
-
-    fn forward(
-        &mut self,
-        cache: &mut AttentionState,
-        ids: &[u32],
-        pos: usize,
-        b: usize,
-        want_logits: bool,
-    ) -> Result<Vec<f32>> {
-        let (h, mut mix) = self.forward_hidden(cache, ids, pos, b)?;
-        if !want_logits {
-            return Ok(vec![]);
-        }
-        let input = residual::readout(&mut self.rt, &h, &mut mix, b - 1)?;
-        let logits = self.rt.linear_dev("head.weight", &input, 1, 1)?;
-        self.rt.to_host(&logits)
+        let logits = if logit_rows > 0 {
+            let input = residual::readout(
+                &mut self.rt,
+                &h,
+                &mut mix,
+                "norm.weight",
+                b - logit_rows,
+                logit_rows,
+            )?;
+            Some(self.rt.linear_dev("head.weight", &input, logit_rows, 1)?)
+        } else {
+            None
+        };
+        Ok(Target { logits, features })
     }
     pub fn generate(
         &mut self,
@@ -179,7 +176,7 @@ impl Model {
         cache.begin_prefill(input.len());
         let reused = pos;
         let started = std::time::Instant::now();
-        let mut logits = vec![];
+        let mut logits = None;
         while pos < input.len() {
             ensure!(!cancelled(), "request cancelled");
             if pos > 0 && pos == snapshot_pos {
@@ -190,7 +187,16 @@ impl Model {
                 });
             }
             let n = self.chunk.min(input.len() - pos);
-            logits = self.forward(&mut cache, &ids, pos, n, pos + n == input.len())?;
+            logits = self
+                .forward(
+                    &mut cache,
+                    &ids,
+                    pos,
+                    n,
+                    usize::from(pos + n == input.len()),
+                    false,
+                )?
+                .logits;
             pos += n;
         }
         eprintln!(
@@ -200,6 +206,7 @@ impl Model {
             started.elapsed().as_secs_f64()
         );
         let mut rng = rand::thread_rng();
+        let mut logits = self.rt.to_host(&logits.unwrap())?;
         for n in 1..=limit {
             ensure!(
                 logits.len() == 129280 && logits.iter().all(|x| x.is_finite()),
@@ -223,7 +230,8 @@ impl Model {
                 return Ok(n);
             }
             ids.push(token);
-            logits = self.forward(&mut cache, &ids, pos, 1, true)?;
+            let result = self.forward(&mut cache, &ids, pos, 1, 1, false)?;
+            logits = self.rt.to_host(&result.logits.unwrap())?;
             pos += 1;
         }
         unreachable!()

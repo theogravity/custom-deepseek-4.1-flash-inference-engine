@@ -147,6 +147,33 @@ __global__ void expand(float *h, const float *x, const float *mix) {
     h[c * width] = bf(__fadd_rn(__fmul_rn(y, mix[4 + c]), sum));
   }
 }
+
+// Each feature is the BF16 mean of the four input streams at one of the
+// last three target layers, concatenated in layer order for each token.
+__global__ void capture_features(const float *h, float *features, int slot) {
+  const int t = blockIdx.y;
+  const int d = blockIdx.x * blockDim.x + threadIdx.x;
+  if (d >= width)
+    return;
+  h += t * channels * width + d;
+  float sum = 0.f;
+#pragma unroll
+  for (int c = 0; c < channels; ++c)
+    sum += h[c * width];
+  features[(t * 3 + slot) * width + d] = bf(sum / channels);
+}
+
+__global__ void broadcast(const float *embedding, float *h) {
+  const int t = blockIdx.y;
+  const int d = blockIdx.x * blockDim.x + threadIdx.x;
+  if (d >= width)
+    return;
+  h += t * channels * width + d;
+  const float x = embedding[t * width + d];
+#pragma unroll
+  for (int c = 0; c < channels; ++c)
+    h[c * width] = x;
+}
 } // namespace
 
 extern "C" int ds_hc_prepare(int device, const float *h, float *mix, const float *projection,
@@ -166,10 +193,25 @@ extern "C" int ds_hc_expand(int device, float *h, const float *x, const float *m
 }
 
 extern "C" int ds_hc_final(int device, const float *h, float *mix, const float *norm,
-                           float *out, int last) {
+                           float *out, int start, int rows) {
   if (auto status = cudaSetDevice(device); status != cudaSuccess)
     return status;
-  prepare<false><<<1, threads>>>(h + last * channels * width, mix + last * controls,
+  prepare<false><<<rows, threads>>>(h + start * channels * width, mix + start * controls,
                                  nullptr, nullptr, nullptr, norm, out);
+  return cudaGetLastError();
+}
+
+extern "C" int ds_hc_capture(int device, const float *h, float *features,
+                             int slot, int batch) {
+  if (auto status = cudaSetDevice(device); status != cudaSuccess)
+    return status;
+  capture_features<<<dim3((width + threads - 1) / threads, batch), threads>>>(h, features, slot);
+  return cudaGetLastError();
+}
+
+extern "C" int ds_hc_broadcast(int device, const float *embedding, float *h, int batch) {
+  if (auto status = cudaSetDevice(device); status != cudaSuccess)
+    return status;
+  broadcast<<<dim3((width + threads - 1) / threads, batch), threads>>>(embedding, h);
   return cudaGetLastError();
 }
