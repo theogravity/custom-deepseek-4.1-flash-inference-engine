@@ -282,7 +282,7 @@ impl Model {
             capture_features,
         }])?
         .pop()
-        .context("missing single-sequence target")
+        .context("missing single-sequence target")?
     }
     pub fn generate(
         &mut self,
@@ -532,7 +532,8 @@ impl Model {
         match targets {
             Ok(targets) if targets.len() == work.len() => {
                 for (one, target) in work.iter_mut().zip(targets) {
-                    results[one.index] = Some(self.finish_decode(one.session, &one.plan, target));
+                    results[one.index] =
+                        Some(target.and_then(|t| self.finish_decode(one.session, &one.plan, t)));
                 }
             }
             other => {
