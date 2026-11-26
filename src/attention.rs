@@ -2337,6 +2337,9 @@ mod tests {
             (4096, 1, 7, false),
             (24575, 1, 8, true),
             (32760, 1, 8, false),
+            (32768, 1, 1, false),
+            (202109, 1, 3, true),
+            (404219, 1, 5, false),
             (TOP_BLOCKS * BLOCK - 2, 1, 9, false),
             (TOP_BLOCKS * BLOCK + 109, 1, 3, true),
         ] {

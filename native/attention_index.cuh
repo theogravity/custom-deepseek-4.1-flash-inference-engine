@@ -70,6 +70,12 @@ inline bool use_tiled_selection(int width, int rows, int keep) {
         const char *v = std::getenv("DS4_BATCH_TOPK");
         return v && std::strcmp(v, "1") == 0;
     }();
+    static const bool wide_enabled = [] {
+        const char *v = std::getenv("DS4_WIDE_TOPK");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    if (enabled && wide_enabled && keep == top && rows <= 16 && width <= 524288)
+        return true;
     return enabled && rows > 1 && !wide_index_sort(width, rows) &&
            (width <= sort_tile || (keep == top && width <= sort_tile * (sort_tile / top)));
 }
@@ -99,17 +105,25 @@ __global__ void select_tile(const unsigned long long *in, unsigned long long *ou
 
 inline cudaError_t tiled_selection(const unsigned long long *input, unsigned long long *output,
         unsigned long long *tile_winners, int width, int rows, int keep) {
-    const int tiles = (width + sort_tile - 1) / sort_tile;
     int stride = width, count = width;
-    if (tiles > 1) {
-        stride = tiles * keep;
+    auto *next = tile_winners;
+    unsigned long long *second = nullptr;
+    while (count > sort_tile) {
+        const int tiles = (count + sort_tile - 1) / sort_tile;
+        const int next_stride = tiles * keep;
         select_tile<sort_tile / block><<<dim3(tiles, rows), block>>>(
-            input, tile_winners, width, width, stride, keep);
+            input, next, count, stride, next_stride, keep);
         auto rc = cudaGetLastError();
         if (rc != cudaSuccess) return rc;
-        // A partial final tile can contain fewer than keep valid input slots.
-        count = (tiles - 1) * keep + std::min(keep, width - (tiles - 1) * sort_tile);
-        input = tile_winners;
+        count = (tiles - 1) * keep + std::min(keep, count - (tiles - 1) * sort_tile);
+        stride = next_stride;
+        input = next;
+        if (count > sort_tile) {
+            // For keep=512, multiple passes require at least 32,769 keys:
+            // the first two winner arrays together fit in the dead 32-bit IDs.
+            if (!second) second = tile_winners + size_t(rows) * stride;
+            next = next == tile_winners ? second : tile_winners;
+        }
     }
     dim3 grid(1, rows);
     if (count <= 1024)
