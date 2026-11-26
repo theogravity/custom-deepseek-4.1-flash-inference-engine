@@ -6,7 +6,7 @@ use crate::{
     moe,
     runtime::{Dev, Runtime},
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 #[path = "confidence.rs"]
 mod confidence;
@@ -55,32 +55,112 @@ impl DraftState {
         seed: u32,
         width: usize,
     ) -> Result<Vec<u32>> {
+        propose_many(
+            rt,
+            &mut [DraftInput {
+                state: self,
+                pos,
+                seed,
+                width,
+            }],
+        )?
+        .pop()
+        .context("missing draft result")
+    }
+}
+
+pub(crate) struct DraftInput<'a> {
+    pub state: &'a mut DraftState,
+    pub pos: usize,
+    pub seed: u32,
+    pub width: usize,
+}
+
+// Sharing the feed-forward and head weights saves a traversal per additional
+// request. Noise seeds, attention rings, Markov chains, and confidence decisions
+// belong to the originating sequence. Proposing never commits any KV.
+pub(crate) fn propose_many(
+    rt: &mut Runtime,
+    requests: &mut [DraftInput<'_>],
+) -> Result<Vec<Vec<u32>>> {
+    ensure!(!requests.is_empty(), "empty draft batch");
+    let mut noise = Vec::new();
+    for r in requests.iter() {
         ensure!(
-            (1..=16).contains(&width),
+            (1..=16).contains(&r.width),
             "DSpark proposal length out of range"
         );
-        let mut noise = vec![128799; width];
-        noise[0] = seed;
-        let mut h = residual::embed(rt, &noise)?;
-        let mut mix = residual::initial_mix(rt, width)?;
-        for stage in 0..3 {
-            let stem = format!("mtp.{stage}");
-            let x = residual::prepare(rt, &stem, "attn", &h, &mut mix, width)?;
-            let x = self.attention.forward(rt, stage, &x, pos, width)?;
-            residual::expand(rt, &mut h, &x, &mix, width)?;
-            let x = residual::prepare(rt, &stem, "ffn", &h, &mut mix, width)?;
-            let x = moe::draft_forward(rt, stage, &x, width)?;
-            residual::expand(rt, &mut h, &x, &mix, width)?;
-        }
-        let x = residual::readout(rt, &h, &mut mix, "mtp.2.norm.weight", 0, width)?;
-        let logits = rt.linear_dev("head.weight", &x, width, 1)?;
-        let ids = rt.markov(&logits, seed, width)?;
-        if let Some(gate) = confidence::Gate::configured()? {
-            let (proposals, trace) = gate.evaluate(rt, &h, &mix, seed, &ids)?;
-            self.trace = trace;
-            Ok(proposals)
+        noise.push(r.seed);
+        noise.resize(noise.len() + r.width - 1, 128799);
+    }
+    let rows = noise.len();
+    let mut h = residual::embed(rt, &noise)?;
+    let mut mix = residual::initial_mix(rt, rows)?;
+    for stage in 0..3 {
+        let stem = format!("mtp.{stage}");
+        let x = residual::prepare(rt, &stem, "attn", &h, &mut mix, rows)?;
+        let y = if let [r] = requests {
+            r.state.attention.forward(rt, stage, &x, r.pos, r.width)?
         } else {
-            rt.token_ids(&ids)
-        }
+            let mut all = rt.buffer(x.len())?;
+            let mut offset = 0;
+            for r in requests.iter_mut() {
+                let part = rt.slice(&x, offset, r.width * crate::model::DIM)?;
+                let y = r
+                    .state
+                    .attention
+                    .forward(rt, stage, &part, r.pos, r.width)?;
+                rt.copy_into(&mut all, offset, &y)?;
+                offset += y.len();
+            }
+            all
+        };
+        residual::expand(rt, &mut h, &y, &mix, rows)?;
+        drop((x, y));
+        let x = residual::prepare(rt, &stem, "ffn", &h, &mut mix, rows)?;
+        let x = moe::draft_forward(rt, stage, &x, rows)?;
+        residual::expand(rt, &mut h, &x, &mix, rows)?;
+    }
+    let x = residual::readout(rt, &h, &mut mix, "mtp.2.norm.weight", 0, rows)?;
+    let logits = rt.linear_dev("head.weight", &x, rows, 1)?;
+    let gate = confidence::Gate::configured()?;
+    if let [r] = requests {
+        let ids = rt.markov(&logits, r.seed, r.width)?;
+        return Ok(vec![finish_proposal(rt, r, gate.as_ref(), &h, &mix, &ids)?]);
+    }
+    let mut proposals = Vec::with_capacity(requests.len());
+    let mut offset = 0;
+    for r in requests {
+        let logits = rt.slice(&logits, offset * 129280, r.width * 129280)?;
+        let ids = rt.markov(&logits, r.seed, r.width)?;
+        let result = if gate.is_some() {
+            let hc = h.len() / rows;
+            let mc = mix.len() / rows;
+            let hidden = rt.slice(&h, offset * hc, r.width * hc)?;
+            let mixture = rt.slice(&mix, offset * mc, r.width * mc)?;
+            finish_proposal(rt, r, gate.as_ref(), &hidden, &mixture, &ids)?
+        } else {
+            rt.token_ids(&ids)?
+        };
+        proposals.push(result);
+        offset += r.width;
+    }
+    Ok(proposals)
+}
+
+fn finish_proposal(
+    rt: &mut Runtime,
+    r: &mut DraftInput<'_>,
+    gate: Option<&confidence::Gate>,
+    h: &Dev,
+    mix: &Dev,
+    ids: &Dev,
+) -> Result<Vec<u32>> {
+    if let Some(gate) = gate {
+        let (proposals, trace) = gate.evaluate(rt, h, mix, r.seed, ids)?;
+        r.state.trace = trace;
+        Ok(proposals)
+    } else {
+        rt.token_ids(ids)
     }
 }

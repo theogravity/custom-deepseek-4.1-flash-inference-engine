@@ -1,6 +1,6 @@
 //! Output-row tensor parallelism. Each direction owns independent, growing
 //! staging buffers; DEFAULT streams own the input and joined output lifetimes.
-use super::{checked, ds_alloc_f32, ds_free, ds_set_device, ds_upload, Matrix};
+use super::{checked, ds_alloc_f32, ds_dense_growth, ds_free, ds_set_device, ds_upload, Matrix};
 use crate::moe::MoeCache;
 use anyhow::{bail, ensure, Context, Result};
 use std::{
@@ -11,14 +11,6 @@ use std::{
 unsafe extern "C" {
     fn ds_tp_new(owner: i32, peer: i32, out: *mut *mut c_void) -> i32;
     fn ds_tp_destroy(link: *mut c_void);
-    fn ds_tp_dense_growth(
-        ctx: *mut c_void,
-        rows: i32,
-        cols: i32,
-        batch: i32,
-        mode: i32,
-        full_rows: i32,
-    ) -> usize;
     fn ds_tp_project(
         link: *mut c_void,
         owner_ctx: *mut c_void,
@@ -229,7 +221,7 @@ impl ParallelDense {
             link.peer_input.grow(n_input, cache)?;
             link.peer_parts.grow(n_output / 2, cache)?;
             for (ctx, dev) in [(home_ctx, w.device), (peer_ctx, peer.device)] {
-                let extra = unsafe { ds_tp_dense_growth(ctx, rows / 2, cols, batch, w.mode, rows) };
+                let extra = unsafe { ds_dense_growth(ctx, rows / 2, cols, batch, 1, w.mode, rows) };
                 if extra > 0 {
                     checked(unsafe { ds_set_device(dev) })?;
                     cache.reserve(dev, extra)?;

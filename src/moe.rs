@@ -39,7 +39,7 @@ struct RoutedRow {
 
 unsafe extern "C" {
     fn ds_moe_error(error: i32) -> *const c_char;
-    fn ds_moe_free_bytes(bytes: *mut usize) -> i32;
+    fn ds_moe_free_bytes(device: i32, bytes: *mut usize) -> i32;
     fn ds_moe_alloc(slot: *mut *mut c_void) -> i32;
     fn ds_moe_upload_parts(slot: *mut c_void, parts: *const *const c_void, coalesce: i32) -> i32;
     fn ds_moe_router_start(
@@ -142,7 +142,7 @@ impl MoeCache {
             return Ok(());
         }
         let mut free = 0;
-        cuda(unsafe { ds_moe_free_bytes(&mut free) })?;
+        cuda(unsafe { ds_moe_free_bytes(device, &mut free) })?;
         let missing = bytes.saturating_add(64 << 20).saturating_sub(free);
         let to_remove = missing.div_ceil(SLOT_BYTES).min(cache.slots.len());
         for _ in 0..to_remove {
@@ -298,7 +298,7 @@ impl DeviceCache {
 
     fn capacity(&mut self) -> Result<usize> {
         let mut free = 0;
-        cuda(unsafe { ds_moe_free_bytes(&mut free) })?;
+        cuda(unsafe { ds_moe_free_bytes(self.device, &mut free) })?;
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
         let capacity = Self::available_slots(self.slots.len(), free, self.limit);

@@ -51,6 +51,15 @@ extern "C" {
     fn ds_alloc_f32(dev: c_int, out: *mut *mut f32, len: usize) -> c_int;
     fn ds_copy_f32(dev: c_int, dst: *mut f32, src: *const f32, len: usize, to_host: c_int)
         -> c_int;
+    fn ds_dense_growth(
+        ctx: *mut c_void,
+        rows: i32,
+        cols: i32,
+        batch: i32,
+        groups: i32,
+        mode: i32,
+        full_rows: i32,
+    ) -> usize;
     fn ds_project(
         ctx: *mut c_void,
         w: *const c_void,
@@ -299,6 +308,26 @@ impl Runtime {
         })?;
         Ok(out)
     }
+    pub(crate) fn copy_into(&self, dst: &mut Dev, offset: usize, src: &Dev) -> Result<()> {
+        ensure!(
+            dst.device() == self.device
+                && src.device() == self.device
+                && offset
+                    .checked_add(src.len())
+                    .is_some_and(|end| end <= dst.len()),
+            "invalid batched device copy"
+        );
+        checked(unsafe {
+            ds_copy_f32(
+                self.device,
+                dst.as_mut_ptr().add(offset),
+                src.as_ptr(),
+                src.len(),
+                2,
+            )
+        })
+    }
+
     pub(crate) fn raw_bf16(
         &mut self,
         name: &str,
@@ -607,6 +636,20 @@ impl Runtime {
                 .with_context(|| format!("parallel project {name}"))?;
             return Ok(out);
         }
+        let extra = unsafe {
+            ds_dense_growth(
+                self.contexts[&self.device],
+                w.rows.try_into()?,
+                w.cols.try_into()?,
+                batch.try_into()?,
+                groups.try_into()?,
+                w.mode,
+                w.rows.try_into()?,
+            )
+        };
+        if extra > 0 {
+            self.moe_cache.reserve(self.device, extra)?;
+        }
         checked(unsafe {
             ds_project(
                 self.contexts[&self.device],
@@ -639,6 +682,26 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn scratch_growth_covers_grouped_inputs_and_large_batch_head() -> Result<()> {
+        let dev = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let mut ctx = ptr::null_mut();
+        checked(unsafe { ds_dense_create(dev, &mut ctx) })?;
+        let growth = |rows, cols, n, groups, mode| unsafe {
+            ds_dense_growth(ctx, rows, cols, n, groups, mode, rows)
+        };
+        let head = growth(129280, 5120, 512, 1, 7);
+        let grouped = growth(1024, 512, 32, 8, 2);
+        let stable = growth(24, 20480, 17, 1, 5);
+        let fp32 = growth(512, 512, 32, 1, 0);
+        unsafe { ds_dense_destroy(ctx) };
+        assert_eq!(head, 512 * (5120 * 2 + 129280 * 4));
+        assert_eq!(grouped, 32 * 8 * 512 * 2);
+        assert_eq!(stable, 17 * 20 * 24 * 4);
+        assert_eq!(fp32, 0);
+        Ok(())
+    }
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn packed_head_uses_independent_bf16_to_e4m3_group_scales() -> Result<()> {

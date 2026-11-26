@@ -53,6 +53,11 @@ pub struct EngramRows {
 }
 
 impl EngramRows {
+    pub(crate) fn append(&mut self, mut other: Self) {
+        debug_assert_eq!(self.prefix, other.prefix);
+        self.records.append(&mut other.records);
+    }
+
     pub fn apply(&self, rt: &mut Runtime, h: &mut Dev) -> Result<()> {
         let batch = self.records.len();
         ensure!(h.len() == batch * 4 * DIM, "invalid Engram hidden size");

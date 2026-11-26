@@ -1,6 +1,6 @@
 use crate::{
     attention::AttentionState,
-    draft::DraftState,
+    draft::{self, DraftInput, DraftState},
     engram::Engram,
     prefix::PrefixCache,
     runtime::{Dev, Runtime},
@@ -210,6 +210,12 @@ impl Session {
     }
 }
 
+struct Proposal {
+    source: ProposalSource,
+    tokens: Vec<u32>,
+    learned_width: usize,
+}
+
 struct DecodePlan {
     source: ProposalSource,
     rows: usize,
@@ -225,6 +231,7 @@ pub struct Model {
     prefix: PrefixCache,
     spec_k: usize,
     lookup: prompt_lookup::Config,
+    batch_drafter: bool,
     rt: Runtime,
     engram: Engram,
     max_ctx: usize,
@@ -255,6 +262,11 @@ impl Model {
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
             lookup: prompt_lookup::configured()?,
+            batch_drafter: match std::env::var("DS4_BATCH_DRAFT").as_deref() {
+                Ok("0") => false,
+                Ok("1") | Err(std::env::VarError::NotPresent) => true,
+                _ => bail!("DS4_BATCH_DRAFT must be 0 or 1"),
+            },
             rt: Runtime::open(pack, devices)?,
             engram: Engram::new(tok)?,
             max_ctx,
@@ -385,8 +397,7 @@ impl Model {
     /// round. Each result corresponds to its input slot. Drop failed sessions.
     pub(crate) fn step_batch(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
         let mut results: Vec<_> = (0..sessions.len()).map(|_| None).collect();
-        let mut work = Vec::new();
-        let mut rows = 0;
+        let mut decoding = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate() {
             if session.finished {
                 results[index] = Some(Ok(Step {
@@ -394,26 +405,72 @@ impl Model {
                     ..Step::default()
                 }));
             } else if session.is_prefill() {
-                // Retain the same chunk boundaries and prefill precision as the
-                // snapshot's original request. Admit just one chunk this tick.
                 results[index] = Some(self.prefill_step(session));
             } else {
-                match self.plan_decode(session) {
-                    Ok(plan) => {
-                        if rows + plan.rows > 512 {
-                            self.decode_group(&mut work, &mut results);
-                            work.clear();
-                            rows = 0;
-                        }
-                        rows += plan.rows;
-                        work.push(DecodeWork {
-                            index,
-                            session,
-                            plan,
-                        });
+                let remaining = session.limit - session.emitted - 1;
+                let width = self.spec_k.min(remaining);
+                let learned =
+                    width > 0 && session.draft.as_ref().is_some_and(|d| d.ready(session.pos));
+                let tokens = session.lookup.propose(&session.ids, remaining, learned);
+                let source = if !tokens.is_empty() {
+                    ProposalSource::Lookup
+                } else if learned {
+                    ProposalSource::Learned
+                } else {
+                    ProposalSource::Target
+                };
+                decoding.push((
+                    index,
+                    &mut **session,
+                    Proposal {
+                        source,
+                        tokens,
+                        learned_width: width,
+                    },
+                ));
+            }
+        }
+        let mut inputs = Vec::new();
+        let mut slots = Vec::new();
+        for (slot, (_, s, plan)) in decoding.iter_mut().enumerate() {
+            if plan.source == ProposalSource::Learned {
+                slots.push(slot);
+                inputs.push(DraftInput {
+                    state: s.draft.as_mut().unwrap(),
+                    pos: s.pos,
+                    seed: s.ids[s.pos],
+                    width: plan.learned_width,
+                });
+            }
+        }
+        let drafts = self.learned_proposals(&mut inputs);
+        for (slot, proposed) in slots.into_iter().zip(drafts) {
+            match proposed {
+                Ok(tokens) => decoding[slot].2.tokens = tokens,
+                Err(e) => results[decoding[slot].0] = Some(Err(e)),
+            }
+        }
+        let mut work = Vec::new();
+        let mut rows = 0;
+        for (index, session, proposal) in decoding {
+            if results[index].is_some() {
+                continue;
+            }
+            match Self::plan_decode(session, proposal) {
+                Ok(plan) => {
+                    if rows + plan.rows > 512 {
+                        self.decode_group(&mut work, &mut results);
+                        work.clear();
+                        rows = 0;
                     }
-                    Err(e) => results[index] = Some(Err(e)),
+                    rows += plan.rows;
+                    work.push(DecodeWork {
+                        index,
+                        session,
+                        plan,
+                    });
                 }
+                Err(e) => results[index] = Some(Err(e)),
             }
         }
         if !work.is_empty() {
@@ -483,35 +540,47 @@ impl Model {
         Ok(session.emit(Vec::new(), token))
     }
 
-    fn plan_decode(&mut self, session: &mut Session) -> Result<DecodePlan> {
-        let remaining = session.limit - session.emitted - 1;
-        let width = self.spec_k.min(remaining);
-        let learned = session
-            .draft
-            .as_mut()
-            .filter(|d| width > 0 && d.ready(session.pos));
-        let mut proposed = session
-            .lookup
-            .propose(&session.ids, remaining, learned.is_some());
-        let source = if !proposed.is_empty() {
-            ProposalSource::Lookup
-        } else if let Some(draft) = learned {
-            self.rt.layer(39)?;
-            proposed = draft.propose(&mut self.rt, session.pos, session.ids[session.pos], width)?;
+    fn learned_proposals(&mut self, inputs: &mut [DraftInput<'_>]) -> Vec<Result<Vec<u32>>> {
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+        if let Err(e) = self.rt.layer(39) {
+            return inputs
+                .iter()
+                .map(|_| Err(anyhow::anyhow!("{e:#}")))
+                .collect();
+        }
+        if self.batch_drafter && inputs.len() > 1 {
+            match draft::propose_many(&mut self.rt, inputs) {
+                Ok(proposals) => return proposals.into_iter().map(Ok).collect(),
+                // No target or draft KV has been modified. Retry on the smaller
+                // per-request workspace, isolating a malformed individual ring.
+                Err(e) => eprintln!("grouped DSpark proposal failed: {e:#}; retrying separately"),
+            }
+        }
+        inputs
+            .iter_mut()
+            .map(|r| r.state.propose(&mut self.rt, r.pos, r.seed, r.width))
+            .collect()
+    }
+
+    fn plan_decode(session: &mut Session, proposal: Proposal) -> Result<DecodePlan> {
+        if proposal.source == ProposalSource::Learned {
             ensure!(
-                proposed.len() <= width && proposed.iter().all(|&t| t < 129280),
+                proposal.tokens.len() <= proposal.learned_width
+                    && proposal.tokens.iter().all(|&t| t < 129280),
                 "invalid DSpark proposal"
             );
-            ProposalSource::Learned
-        } else {
-            ProposalSource::Target
-        };
-        let rows = proposed.len() + 1;
+        }
+        let rows = proposal.tokens.len() + 1;
         if rows > 1 {
             session.cache.begin_verify(session.pos, rows)?;
         }
-        session.ids.extend_from_slice(&proposed);
-        Ok(DecodePlan { source, rows })
+        session.ids.extend_from_slice(&proposal.tokens);
+        Ok(DecodePlan {
+            source: proposal.source,
+            rows,
+        })
     }
 
     fn decode_group(&mut self, work: &mut [DecodeWork<'_>], results: &mut [Option<Result<Step>>]) {

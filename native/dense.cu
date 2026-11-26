@@ -207,20 +207,20 @@ __global__ void round_bf16(float *data, size_t n) {
 static int mx_splits(int rows, int cols) {
   return std::max(1, std::min(cols / 32, (512 * 64 + rows - 1) / rows));
 }
-// Number of additional bytes required by a half-matrix projection using the
-// existing per-device dense context. Its scratch buffers release the old
-// allocation before resizing, so only capacity growth needs reservation.
-extern "C" size_t ds_tp_dense_growth(Context *c, int rows, int cols, int batch,
-                                     int mode, int full_rows) {
-  if (mode == 3) return 0;
-  size_t input = size_t(batch) * cols * sizeof(__nv_bfloat16);
-  size_t growth = input > c->short_input.cap ? input - c->short_input.cap : 0;
-  if (mode == 4 || mode == 7) {
-    int splits = mx_splits(full_rows, cols);
-    size_t parts = size_t(batch) * rows * splits * sizeof(float);
-    if (parts > c->partial.cap) growth += parts - c->partial.cap;
-  }
-  return growth;
+// Scratch buffers release their old allocation before growing. Reserve the
+// net increase on this device while packed expert slots can still be evicted.
+extern "C" size_t ds_dense_growth(Context *c, int rows, int cols, int batch,
+                                  int groups, int mode, int full_rows) {
+  const bool stable = mode == 5 || mode == 6;
+  const bool packed = mode == 4 || mode == 7;
+  size_t input = mode != 0 && mode != 3 && !stable
+                     ? size_t(batch) * groups * cols * sizeof(__nv_bfloat16)
+                     : 0;
+  int splits = stable ? (cols + 1023) / 1024
+                      : (packed ? mx_splits(full_rows, cols) : 0);
+  size_t parts = size_t(batch) * rows * splits * sizeof(float);
+  return (input > c->short_input.cap ? input - c->short_input.cap : 0) +
+         (parts > c->partial.cap ? parts - c->partial.cap : 0);
 }
 
 extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,

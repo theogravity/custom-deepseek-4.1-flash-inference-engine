@@ -370,7 +370,9 @@ void launch_fused(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows
 } // namespace
 
 extern "C" const char *ds_moe_error(int e) { return cudaGetErrorString(cudaError_t(e)); }
-extern "C" int ds_moe_free_bytes(size_t *free_bytes) {
+extern "C" int ds_moe_free_bytes(int device, size_t *free_bytes) {
+    auto status = cudaSetDevice(device);
+    if (status != cudaSuccess) return int(status);
     size_t total;
     return int(cudaMemGetInfo(free_bytes, &total));
 }
