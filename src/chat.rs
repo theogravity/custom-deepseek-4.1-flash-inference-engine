@@ -729,6 +729,22 @@ mod tests {
         let t = Tokenizer::from_file(pack.join("tokenizer.json")).unwrap();
         let mut plain = t.clone();
         plain.with_added_vocabulary(tokenizers::AddedVocabulary::new());
+        // Both staged benchmark turns were independently tokenized with the
+        // checkpoint's encoding.py. Even the first assistant header is shared.
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/receipt_prefix.json")).unwrap();
+        let turns = fixture["messages"].as_array().unwrap();
+        let mut expected: Vec<u32> = serde_json::from_value(fixture["first_ids"].clone()).unwrap();
+        for len in [1, 3] {
+            if len == 3 {
+                expected.extend(
+                    serde_json::from_value::<Vec<u32>>(fixture["additional_ids"].clone()).unwrap(),
+                );
+            }
+            let req = json!({"messages":turns[..len],"reasoning_effort":"none"});
+            let (p, _, _) = render(&req).unwrap();
+            assert_eq!(p.encode(&t, &plain).unwrap(), expected);
+        }
         for i in 1..=2 {
             let path = pack.join(format!("encoding/tests/test_input_{i}.json"));
             let raw: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
