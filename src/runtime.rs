@@ -1,3 +1,5 @@
+#[path = "parallel_dense.rs"]
+mod parallel_dense;
 use crate::{moe::MoeCache, weights::Weights};
 use anyhow::{ensure, Context, Result};
 use std::{
@@ -61,6 +63,7 @@ extern "C" {
         mode: c_int,
         round_output: c_int,
         prefill: c_int,
+        full_rows: c_int,
     ) -> c_int;
     #[cfg(test)]
     fn ds_gemm(
@@ -90,6 +93,9 @@ fn checked(code: c_int) -> Result<()> {
 }
 pub fn packed_dense() -> bool {
     std::env::var_os("DS4_PACKED_DENSE").is_some_and(|v| v == "1")
+}
+pub fn tp_dense() -> bool {
+    std::env::var_os("DS4_TP_DENSE").is_some_and(|v| v == "1")
 }
 struct Allocation {
     device: i32,
@@ -139,6 +145,7 @@ impl Drop for Dev {
     }
 }
 struct Matrix {
+    peer: Option<parallel_dense::PeerWeight>,
     device: i32,
     ptr: *mut c_void,
     rows: usize,
@@ -157,6 +164,7 @@ pub struct Runtime {
     pub moe_cache: MoeCache,
     pub verification: bool,
     packed: bool,
+    parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
     pools: HashMap<i32, Arc<Mutex<Pool>>>,
     vectors: HashMap<String, Dev>,
@@ -185,6 +193,7 @@ impl Runtime {
             moe_cache: MoeCache::default(),
             verification: false,
             packed: packed_dense(),
+            parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
             vectors: HashMap::new(),
             matrices: HashMap::new(),
@@ -194,6 +203,9 @@ impl Runtime {
             let mut ctx = ptr::null_mut();
             checked(unsafe { ds_dense_create(dev, &mut ctx) })?;
             rt.contexts.insert(dev, ctx);
+        }
+        if tp_dense() {
+            rt.parallel = Some(parallel_dense::ParallelDense::new(devices)?);
         }
         Ok(rt)
     }
@@ -308,6 +320,7 @@ impl Runtime {
             self.matrices.insert(
                 name.into(),
                 Matrix {
+                    peer: None,
                     device: self.device,
                     ptr: raw,
                     rows,
@@ -482,14 +495,19 @@ impl Runtime {
                 }
                 other => anyhow::bail!("unsupported matrix {name} {other}"),
             };
+            let split =
+                self.parallel.is_some() && parallel_dense::eligible(rows, cols, groups, mode);
+            let shard_rows = if split { rows / 2 } else { rows };
             // The packed MXFP8 tensor, scales and expanded BF16 destination coexist during upload.
-            let elements = rows.checked_mul(cols).context("dense shape overflow")?;
+            let elements = shard_rows
+                .checked_mul(cols)
+                .context("dense shape overflow")?;
             let mut transient = elements
                 .checked_mul([4, 2, 3, 3, 2, 4, 2, 4][mode as usize])
                 .context("dense size overflow")?;
             if mode == 2 || mode == 4 {
                 transient = transient
-                    .checked_add(rows.div_ceil(32) * cols.div_ceil(32))
+                    .checked_add(shard_rows.div_ceil(32) * cols.div_ceil(32))
                     .context("scale size overflow")?;
             }
             if mode == 3 || mode == 7 {
@@ -497,6 +515,22 @@ impl Runtime {
                     .checked_add(elements / 32)
                     .context("head scale size overflow")?;
             }
+            let peer = if split {
+                let peer_device = self.peer_device();
+                Some(parallel_dense::PeerWeight::upload(
+                    &mut self.moe_cache,
+                    self.device,
+                    peer_device,
+                    w.data,
+                    scales,
+                    shard_rows,
+                    cols,
+                    mode,
+                    transient,
+                )?)
+            } else {
+                None
+            };
             self.moe_cache.reserve(self.device, transient)?;
             let mut buf = ptr::null_mut();
             checked(unsafe {
@@ -504,8 +538,8 @@ impl Runtime {
                     self.device,
                     &mut buf,
                     w.data.as_ptr().cast(),
-                    scales,
-                    rows.try_into()?,
+                    scales.cast(),
+                    shard_rows.try_into()?,
                     cols.try_into()?,
                     mode,
                 )
@@ -514,6 +548,7 @@ impl Runtime {
             self.matrices.insert(
                 name.to_string(),
                 Matrix {
+                    peer,
                     device: self.device,
                     ptr: buf,
                     rows,
@@ -546,6 +581,25 @@ impl Runtime {
         let n = batch.checked_mul(w.rows).context("dense output overflow")?;
         let mut out = self.buffer(n)?;
         let w = &self.matrices[name];
+        if w.peer.is_some() {
+            ensure!(groups == 1, "grouped call on tensor-parallel weight {name}");
+            let peer_device = self.peer_device();
+            self.parallel
+                .as_mut()
+                .context("missing parallel projection")?
+                .project(
+                    &mut self.moe_cache,
+                    w,
+                    self.contexts[&self.device],
+                    self.contexts[&peer_device],
+                    x.as_ptr(),
+                    out.as_mut_ptr(),
+                    batch,
+                    !self.verification,
+                )
+                .with_context(|| format!("parallel project {name}"))?;
+            return Ok(out);
+        }
         checked(unsafe {
             ds_project(
                 self.contexts[&self.device],
@@ -559,6 +613,7 @@ impl Runtime {
                 w.mode,
                 w.round_output.into(),
                 (!self.verification).into(),
+                w.rows.try_into()?,
             )
         })
         .with_context(|| format!("project {name}"))?;
@@ -611,6 +666,7 @@ mod tests {
             )
         })?;
         let w = Matrix {
+            peer: None,
             device,
             ptr: data,
             rows: 3,
@@ -668,6 +724,7 @@ mod tests {
                     )
                 })?;
                 Ok(Matrix {
+                    peer: None,
                     device: dev,
                     ptr: p,
                     rows,
@@ -832,6 +889,7 @@ mod tests {
                 )
             })?;
             let w = Matrix {
+                peer: None,
                 device: dev,
                 ptr: raw,
                 rows,
@@ -898,6 +956,7 @@ mod tests {
                 )
             })?;
             let w = Matrix {
+                peer: None,
                 device: dev,
                 ptr: raw,
                 rows,

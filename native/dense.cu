@@ -204,9 +204,28 @@ __global__ void round_bf16(float *data, size_t n) {
   if (i < n)
     data[i] = __bfloat162float(__float2bfloat16_rn(data[i]));
 }
+static int mx_splits(int rows, int cols) {
+  return std::max(1, std::min(cols / 32, (512 * 64 + rows - 1) / rows));
+}
+// Number of additional bytes required by a half-matrix projection using the
+// existing per-device dense context. Its scratch buffers release the old
+// allocation before resizing, so only capacity growth needs reservation.
+extern "C" size_t ds_tp_dense_growth(Context *c, int rows, int cols, int batch,
+                                     int mode, int full_rows) {
+  if (mode == 3) return 0;
+  size_t input = size_t(batch) * cols * sizeof(__nv_bfloat16);
+  size_t growth = input > c->short_input.cap ? input - c->short_input.cap : 0;
+  if (mode == 4 || mode == 7) {
+    int splits = mx_splits(full_rows, cols);
+    size_t parts = size_t(batch) * rows * splits * sizeof(float);
+    if (parts > c->partial.cap) growth += parts - c->partial.cap;
+  }
+  return growth;
+}
+
 extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
                           int rows, int cols, int batch, int groups, int mode,
-                          int round_output, int prefill) {
+                          int round_output, int prefill, int full_rows) {
   CUDA(cudaSetDevice(c->device));
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
   if (mode == 3) {
@@ -243,7 +262,7 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
     kind = CUDA_R_16BF;
   }
   if (mode == 4 || mode == 7) {
-    int splits=std::max(1,std::min(cols/32, (512*64+rows-1)/rows));
+    int splits=mx_splits(full_rows, cols);
     if(c->partial.resize(size_t(splits)*ny*sizeof(float)))return -1;
     auto weights=static_cast<const uint2*>(w);
     auto scales=static_cast<const unsigned char*>(w)+size_t(rows)*cols;
@@ -283,7 +302,7 @@ extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
     return -1;
   CUDA(cudaMemcpy(c->input.ptr, x, nx * 4, cudaMemcpyHostToDevice));
   if (ds_project(c, w, (const float *)c->input.ptr, (float *)c->output.ptr,
-                 rows, cols, batch, groups, mode, 0, 1))
+                 rows, cols, batch, groups, mode, 0, 1, rows))
     return -1;
   CUDA(cudaMemcpy(y, c->output.ptr, ny * 4, cudaMemcpyDeviceToHost));
   return 0;
