@@ -3,10 +3,18 @@ use anyhow::{bail, ensure, Context, Result};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Default)]
+enum OutputLookup {
+    #[default]
+    Disabled,
+    SingleClient,
+    Always,
+}
+
+#[derive(Clone, Copy, Default)]
 pub(super) struct Config {
     max_width: usize,
     adaptive: bool,
-    prior_output: bool,
+    prior_output: OutputLookup,
 }
 
 pub(super) fn configured() -> Result<Config> {
@@ -30,9 +38,10 @@ pub(super) fn configured() -> Result<Config> {
         _ => bail!("DS4_ADAPTIVE_LOOKUP must be 0 or 1"),
     };
     let prior_output = match std::env::var("DS4_OUTPUT_LOOKUP").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0") => false,
-        Ok("1") => true,
-        _ => bail!("DS4_OUTPUT_LOOKUP must be 0 or 1"),
+        Err(std::env::VarError::NotPresent) | Ok("0") => OutputLookup::Disabled,
+        Ok("single") => OutputLookup::SingleClient,
+        Ok("1") => OutputLookup::Always,
+        _ => bail!("DS4_OUTPUT_LOOKUP must be 0, single or 1"),
     };
     Ok(Config {
         prior_output,
@@ -67,7 +76,13 @@ impl PromptLookup {
         }
         lookup
     }
-    pub(super) fn propose(&self, ids: &[u32], remaining: usize, learned_ready: bool) -> Vec<u32> {
+    pub(super) fn propose(
+        &self,
+        ids: &[u32],
+        remaining: usize,
+        learned_ready: bool,
+        single_client: bool,
+    ) -> Vec<u32> {
         let width = self.config.max_width.min(remaining);
         if ids.len() < 4 || width == 0 {
             return vec![];
@@ -103,7 +118,12 @@ impl PromptLookup {
             (true, 32..64) => available.min(64),
             _ => available,
         };
-        if length == 0 && self.config.prior_output {
+        let use_output = match self.config.prior_output {
+            OutputLookup::Disabled => false,
+            OutputLookup::SingleClient => single_client,
+            OutputLookup::Always => true,
+        };
+        if length == 0 && use_output {
             return prior_output_proposal(&ids[self.prompt_len..], width).to_vec();
         }
         prompt[source..source + length].to_vec()
@@ -161,7 +181,7 @@ mod tests {
         Config {
             max_width: 128,
             adaptive,
-            prior_output: false,
+            prior_output: OutputLookup::Disabled,
         }
     }
 
@@ -174,16 +194,33 @@ mod tests {
         assert!(prior_output_proposal(&[12; 7], 16).is_empty());
         assert!(prior_output_proposal(&output, 0).is_empty());
         let mut cfg = config(true);
-        cfg.prior_output = true;
+        cfg.prior_output = OutputLookup::Always;
         let prompt = [999; 32];
         let ids = [prompt.as_slice(), &output].concat();
         assert!(PromptLookup::new(&prompt, config(true))
-            .propose(&ids, 5, true)
+            .propose(&ids, 5, true, true)
             .is_empty());
         assert_eq!(
-            PromptLookup::new(&prompt, cfg).propose(&ids, 5, true),
+            PromptLookup::new(&prompt, cfg).propose(&ids, 5, true, true),
             [81, 82, 83, 84, 85]
         );
+    }
+
+    #[test]
+    fn single_client_lookup_leaves_concurrent_output_to_the_learned_drafter() {
+        let passage: Vec<_> = (1..=32).collect();
+        let prior = [passage.as_slice(), &[81, 82, 83, 84], &passage].concat();
+        let prompt = [999; 32];
+        let ids = [prompt.as_slice(), &prior].concat();
+        let lookup = PromptLookup::new(
+            &prompt,
+            Config {
+                prior_output: OutputLookup::SingleClient,
+                ..config(true)
+            },
+        );
+        assert_eq!(lookup.propose(&ids, 4, true, true), [81, 82, 83, 84]);
+        assert!(lookup.propose(&ids, 4, true, false).is_empty());
     }
 
     #[test]
@@ -205,20 +242,26 @@ mod tests {
             let mut history = history(&prompt, &[9000; 40]);
             history.extend_from_slice(&prompt[end - matched..end]);
             assert_eq!(
-                lookup.propose(&history, 150, false),
+                lookup.propose(&history, 150, false, true),
                 prompt[end..end + width]
             );
             let ready_width = if matched < 16 { 0 } else { width };
             assert_eq!(
-                lookup.propose(&history, 150, true),
+                lookup.propose(&history, 150, true, true),
                 prompt[end..end + ready_width]
             );
-            assert_eq!(fixed.propose(&history, 150, true), prompt[end..end + 128]);
-            assert_eq!(lookup.propose(&history, 3, false), prompt[end..end + 3]);
+            assert_eq!(
+                fixed.propose(&history, 150, true, true),
+                prompt[end..end + 128]
+            );
+            assert_eq!(
+                lookup.propose(&history, 3, false, true),
+                prompt[end..end + 3]
+            );
         }
         // A long match at the end of the prompt has only a short continuation.
         assert_eq!(
-            lookup.propose(&history(&prompt, &prompt[160..258]), 128, false),
+            lookup.propose(&history(&prompt, &prompt[160..258]), 128, false, true),
             prompt[258..]
         );
         let capped = PromptLookup::new(
@@ -226,15 +269,15 @@ mod tests {
             Config {
                 max_width: 9,
                 adaptive: true,
-                prior_output: false,
+                prior_output: OutputLookup::Disabled,
             },
         );
         assert_eq!(
-            capped.propose(&history(&prompt, &prompt[..64]), 128, false),
+            capped.propose(&history(&prompt, &prompt[..64]), 128, false, true),
             prompt[64..73]
         );
         assert!(PromptLookup::new(&prompt, Config::default())
-            .propose(&history(&prompt, &prompt[..64]), 128, false)
+            .propose(&history(&prompt, &prompt[..64]), 128, false, true)
             .is_empty());
     }
 
@@ -243,34 +286,36 @@ mod tests {
         let prompt = [9, 8, 0, 1, 2, 3, 4, 5, 6, 7, 9, 9, 0, 1, 2, 3, 77];
         let lookup = PromptLookup::new(&prompt, config(false));
         assert_eq!(
-            lookup.propose(&history(&prompt, &[9, 8, 0, 1, 2, 3]), 4, false),
+            lookup.propose(&history(&prompt, &[9, 8, 0, 1, 2, 3]), 4, false, true),
             [4, 5, 6, 7]
         );
         assert_eq!(
-            lookup.propose(&history(&prompt, &[9, 9, 0, 1, 2, 3]), 128, false),
+            lookup.propose(&history(&prompt, &[9, 9, 0, 1, 2, 3]), 128, false, true),
             [77]
         );
         assert!(lookup
             .propose(
                 &history(&prompt, &[101, 102, 103, 104, 101, 102, 103, 104]),
                 128,
-                false
+                false,
+                true
             )
             .is_empty());
         assert!(lookup
-            .propose(&history(&prompt, &[1, 2, 3]), 128, false)
+            .propose(&history(&prompt, &[1, 2, 3]), 128, false, true)
             .is_empty());
         let prompt: Vec<_> = (0..140).collect();
         assert_eq!(
             PromptLookup::new(&prompt, config(false)).propose(
                 &history(&prompt, &[0, 1, 2, 3]),
                 128,
-                false
+                false,
+                true
             ),
             (4..132).collect::<Vec<_>>()
         );
         assert!(PromptLookup::new(&prompt, Config::default())
-            .propose(&history(&prompt, &[0, 1, 2, 3]), 128, false)
+            .propose(&history(&prompt, &[0, 1, 2, 3]), 128, false, true)
             .is_empty());
     }
 }

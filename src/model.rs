@@ -520,6 +520,12 @@ impl Model {
     /// round. Each result corresponds to its input slot. Drop failed sessions.
     pub(crate) fn step_batch(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
         let mut results: Vec<_> = (0..sessions.len()).map(|_| None).collect();
+        let single_client = sessions
+            .iter()
+            .filter(|s| !s.is_suspended() && !s.finished && !s.is_prefill())
+            .take(2)
+            .count()
+            == 1;
         let mut decoding = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate() {
             if session.is_suspended() {
@@ -538,7 +544,10 @@ impl Model {
                 let width = self.spec_k.min(remaining);
                 let learned =
                     width > 0 && session.draft.as_ref().is_some_and(|d| d.ready(session.pos));
-                let tokens = session.lookup.propose(&session.ids, remaining, learned);
+                let tokens =
+                    session
+                        .lookup
+                        .propose(&session.ids, remaining, learned, single_client);
                 let source = if !tokens.is_empty() {
                     ProposalSource::Lookup
                 } else if learned {
