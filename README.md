@@ -39,6 +39,8 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | Setting | Deployed value | Purpose |
 |---|---|---|
 | `DS4_DRAFTER` | `code` | `released` selects the pack's original weights, `none` disables learned drafting |
+| `DS4_MAX_SEQS` | 6 | Maximum active requests, from 1 through 6 |
+| `DS4_BATCH_DRAFT` | 1 | Evaluate the learned drafter for multiple ready requests together |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
@@ -58,7 +60,11 @@ For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`
 
 The native prefix cache saves target attention state and the drafter's last 128 positions at completed prefill boundaries. Keys cover the token prefix, attention layout and numerical settings, checkpoint files and tokenizer. Draft sidecars also bind to the drafter weights. Entries carry checksums, disk writes use atomic renames, and the store bounds RAM and disk independently. A request can restore a shared prefix after a tool call or a process restart. The engine evaluates the suffix and generates the new completion. Set both cache budgets to 0 to disable persistence and cross-request memoization.
 
-The worker executes one text request at a time and bounds the queue. It exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The original recipe also supports vision and continuous batching. The Rust profile currently serves text with a configured limit of 524,288 tokens.
+The worker serves up to **six concurrent text requests of 524,288 tokens each**, for **3,145,728 total context positions**. Input and generated output share each request's window. Each request has independent sliding-window KV, compressed KV, drafter state and sampling. At full size the six sets of compressed target KV and sliding windows occupy 3,252 MiB on the first inference GPU and 2,178 MiB on the second. Drafter windows, index buffers, activations, model weights and expert slots use additional VRAM. The 2 GiB RAM and 64 GiB disk prefix tiers store reusable snapshots separately.
+
+The scheduler advances each runnable prompt by up to 64 input tokens per round and batches ready requests for drafting and target verification. A small request can start decoding while another is ingesting a long prompt. Eight additional requests can queue. When the queue is full, new requests receive HTTP 429. The authenticated `/metrics` endpoint exposes active, prefilling and decoding requests, their total processed positions, and successful six-request target passes.
+
+The server exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both chat APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The Rust profile serves text. The original recipe also supports vision.
 
 ## Reproduce the measurements
 
@@ -69,9 +75,11 @@ python3 tools/roofline.py --packed
 # With DSV41_API_KEY or LITELLM_MASTER_KEY set in your shell
 python3 tools/code_speed.py --rounds 7
 python3 tools/code_speed.py --rounds 7 --tokens 3000 --edit-source ../model-cli/internal/selfupdate/selfupdate.go
+python3 tools/six_streams.py --output 256 --rounds 7
+python3 tools/six_streams.py --input 524160 --output 128 --rounds 2 --seed 417129047
 ```
 
-The HTTP benchmark sends one request at a time directly to the authenticated inference server, with reasoning disabled and temperature zero. It consumes the SSE stream, uses the engine's completion token count and measures from first to last visible content. The benchmark reports first-token latency separately and excludes one warm-up per prompt. Each short new-code prompt fits inside a single prefill chunk. Source edits can use cached prefix state and source-token proposals. All reported tokens are generated and verified by the target.
+`code_speed.py` sends one request at a time, with reasoning disabled and temperature zero. It consumes the SSE stream, uses the engine's completion token count and measures from first to last visible content. The benchmark reports first-token latency separately and excludes one warm-up per prompt. Each short new-code prompt fits inside a single prefill chunk. Source edits can use cached prefix state and source-token proposals. `six_streams.py` releases six clients together, checks output and completion IDs separately, and measures the interval when all six streams are producing output. Its aggregate decode rate uses the earliest first content and latest last content across the entire wave. Its wall rate also includes prompt ingestion. A fresh seed gives the six long histories distinct contents from the beginning.
 
 To run the full Rust test suite, drain the server and select the two inference GPU UUIDs. The suite includes checkpoint tokenizer, real EXL3, attention, peer-copy, speculative rollback and sampling fixtures.
 
@@ -98,7 +106,7 @@ Across the 18 warm new-code samples through LiteLLM the median was **331.0 tok/s
 
 Throughput depends on what the drafter can predict. The source edit retained most of its input. On the adaptive profile, 1,625 output tokens matched source proposals. An uncached opening, sampling at a different temperature, an essay, and a long transcript can produce very different rates. A first Tetris request in a fresh process measured 90.5 tok/s in the initial HTTP qualification. [Experiment ledger](results/ledger.jsonl)
 
-Both DSpark variants reproduced the identical 256-token Tetris continuation as the undrafted target under the same deployment arithmetic. With source lookup disabled, one warm sample measured 84.4 tok/s target-only, 269.8 with the released weights, and 300.6 with the code-tuned weights. The engine passed all 49 release tests, including the real CUDA and checkpoint fixtures. [Drafter parity](results/drafter-parity.json) · [Pinned serving configuration](results/serving-profile.json)
+Both DSpark variants reproduced the identical 256-token Tetris continuation as the undrafted target under the same deployment arithmetic. With source lookup disabled, one warm sample measured 84.4 tok/s target-only, 269.8 with the released weights, and 300.6 with the code-tuned weights. The single-request build passed all 49 release tests, including the real CUDA and checkpoint fixtures. [Drafter parity](results/drafter-parity.json) · [Pinned serving configuration](results/serving-profile.json)
 
 Codex, Claude Code, and Pi each read a fresh random file through a real tool call and returned the exact contents through LiteLLM. Native authentication, Anthropic thinking streams, and Pi's alternative DeepSeek route passed as well. A 28,538-token cold request retrieved a randomly chosen receipt in 37.23 s. A follow-up with a different instruction and 28,546 input tokens returned the same receipt in 0.319 s. [Client checks](results/hybrid-clients.jsonl) · [Proxy retrieval](results/agent-retrieval.json)
 
@@ -107,6 +115,14 @@ For the LiteLLM OpenAI route measurements, response-cache reads and writes were 
 ```sh
 python3 tools/code_speed.py --base http://127.0.0.1:4000/v1 --model 'DeepSeek V4.1 Flash (openai)' --bypass-proxy-cache --rounds 7
 ```
+
+### Six concurrent agents
+
+Six independent coding requests each generated 256 tokens. Across the six warm waves, aggregate decode measured **395.5 tok/s** and median per-stream decode was **84.7 tok/s**. The overlap and target-pass counters showed genuine simultaneous decoding, and all 42 outputs across the warm and first waves matched the serial controls byte for byte. A separate single-client test of the six-slot scheduler through LiteLLM measured 330.5 tok/s across 18 warm new-code samples. [Concurrent coding](results/six-coding.jsonl) · [Serial controls](results/six-serial-control.jsonl) · [Single-client proxy](results/six-slot-single-client.jsonl)
+
+Six requests with a restored common document and distinct late receipts each consumed **524,160 input + 128 output = 524,288 tokens**. Every wave had 18 successful six-request target passes. Each request returned its own correct receipts. The six warm waves had a median aggregate decode rate of **361.1 tok/s**, a median individual stream rate of **60.9 tok/s**, and a median end-to-end wall time of **5.36 s** for the wave, including cache restore. The first wave in the freshly started process took 13.53 s. The aggregate rate including restore was 143.4 tok/s across warm waves. [Full-window streams and timings](results/six-full-restored.jsonl)
+
+The packed FP32 GPU index scorer and shape-dependent radix sort produced identical receipt outputs across all 42 responses in each configuration. Warm aggregate full-window decode increased from 242.6 tok/s with scalar scoring to 288.9 with packed scoring and 361.1 after changing the sort dispatch. All 59 release tests passed on the two inference GPUs, including rollback, mixed-request failure isolation, token and block selection, cache reuse and per-session memory sizing. [Scalar control](results/six-full-scalar.jsonl) · [Packed scoring control](results/six-full-packed-index.jsonl) · [GPU index timings](results/packed-index-timing.txt) · [Release tests](results/test-six-release.txt)
 
 ### Long-context checks
 

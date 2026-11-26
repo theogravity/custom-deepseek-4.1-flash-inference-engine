@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/main.rs (target/release/build/ds4-flash-rs/c75ac3ad1862c5c9/out/ds4_flash_rs-c75ac3ad1862c5c9)
+index rows=129 positions=600 workspace=2478336 bytes scalar=130.4us packed=102.5us CPU-rank=555.2us
+index rows=4 positions=8192 workspace=1049088 bytes scalar=145.2us packed=133.1us CPU-rank=138.8us
+index rows=64 positions=16391 workspace=33569536 bytes scalar=1422.5us packed=919.8us CPU-rank=3690.6us
+index rows=4 positions=32768 workspace=3422976 bytes scalar=389.9us packed=325.1us CPU-rank=575.0us
+index rows=8 positions=65536 workspace=13128448 bytes scalar=1041.0us packed=788.0us CPU-rank=2142.4us
+index rows=16 positions=131072 workspace=52429312 bytes scalar=3326.6us packed=2313.6us CPU-rank=8172.3us
+index rows=8 positions=262144 workspace=52484864 bytes scalar=3086.9us packed=2075.8us CPU-rank=7796.9us
+index rows=4 positions=524288 workspace=54629120 bytes scalar=2802.7us packed=1793.4us CPU-rank=7984.1us
+index rows=1 positions=524288 workspace=16880384 bytes scalar=716.9us packed=465.0us CPU-rank=1964.4us
