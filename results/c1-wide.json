@@ -1,0 +1,365 @@
+{
+  "checkpoint": "checkpoint-2026-11-26-c1-01-wide",
+  "decision": "Retain the existing ranking dispatch. Differences of +0.07% edit and +0.03% long versus the mean of the two control medians are within run variation.",
+  "suite": "One warm-up and six warm waves per workload on a freshly started process for each leg. Edit first, then coding.",
+  "devices": "host GPUs 1, 2; RTX PRO 6000 Blackwell, 375 W per GPU, 225 W CPU socket",
+  "edit": "25,625 input, 1,500 output, published first-token-to-end metric including reasoning; deterministic edit of functions 50\u201390.",
+  "long": "404,151 input, 512 output, first-to-last visible text excluding first token; frozen coding history.",
+  "gpu_tests_passed": 86,
+  "base_profile": "compose.yml + compose.decode-optimized.yml; DS4_BATCH_TOPK=1, DS4_EXPERT_EVICTION=lfu. Each leg additionally sets the flags in config.",
+  "config": [
+    [
+      "off-a",
+      "ds4-flash-rs:c1-wide",
+      {
+        "DS4_WIDE_TOPK": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "on",
+      "ds4-flash-rs:c1-wide",
+      {
+        "DS4_WIDE_TOPK": "1"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "off-b",
+      "ds4-flash-rs:c1-wide",
+      {
+        "DS4_WIDE_TOPK": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ]
+  ],
+  "legs": {
+    "off-a": {
+      "image": "sha256:a2cf87237051043a6ed078d9ad317cb34483a095aa1f90cb445cdeb1479c3b08",
+      "env": {
+        "DS4_WIDE_TOPK": "0"
+      },
+      "edit": {
+        "rates": [
+          293.65341578616403,
+          293.7934991609286,
+          293.38174847321636,
+          293.9612618004235,
+          293.7649086714148,
+          294.0382419732961
+        ],
+        "median": 293.7792039161717,
+        "whole": 290.27128379563544,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "9bd7abf54fbb7603b35ca8ef242356c1245e2c457d9fada59b4adb53b5e8bd15",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          237.06475344488678,
+          237.07216191677728,
+          237.11989619147266,
+          236.61162236652714,
+          237.3687688874728,
+          235.8698543761747
+        ],
+        "median": 237.068457680832,
+        "whole": 185.94736063144433,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "69406e1b68acf258e995f3094a73aeefa405e5b4166aa041f9a6c3ad590b0a9d",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    },
+    "on": {
+      "image": "sha256:a2cf87237051043a6ed078d9ad317cb34483a095aa1f90cb445cdeb1479c3b08",
+      "env": {
+        "DS4_WIDE_TOPK": "1"
+      },
+      "edit": {
+        "rates": [
+          294.4158628485794,
+          293.94613156642436,
+          293.74815110831054,
+          293.49244772012474,
+          294.05925012022954,
+          294.8998620617793
+        ],
+        "median": 294.00269084332695,
+        "whole": 290.4820604505262,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "46c899189d92622c868a0a82e64395786c0baa039361d1ead06cad1a91d89c4f",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          237.74296266581305,
+          238.52109226556593,
+          237.18336717949543,
+          236.78250307816333,
+          236.81936883582813,
+          236.9230019871651
+        ],
+        "median": 237.05318458333028,
+        "whole": 186.58579631305145,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "0d8f725b28973194c91a10da9d128c89bf5d9e9092025b4073c7923db19faf68",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    },
+    "off-b": {
+      "image": "sha256:a2cf87237051043a6ed078d9ad317cb34483a095aa1f90cb445cdeb1479c3b08",
+      "env": {
+        "DS4_WIDE_TOPK": "0"
+      },
+      "edit": {
+        "rates": [
+          293.9217323174811,
+          295.6728008254591,
+          293.888880036127,
+          293.7926360173895,
+          293.579097388579,
+          293.6634564472497
+        ],
+        "median": 293.84075802675824,
+        "whole": 290.3374177144922,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "793cfa432f14072fc1620e8faf74b5df7eee98dac998ec4e3ba8fdb269161bf0",
+        "spec_including_warmup": {
+          "learned": [
+            1477,
+            7602,
+            6006
+          ],
+          "lookup": [
+            259,
+            3661,
+            2751
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          236.31744448739718,
+          236.93468076101323,
+          237.11090688882572,
+          237.137739061746,
+          236.82869814602964,
+          236.34147609386036
+        ],
+        "median": 236.88168945352143,
+        "whole": 186.1765164478452,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "27dd65e2519050b60087dea5d09756511763d17c8d0177e47b09ded817c331e4",
+        "spec_including_warmup": {
+          "learned": [
+            588,
+            3696,
+            2877
+          ],
+          "lookup": [
+            49,
+            588,
+            56
+          ]
+        }
+      }
+    }
+  },
+  "micro-summary": {
+    "method": "Scalar DeviceTopK versus tiled selection in isolation. Each cell is the median of nine CUDA-event samples of 150 launches after 50 warmups on GPU 1. The deployed shape dispatch can already select tiled ranking for shorter widths.",
+    "columns": [
+      "width",
+      "rows",
+      "keep",
+      "tiled",
+      "microseconds"
+    ],
+    "rows": [
+      [
+        12816,
+        1,
+        512,
+        0,
+        13.963
+      ],
+      [
+        12816,
+        1,
+        512,
+        1,
+        29.591
+      ],
+      [
+        12816,
+        1,
+        512,
+        0,
+        13.75
+      ],
+      [
+        25625,
+        2,
+        512,
+        0,
+        27.452
+      ],
+      [
+        25625,
+        2,
+        512,
+        1,
+        35.624
+      ],
+      [
+        25625,
+        2,
+        512,
+        0,
+        27.412
+      ],
+      [
+        202112,
+        8,
+        512,
+        0,
+        110.604
+      ],
+      [
+        202112,
+        8,
+        512,
+        1,
+        81.861
+      ],
+      [
+        202112,
+        8,
+        512,
+        0,
+        110.908
+      ],
+      [
+        404224,
+        5,
+        512,
+        0,
+        81.745
+      ],
+      [
+        404224,
+        5,
+        512,
+        1,
+        90.523
+      ],
+      [
+        404224,
+        5,
+        512,
+        0,
+        81.559
+      ],
+      [
+        524288,
+        1,
+        512,
+        0,
+        16.892
+      ],
+      [
+        524288,
+        1,
+        512,
+        1,
+        62.44
+      ],
+      [
+        524288,
+        1,
+        512,
+        0,
+        16.903
+      ]
+    ]
+  }
+}
