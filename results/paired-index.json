@@ -1,0 +1,638 @@
+{
+  "experiment": "paired-index",
+  "clients": 6,
+  "gpu_w_each": 375,
+  "cpu_socket_w": 225,
+  "legs": {
+    "paired-index-long-off-a": {
+      "label": "paired-index-long-off-a",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 333.43984206313405,
+      "whole_wave": 321.06316955806506,
+      "per_wave": [
+        333.80422989167624,
+        331.5646871268129,
+        332.5176872443494,
+        336.10054233785394,
+        333.07545423459186,
+        336.83888714247644
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        488,
+        470,
+        235139
+      ],
+      "raw_sha256": "307652c318c0813e55de647ef0fee053fdc0dc386122fd1ec010205a5fcfeefe",
+      "whole_wave_tok_s": [
+        320.1122947260449,
+        320.482641204651,
+        320.2348217232879,
+        322.8082373749933,
+        321.6436979114792,
+        322.8698159599422
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        118,
+        117,
+        118,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        69.64151735492064,
+        74.39011007467008,
+        74.26017355868147,
+        64.46737267747628,
+        64.8658249781593,
+        58.610334979358214
+      ]
+    },
+    "paired-index-long-on": {
+      "label": "paired-index-long-on",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "1",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 335.88479072532584,
+      "whole_wave": 321.68885666524403,
+      "per_wave": [
+        334.1284467165967,
+        331.8624082067871,
+        336.1642475792121,
+        336.86536936646365,
+        338.67336991280536,
+        335.60533387143965
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        420,
+        292,
+        235182
+      ],
+      "raw_sha256": "97d2fe7517885255fe5d826ac83762a2fd83726c12dfef96dea8c3b93b6ea4c8",
+      "whole_wave_tok_s": [
+        320.30568317268705,
+        318.44978624154106,
+        321.31676455808804,
+        323.18272610963714,
+        324.46761509685643,
+        322.0609487724
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        119,
+        119,
+        119,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        69.20629292468445,
+        74.44232433193285,
+        74.48210978672452,
+        64.48424683887532,
+        65.15348088731193,
+        58.316764325101815
+      ]
+    },
+    "paired-index-long-off-b": {
+      "label": "paired-index-long-off-b",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 334.99916702568305,
+      "whole_wave": 321.16781997068495,
+      "per_wave": [
+        334.9867472892005,
+        336.49913262585403,
+        330.48066549693283,
+        335.01158676216556,
+        335.3160499475529,
+        334.40982632266764
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        72,
+        240,
+        235157
+      ],
+      "raw_sha256": "693863c04f2ac7a566ec6113c52d07fd308321170cdae1f71e653e3d290d0af4",
+      "whole_wave_tok_s": [
+        321.19485715868893,
+        322.21784460089805,
+        319.24037256596273,
+        321.1407827826809,
+        323.18945594601996,
+        319.8082152107493
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        118,
+        119,
+        116,
+        119,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        69.58513834932565,
+        74.1179118180294,
+        73.9732577520241,
+        64.57058345756914,
+        65.15333870683781,
+        58.538235532363004
+      ]
+    },
+    "paired-index-repeat-on-a": {
+      "label": "paired-index-repeat-on-a",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "1",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 336.68094800081525,
+      "whole_wave": 323.5151282659616,
+      "per_wave": [
+        335.0092413285306,
+        335.49019427617264,
+        338.00514374892606,
+        337.87170172545785
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        518,
+        240,
+        235135
+      ],
+      "raw_sha256": "6f8e3e23d55d10ffde400a7aa98aa6f24f5bd61078a0e58ead45e43103eb1751"
+    },
+    "paired-index-repeat-off": {
+      "label": "paired-index-repeat-off",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 333.10701615090863,
+      "whole_wave": 319.54340437719026,
+      "per_wave": [
+        332.4234061248198,
+        334.1898302549912,
+        333.7906261769974,
+        331.7583444034364
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        520,
+        242,
+        235274
+      ],
+      "raw_sha256": "0996af5e29cce1d14ce68890f32b378c266cf2f31c6a11e810e1b8b35906c454"
+    },
+    "paired-index-repeat-on-b": {
+      "label": "paired-index-repeat-on-b",
+      "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+      "env": {
+        "DS4_PAIRED_INDEX": "1",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 331.45823844761696,
+      "whole_wave": 319.1308997647645,
+      "per_wave": [
+        336.36558283946334,
+        334.20054147311987,
+        328.3795287266333,
+        328.7159354221141
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        380,
+        474,
+        235183
+      ],
+      "raw_sha256": "7ee23afda1049120d4bbee90200da4425a2d037c8b072585ddc84766bcc4e449"
+    }
+  },
+  "microseconds": {
+    "packed_across_queries": [
+      {
+        "columns": 65537,
+        "query_rows": 4,
+        "before": 105.74,
+        "lanes8": 152.85,
+        "lanes16": 140.25,
+        "after": 109.23
+      },
+      {
+        "columns": 65537,
+        "query_rows": 5,
+        "before": 150.39,
+        "lanes8": 300.2,
+        "lanes16": 265.79,
+        "after": 158.94
+      },
+      {
+        "columns": 65537,
+        "query_rows": 7,
+        "before": 219.0,
+        "lanes8": 362.76,
+        "lanes16": 350.68,
+        "after": 231.69
+      },
+      {
+        "columns": 65537,
+        "query_rows": 8,
+        "before": 247.88,
+        "lanes8": 363.05,
+        "lanes16": 347.41,
+        "after": 249.82
+      },
+      {
+        "columns": 202112,
+        "query_rows": 4,
+        "before": 366.91,
+        "lanes8": 555.76,
+        "lanes16": 532.6,
+        "after": 367.84
+      },
+      {
+        "columns": 202112,
+        "query_rows": 5,
+        "before": 457.8,
+        "lanes8": 832.32,
+        "lanes16": 795.56,
+        "after": 458.0
+      },
+      {
+        "columns": 202112,
+        "query_rows": 7,
+        "before": 638.22,
+        "lanes8": 1109.16,
+        "lanes16": 1060.76,
+        "after": 640.41
+      },
+      {
+        "columns": 202112,
+        "query_rows": 8,
+        "before": 729.56,
+        "lanes8": 1109.93,
+        "lanes16": 1062.46,
+        "after": 732.05
+      },
+      {
+        "columns": 404224,
+        "query_rows": 4,
+        "before": 731.65,
+        "lanes8": 1110.37,
+        "lanes16": 1065.06,
+        "after": 734.52
+      },
+      {
+        "columns": 404224,
+        "query_rows": 5,
+        "before": 914.63,
+        "lanes8": 1664.41,
+        "lanes16": 1594.62,
+        "after": 917.56
+      },
+      {
+        "columns": 404224,
+        "query_rows": 7,
+        "before": 1285.43,
+        "lanes8": 2219.05,
+        "lanes16": 2128.8,
+        "after": 1286.3
+      },
+      {
+        "columns": 404224,
+        "query_rows": 8,
+        "before": 1471.64,
+        "lanes8": 2220.9,
+        "lanes16": 2134.46,
+        "after": 1472.49
+      }
+    ],
+    "register_reuse": [
+      {
+        "columns": 65537,
+        "query_rows": 4,
+        "before": 105.87,
+        "lanes8": 98.74,
+        "lanes16": 103.19,
+        "after": 107.17
+      },
+      {
+        "columns": 65537,
+        "query_rows": 5,
+        "before": 140.76,
+        "lanes8": 138.3,
+        "lanes16": 210.49,
+        "after": 190.32
+      },
+      {
+        "columns": 65537,
+        "query_rows": 7,
+        "before": 225.44,
+        "lanes8": 184.54,
+        "lanes16": 218.02,
+        "after": 249.0
+      },
+      {
+        "columns": 65537,
+        "query_rows": 8,
+        "before": 257.95,
+        "lanes8": 227.74,
+        "lanes16": 256.01,
+        "after": 252.68
+      },
+      {
+        "columns": 202112,
+        "query_rows": 4,
+        "before": 372.44,
+        "lanes8": 348.37,
+        "lanes16": 400.44,
+        "after": 370.59
+      },
+      {
+        "columns": 202112,
+        "query_rows": 5,
+        "before": 458.2,
+        "lanes8": 439.77,
+        "lanes16": 502.82,
+        "after": 459.64
+      },
+      {
+        "columns": 202112,
+        "query_rows": 7,
+        "before": 641.22,
+        "lanes8": 614.4,
+        "lanes16": 702.82,
+        "after": 642.93
+      },
+      {
+        "columns": 202112,
+        "query_rows": 8,
+        "before": 732.15,
+        "lanes8": 698.02,
+        "lanes16": 798.73,
+        "after": 734.68
+      },
+      {
+        "columns": 404224,
+        "query_rows": 4,
+        "before": 734.29,
+        "lanes8": 698.97,
+        "lanes16": 799.15,
+        "after": 736.07
+      },
+      {
+        "columns": 404224,
+        "query_rows": 5,
+        "before": 916.78,
+        "lanes8": 879.35,
+        "lanes16": 1006.85,
+        "after": 919.2
+      },
+      {
+        "columns": 404224,
+        "query_rows": 7,
+        "before": 1287.25,
+        "lanes8": 1229.45,
+        "lanes16": 1409.44,
+        "after": 1288.29
+      },
+      {
+        "columns": 404224,
+        "query_rows": 8,
+        "before": 1473.08,
+        "lanes8": 1399.7,
+        "lanes16": 1605.48,
+        "after": 1477.18
+      }
+    ]
+  },
+  "checkpoint": "checkpoint-2026-11-26-decode-03-paired-index",
+  "decision": "Keep the existing packed index scorer in the selected profile. Register reuse reduced time for the isolated long scans, and its first 404k serving median was 0.5% above the control midpoint. In the reverse-order run, one enabled leg beat the control and the other fell below it. The change stays available on its experiment branch. The measurements support a kernel speedup, while the six-client application gain is too small to distinguish reliably here.",
+  "full_window_validation": {
+    "image": "sha256:896c508b27ab1300a87d5d70031c73e4577e70b02d9fb936ec366a1c04994b91",
+    "flags": {
+      "DS4_PAIRED_INDEX": "1",
+      "DS4_BATCH_TOPK": "1"
+    },
+    "c1_404k_code": {
+      "before": [
+        239.68808739055908,
+        240.51468787708953,
+        239.62012825050988
+      ],
+      "enabled": [
+        241.69743806141884,
+        241.59208015908456,
+        240.98134064564854
+      ]
+    },
+    "six_full_qualified_waves": 3,
+    "eight_ram": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "matched": 8
+    },
+    "eight_disk": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "matched": 8
+    }
+  },
+  "release_tests": 86
+}
