@@ -1,0 +1,77 @@
+{
+  "image": "sha256:7d5eb7b2e8b1626a07696c4eaf1b74179e00b5d93ebabb944ac664280c00812e",
+  "tag": "ds4-flash-rs:c1-consensus-20261126",
+  "flags": {
+    "DS4_C1_OUTPUT_CONSENSUS": "1",
+    "DS4_EXPERT_EVICTION": "lfu",
+    "DS4_BATCH_TOPK": "1"
+  },
+  "smoke": "11 + 13 = 24",
+  "limits": {
+    "max_seqs": 6,
+    "max_live_seqs": 32,
+    "ram_limit_bytes": 51539607552,
+    "disk_limit_bytes": 137438953472
+  },
+  "c1_serving": {
+    "image": "sha256:7d5eb7b2e8b1626a07696c4eaf1b74179e00b5d93ebabb944ac664280c00812e",
+    "env": {
+      "DS4_C1_OUTPUT_CONSENSUS": "1"
+    },
+    "edit": {
+      "rates": [
+        365.5818165345626,
+        366.1751348517333,
+        365.81139795224004,
+        366.22981201434703,
+        366.1958324584979,
+        365.9159857205548
+      ],
+      "median": 366.045560286144,
+      "whole": 360.5113849828124,
+      "hashes": [
+        [
+          "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+          "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+          "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+        ]
+      ],
+      "raw_sha256": "d87fe4e7053297251cb488ef7d84c24f911aa7e58f6e785f4c3dd1bfba9b44f3",
+      "spec_including_warmup": {
+        "learned": [
+          1050,
+          4578,
+          2975
+        ],
+        "lookup": [
+          175,
+          7042,
+          6293
+        ]
+      }
+    },
+    "long": {
+      "rates": [
+        256.5974848917939,
+        255.43778327541702,
+        255.1876672640591,
+        256.1003861217146,
+        256.51614291140334,
+        256.99555375707956
+      ],
+      "median": 256.308264516559,
+      "whole": 197.1531038928421,
+      "hashes": [
+        "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+      ],
+      "raw_sha256": "a74f8732b71e8d1941f850ebd4e51cdede768cac92ff0674c9ecf48616676e46",
+      "spec_including_warmup": {
+        "learned": [
+          602,
+          3794,
+          2968
+        ]
+      }
+    }
+  }
+}

@@ -77,3 +77,7 @@ On the same six 25,625-token edits, vLLM delivered 537–561 aggregate tok/s wit
 ## Selective CPU experts
 
 At six 404k coding sessions, CPU experts delivered 266 and 289 aggregate tok/s at output budgets of 512 and 768. GPU-only controls delivered 297–299 and 321–325 respectively. The experimental host path stays disabled. [Performance and numerical checks](CPU-EXPERT-EXPERIMENT.md)
+
+## Single-client decode at 375 W, 2026-11-26
+
+Wide attention ranking and warp-shared expert weights produced sub-percent single-client differences. Verified output repetition raised the 25,625-token edit from 293–294 to 366.5 tok/s and 404,151-token coding from 236–237 to 256.9 tok/s. Both gains repeated across fresh server starts. The selected profile retains the six-resident scheduler and RAM/disk KV rotation. [All three experiments, holdouts, checks and Git checkpoints](C1-DECODE-EXPERIMENTS.md)

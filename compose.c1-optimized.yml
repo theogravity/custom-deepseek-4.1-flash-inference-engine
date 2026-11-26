@@ -1,0 +1,7 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:c1-consensus-20261126
+    environment:
+      DS4_EXPERT_EVICTION: lfu
+      DS4_BATCH_TOPK: "1"
+      DS4_C1_OUTPUT_CONSENSUS: "${DS4_C1_OUTPUT_CONSENSUS:-1}"
