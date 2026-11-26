@@ -5,6 +5,11 @@ use std::ffi::{c_char, c_int, CStr};
 
 const CONTROLS: usize = 24;
 
+pub(crate) fn fast_rms() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("DS4_FAST_RMS").is_some_and(|v| v == "1"))
+}
+
 extern "C" {
     fn ds_hc_prepare(
         device: c_int,
@@ -16,6 +21,7 @@ extern "C" {
         norm: *const f32,
         out: *mut f32,
         batch: c_int,
+        fast: c_int,
     ) -> c_int;
     fn ds_hc_expand(
         device: c_int,
@@ -32,6 +38,7 @@ extern "C" {
         out: *mut f32,
         start: c_int,
         rows: c_int,
+        fast: c_int,
     ) -> c_int;
     fn ds_hc_capture(
         device: c_int,
@@ -150,6 +157,7 @@ pub(crate) fn prepare(
                 norm,
                 input.as_mut_ptr(),
                 batch.try_into()?,
+                fast_rms().into(),
             )
         },
         "prepare residual branch",
@@ -203,6 +211,7 @@ pub(crate) fn readout(
                 input.as_mut_ptr(),
                 start.try_into()?,
                 rows.try_into()?,
+                fast_rms().into(),
             )
         },
         "collapse final residual",
@@ -284,6 +293,13 @@ mod tests {
             });
     }
 
+    fn close_bf16(actual: &[f32], expected: &[f32]) {
+        // A reduction-order difference may move a value across a BF16 rounding boundary.
+        for (&a, &b) in actual.iter().zip(expected) {
+            assert!((a - b).abs() <= a.abs().max(b.abs()) / 128., "{a} vs {b}");
+        }
+    }
+
     #[test]
     #[ignore = "requires DS4_TEST_PACK and CUDA_VISIBLE_DEVICES set to both inference GPUs"]
     fn resident_branches_match_scalar_mixing_and_final_readout() -> Result<()> {
@@ -331,30 +347,41 @@ mod tests {
                         mix(p, inv, &base, &scale)
                     })
                     .collect();
-                checked(
-                    unsafe {
-                        ds_hc_prepare(
-                            rt.device,
-                            stream.as_ptr(),
-                            weights.as_mut_ptr(),
-                            projected.as_ptr(),
-                            dev_scale.as_ptr(),
-                            dev_base.as_ptr(),
-                            dev_norm.as_ptr(),
-                            collapsed.as_mut_ptr(),
-                            batch.try_into()?,
-                        )
-                    },
-                    "prepare test branch",
-                )?;
-                assert_eq!(rt.to_host(&collapsed)?, inputs);
-                let actual = rt.to_host(&weights)?;
-                for (row, m) in actual.chunks_exact(CONTROLS).zip(&mixes) {
-                    for (&a, &b) in row
-                        .iter()
-                        .zip(m.pre.iter().chain(&m.post).chain(m.comb.iter().flatten()))
-                    {
-                        assert!((a - b).abs() <= 1e-6, "mix coefficient {a} vs {b}");
+                let prior_weights = rt.to_host(&weights)?;
+                let mut fast_weights = rt.to_device(&prior_weights)?;
+                for (candidate, fast) in [(&mut fast_weights, 1), (&mut weights, 0)] {
+                    checked(
+                        unsafe {
+                            ds_hc_prepare(
+                                rt.device,
+                                stream.as_ptr(),
+                                candidate.as_mut_ptr(),
+                                projected.as_ptr(),
+                                dev_scale.as_ptr(),
+                                dev_base.as_ptr(),
+                                dev_norm.as_ptr(),
+                                collapsed.as_mut_ptr(),
+                                batch.try_into()?,
+                                fast,
+                            )
+                        },
+                        "prepare test branch",
+                    )?;
+                    let actual_input = rt.to_host(&collapsed)?;
+                    if fast == 0 {
+                        assert_eq!(actual_input, inputs);
+                    } else {
+                        close_bf16(&actual_input, &inputs);
+                    }
+                    let actual = rt.to_host(candidate)?;
+                    for (row, m) in actual.chunks_exact(CONTROLS).zip(&mixes) {
+                        for (&a, &b) in row
+                            .iter()
+                            .zip(m.pre.iter().chain(&m.post).chain(m.comb.iter().flatten()))
+                        {
+                            let tolerance = if fast == 0 { 1e-6 } else { 1e-4 };
+                            assert!((a - b).abs() <= tolerance, "mix coefficient {a} vs {b}");
+                        }
                     }
                 }
                 // Use the normalized input as a deterministic stand-in for branch output.
@@ -367,21 +394,29 @@ mod tests {
             let t = batch - rows;
             let expected = collapse(&h[t * 4 * DIM..], &pre[t..], &norm);
             let mut projected = rt.buffer(rows * DIM)?;
-            checked(
-                unsafe {
-                    ds_hc_final(
-                        rt.device,
-                        stream.as_ptr(),
-                        weights.as_mut_ptr(),
-                        dev_norm.as_ptr(),
-                        projected.as_mut_ptr(),
-                        t.try_into()?,
-                        rows.try_into()?,
-                    )
-                },
-                "final test readout",
-            )?;
-            assert_eq!(rt.to_host(&projected)?, expected);
+            for fast in [0, 1] {
+                checked(
+                    unsafe {
+                        ds_hc_final(
+                            rt.device,
+                            stream.as_ptr(),
+                            weights.as_mut_ptr(),
+                            dev_norm.as_ptr(),
+                            projected.as_mut_ptr(),
+                            t.try_into()?,
+                            rows.try_into()?,
+                            fast,
+                        )
+                    },
+                    "final test readout",
+                )?;
+                let actual = rt.to_host(&projected)?;
+                if fast == 0 {
+                    assert_eq!(actual, expected);
+                } else {
+                    close_bf16(&actual, &expected);
+                }
+            }
             let mut features = rt.buffer(batch * 3 * DIM)?;
             let mut expected = vec![0.; features.len()];
             for slot in 0..3 {

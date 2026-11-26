@@ -73,7 +73,14 @@ __device__ void update_mix(const float *projection, float inverse,
   }
 }
 
-template <bool UpdateMix>
+__device__ float warp_sum(float x) {
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2)
+    x += __shfl_down_sync(0xffffffff, x, offset);
+  return x;
+}
+
+template <bool UpdateMix, bool ParallelRms>
 __global__ void prepare(const float *h, float *mix, const float *projection,
                         const float *scale, const float *base,
                         const float *norm, float *out) {
@@ -82,7 +89,8 @@ __global__ void prepare(const float *h, float *mix, const float *projection,
   h += t * channels * width;
   mix += t * controls;
   out += t * width;
-  __shared__ float squares[width];
+  __shared__ float squares[ParallelRms ? 1 : width];
+  __shared__ float warp_h[threads / 32], warp_collapsed[threads / 32];
   __shared__ float h_inv, collapsed_inv;
   float values[width / threads] = {};
   float energy = 0.f;
@@ -94,27 +102,61 @@ __global__ void prepare(const float *h, float *mix, const float *projection,
       int d = tid + j * threads;
       float v = h[c * width + d];
       values[j] = __fadd_rn(values[j], __fmul_rn(p, v));
-      if constexpr (UpdateMix)
-        squares[d] = __fmul_rn(v, v);
+      if constexpr (UpdateMix) {
+        const float square = __fmul_rn(v, v);
+        if constexpr (ParallelRms)
+          energy += square;
+        else
+          squares[d] = square;
+      }
     }
-    if constexpr (UpdateMix) {
+    if constexpr (UpdateMix && !ParallelRms) {
       __syncthreads();
       if (tid == 0)
         energy = add_squares(energy, squares);
       __syncthreads();
     }
   }
+  float collapsed_energy = 0.f;
 #pragma unroll
   for (int j = 0; j < width / threads; ++j) {
     float v = bf(values[j]);
     values[j] = v;
-    squares[tid + j * threads] = __fmul_rn(v, v);
+    const float square = __fmul_rn(v, v);
+    if constexpr (ParallelRms)
+      collapsed_energy += square;
+    else
+      squares[tid + j * threads] = square;
   }
-  __syncthreads();
-  if (tid == 0) {
+  if constexpr (ParallelRms) {
     if constexpr (UpdateMix)
-      h_inv = inverse_rms(energy, channels * width);
-    collapsed_inv = inverse_rms(add_squares(0.f, squares), width);
+      energy = warp_sum(energy);
+    collapsed_energy = warp_sum(collapsed_energy);
+    if (tid % 32 == 0) {
+      if constexpr (UpdateMix)
+        warp_h[tid / 32] = energy;
+      warp_collapsed[tid / 32] = collapsed_energy;
+    }
+    __syncthreads();
+    if (tid == 0) {
+      energy = collapsed_energy = 0.f;
+#pragma unroll
+      for (int w = 0; w < threads / 32; ++w) {
+        if constexpr (UpdateMix)
+          energy += warp_h[w];
+        collapsed_energy += warp_collapsed[w];
+      }
+      if constexpr (UpdateMix)
+        h_inv = inverse_rms(energy, channels * width);
+      collapsed_inv = inverse_rms(collapsed_energy, width);
+    }
+  } else {
+    __syncthreads();
+    if (tid == 0) {
+      if constexpr (UpdateMix)
+        h_inv = inverse_rms(energy, channels * width);
+      collapsed_inv = inverse_rms(add_squares(0.f, squares), width);
+    }
   }
   __syncthreads();
   if constexpr (UpdateMix)
@@ -178,10 +220,13 @@ __global__ void broadcast(const float *embedding, float *h) {
 
 extern "C" int ds_hc_prepare(int device, const float *h, float *mix, const float *projection,
                              const float *scale, const float *base,
-                             const float *norm, float *out, int batch) {
+                             const float *norm, float *out, int batch, int parallel_rms) {
   if (auto status = cudaSetDevice(device); status != cudaSuccess)
     return status;
-  prepare<true><<<batch, threads>>>(h, mix, projection, scale, base, norm, out);
+  if (parallel_rms)
+    prepare<true, true><<<batch, threads>>>(h, mix, projection, scale, base, norm, out);
+  else
+    prepare<true, false><<<batch, threads>>>(h, mix, projection, scale, base, norm, out);
   return cudaGetLastError();
 }
 
@@ -193,11 +238,15 @@ extern "C" int ds_hc_expand(int device, float *h, const float *x, const float *m
 }
 
 extern "C" int ds_hc_final(int device, const float *h, float *mix, const float *norm,
-                           float *out, int start, int rows) {
+                           float *out, int start, int rows, int parallel_rms) {
   if (auto status = cudaSetDevice(device); status != cudaSuccess)
     return status;
-  prepare<false><<<rows, threads>>>(h + start * channels * width, mix + start * controls,
-                                 nullptr, nullptr, nullptr, norm, out);
+  h += start * channels * width;
+  mix += start * controls;
+  if (parallel_rms)
+    prepare<false, true><<<rows, threads>>>(h, mix, nullptr, nullptr, nullptr, norm, out);
+  else
+    prepare<false, false><<<rows, threads>>>(h, mix, nullptr, nullptr, nullptr, norm, out);
   return cudaGetLastError();
 }
 
