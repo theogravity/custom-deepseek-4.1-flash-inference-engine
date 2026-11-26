@@ -139,12 +139,50 @@ impl Dev {
     pub fn as_mut_ptr(&mut self) -> *mut f32 {
         self.allocation.as_ref().unwrap().ptr
     }
-    fn device(&self) -> i32 {
+    pub(crate) fn device(&self) -> i32 {
         self.allocation.as_ref().unwrap().device
     }
     /// Release session storage at eviction, bypassing the transient buffer pool.
     pub(crate) fn release(mut self) {
         drop(self.allocation.take());
+    }
+}
+// The borrowed allocation outlives every kernel launch that consumes this range.
+// All producers, consumers and subsequent pool reuse run on the same device stream.
+enum ReadStorage<'a> {
+    Borrowed(&'a Dev),
+    Owned(Dev),
+}
+pub(crate) struct DevRead<'a> {
+    storage: ReadStorage<'a>,
+    start: usize,
+    len: usize,
+}
+impl<'a> From<&'a Dev> for DevRead<'a> {
+    fn from(buffer: &'a Dev) -> Self {
+        Self {
+            storage: ReadStorage::Borrowed(buffer),
+            start: 0,
+            len: buffer.len(),
+        }
+    }
+}
+impl DevRead<'_> {
+    fn buffer(&self) -> &Dev {
+        match &self.storage {
+            ReadStorage::Borrowed(buffer) => buffer,
+            ReadStorage::Owned(buffer) => buffer,
+        }
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn device(&self) -> i32 {
+        self.buffer().device()
+    }
+    pub(crate) fn as_ptr(&self) -> *const f32 {
+        // Construction checks the range against the logical buffer length.
+        unsafe { self.buffer().as_ptr().add(self.start) }
     }
 }
 impl Drop for Dev {
@@ -339,6 +377,36 @@ impl Runtime {
         })?;
         Ok(out)
     }
+    pub(crate) fn read_slice<'a>(
+        &mut self,
+        source: &'a Dev,
+        start: usize,
+        len: usize,
+        borrow: bool,
+    ) -> Result<DevRead<'a>> {
+        if borrow {
+            ensure!(
+                source.device() == self.device
+                    && len > 0
+                    && start
+                        .checked_add(len)
+                        .is_some_and(|end| end <= source.len()),
+                "invalid device read slice"
+            );
+            Ok(DevRead {
+                storage: ReadStorage::Borrowed(source),
+                start,
+                len,
+            })
+        } else {
+            let buffer = self.slice(source, start, len)?;
+            Ok(DevRead {
+                storage: ReadStorage::Owned(buffer),
+                start: 0,
+                len,
+            })
+        }
+    }
     pub(crate) fn copy_into(&self, dst: &mut Dev, offset: usize, src: &Dev) -> Result<()> {
         ensure!(
             dst.device() == self.device
@@ -459,7 +527,7 @@ impl Runtime {
         ensure!(e == 0, "CUDA greedy selection failed ({e})");
         self.token_ids(&ids)
     }
-    pub fn markov(&mut self, logits: &Dev, seed: u32, rows: usize) -> Result<Dev> {
+    pub(crate) fn markov(&mut self, logits: &DevRead<'_>, seed: u32, rows: usize) -> Result<Dev> {
         const VOCAB: usize = 129280;
         ensure!(
             seed < VOCAB as u32

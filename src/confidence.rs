@@ -1,6 +1,6 @@
 use crate::{
     model::DIM,
-    runtime::{Dev, Runtime},
+    runtime::{Dev, DevRead, Runtime},
 };
 use anyhow::{ensure, Context, Result};
 use std::ffi::c_void;
@@ -43,14 +43,19 @@ impl Gate {
     pub(super) fn evaluate(
         &self,
         rt: &mut Runtime,
-        h: &Dev,
-        mix: &Dev,
+        h: &DevRead<'_>,
+        mix: &DevRead<'_>,
         seed: u32,
         ids: &Dev,
     ) -> Result<(Vec<u32>, Option<Vec<f32>>)> {
         let width = ids.len();
         ensure!(
-            (1..=16).contains(&width) && h.len() == width * 4 * DIM && mix.len() == width * 24,
+            (1..=16).contains(&width)
+                && ids.device() == rt.device
+                && h.device() == rt.device
+                && mix.device() == rt.device
+                && h.len() == width * 4 * DIM
+                && mix.len() == width * 24,
             "invalid DSpark confidence dimensions"
         );
         let embedding = rt.raw_bf16("mtp.2.markov_head.embed.weight", 129280, 256)?;
@@ -107,6 +112,74 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
+    fn drafter_views_preserve_unequal_chains_and_confidence() -> Result<()> {
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        rt.layer(39)?;
+        const VOCAB: usize = 129280;
+        let mut host_logits = vec![-1000.; 6 * VOCAB];
+        for row in 0..6 {
+            host_logits[row * VOCAB + 117 + row * 13] = 1000.;
+        }
+        let logits = rt.to_device(&host_logits)?;
+        let h = rt.to_device(
+            &(0..6 * 4 * DIM)
+                .map(|i| (i % 173) as f32 / 97.)
+                .collect::<Vec<_>>(),
+        )?;
+        let mix = rt.to_device(
+            &(0..6 * 24)
+                .map(|i| (i % 29) as f32 / 31.)
+                .collect::<Vec<_>>(),
+        )?;
+        let gate = Gate {
+            threshold: 0.,
+            trace: true,
+        };
+        let mut first = 0;
+        for (width, seed) in [(1, 13), (3, 199), (2, 395)] {
+            let evaluate = |rt: &mut Runtime, borrow| -> Result<_> {
+                let scores = rt.read_slice(&logits, first * VOCAB, width * VOCAB, borrow)?;
+                assert_eq!(
+                    scores.as_ptr() == unsafe { logits.as_ptr().add(first * VOCAB) },
+                    borrow
+                );
+                let ids = rt.markov(&scores, seed, width)?;
+                let hidden = rt.read_slice(&h, first * 4 * DIM, width * 4 * DIM, borrow)?;
+                let mixture = rt.read_slice(&mix, first * 24, width * 24, borrow)?;
+                gate.evaluate(rt, &hidden, &mixture, seed, &ids)
+            };
+            let control = evaluate(&mut rt, false)?;
+            let enabled = evaluate(&mut rt, true)?;
+            assert_eq!(enabled, control);
+            assert_eq!(
+                enabled.0,
+                (first..first + width)
+                    .map(|r| (117 + 13 * r) as u32)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(enabled.1.unwrap().len(), width);
+            first += width;
+        }
+        assert!(rt.read_slice(&logits, usize::MAX, 2, true).is_err());
+        assert!(rt.read_slice(&logits, logits.len(), 1, true).is_err());
+        assert!(rt.read_slice(&logits, 0, 0, true).is_err());
+        let hidden = rt.read_slice(&h, 0, 4 * DIM, true)?;
+        let mixture = rt.read_slice(&mix, 0, 24, true)?;
+        rt.layer(0)?;
+        let wrong_device_ids = rt.to_device(&[117.])?;
+        rt.layer(39)?;
+        assert!(gate
+            .evaluate(&mut rt, &hidden, &mixture, 13, &wrong_device_ids)
+            .is_err());
+        rt.layer(0)?;
+        assert!(rt.read_slice(&logits, 0, VOCAB, true).is_err());
+        Ok(())
+    }
+    #[test]
     #[ignore = "requires DS4_TEST_PACK and CUDA_VISIBLE_DEVICES set to two inference GPUs"]
     fn confidence_uses_raw_collapse_and_previous_markov_embedding() -> Result<()> {
         use std::path::PathBuf;
@@ -150,7 +223,7 @@ mod tests {
             threshold: 0.,
             trace: true,
         }
-        .evaluate(&mut rt, &h, &mix, 21, &ids)?;
+        .evaluate(&mut rt, &(&h).into(), &(&mix).into(), 21, &ids)?;
         assert_eq!(tokens, [1234, 981, 17]);
         for (a, b) in actual.unwrap().into_iter().zip(expected) {
             assert!((f64::from(a) - b).abs() < 2e-5, "{a} vs {b}");

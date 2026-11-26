@@ -4,7 +4,7 @@ use crate::{
     draft_attention::DraftAttention,
     model::residual,
     moe,
-    runtime::{Dev, Runtime},
+    runtime::{Dev, DevRead, Runtime},
 };
 use anyhow::{ensure, Context, Result};
 
@@ -136,19 +136,27 @@ pub(crate) fn propose_many(
     let logits = rt.linear_dev("head.weight", &x, rows, 1)?;
     let gate = confidence::Gate::configured()?;
     if let [r] = requests {
-        let ids = rt.markov(&logits, r.seed, r.width)?;
-        return Ok(vec![finish_proposal(rt, r, gate.as_ref(), &h, &mix, &ids)?]);
+        let ids = rt.markov(&(&logits).into(), r.seed, r.width)?;
+        return Ok(vec![finish_proposal(
+            rt,
+            r,
+            gate.as_ref(),
+            &(&h).into(),
+            &(&mix).into(),
+            &ids,
+        )?]);
     }
+    let borrow = std::env::var_os("DS4_DRAFT_VIEWS").is_some_and(|value| value == "1");
     let mut proposals = Vec::with_capacity(requests.len());
     let mut offset = 0;
     for r in requests {
-        let logits = rt.slice(&logits, offset * 129280, r.width * 129280)?;
+        let logits = rt.read_slice(&logits, offset * 129280, r.width * 129280, borrow)?;
         let ids = rt.markov(&logits, r.seed, r.width)?;
         let result = if gate.is_some() {
             let hc = h.len() / rows;
             let mc = mix.len() / rows;
-            let hidden = rt.slice(&h, offset * hc, r.width * hc)?;
-            let mixture = rt.slice(&mix, offset * mc, r.width * mc)?;
+            let hidden = rt.read_slice(&h, offset * hc, r.width * hc, borrow)?;
+            let mixture = rt.read_slice(&mix, offset * mc, r.width * mc, borrow)?;
             finish_proposal(rt, r, gate.as_ref(), &hidden, &mixture, &ids)?
         } else {
             rt.token_ids(&ids)?
@@ -163,8 +171,8 @@ fn finish_proposal(
     rt: &mut Runtime,
     r: &mut DraftInput<'_>,
     gate: Option<&confidence::Gate>,
-    h: &Dev,
-    mix: &Dev,
+    h: &DevRead<'_>,
+    mix: &DevRead<'_>,
     ids: &Dev,
 ) -> Result<Vec<u32>> {
     if let Some(gate) = gate {

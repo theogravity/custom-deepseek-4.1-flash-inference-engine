@@ -1,0 +1,395 @@
+{
+  "experiment": "draft-views",
+  "clients": 6,
+  "gpu_w_each": 375,
+  "cpu_socket_w": 225,
+  "legs": {
+    "draft-views-edit-off-a": {
+      "label": "draft-views-edit-off-a",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "median_tok_s": 504.2728045875924,
+      "whole_wave": 496.7284097920282,
+      "per_wave": [
+        492.79303532329783,
+        503.81318321396685,
+        504.4634814494259,
+        504.08212772575894,
+        505.2486922525308,
+        505.1643027779818
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "50aebc1cc0a72331706bd3e2722b53dd0c4fc01d9d2fa8c87f2bebd6f00b26bc",
+      "whole_wave_tok_s": [
+        490.46176758147834,
+        495.8566285132193,
+        496.37524963244016,
+        497.0815699516162,
+        497.13230709016216,
+        497.22973766499393
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        249,
+        249,
+        249,
+        248,
+        248,
+        249
+      ]
+    },
+    "draft-views-edit-on": {
+      "label": "draft-views-edit-on",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "1",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "median_tok_s": 503.49942282706274,
+      "whole_wave": 496.3250488447804,
+      "per_wave": [
+        504.0616155885018,
+        502.9372300656236,
+        498.901414843847,
+        504.26364311972566,
+        504.10493731487855,
+        498.99976536607466
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "8d6848148fbb4b5fc34c67ee2a3b7c792f70a0253499687eef8a1ca05ba4b94b",
+      "whole_wave_tok_s": [
+        496.2044587942791,
+        495.0251261611561,
+        497.0790756995919,
+        496.44563889528166,
+        496.1640015762978,
+        497.11672803146735
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        249,
+        249,
+        249,
+        248,
+        248,
+        249
+      ]
+    },
+    "draft-views-edit-off-b": {
+      "label": "draft-views-edit-off-b",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "median_tok_s": 502.92232381019016,
+      "whole_wave": 495.8302985049602,
+      "per_wave": [
+        503.90354592765,
+        501.9411016927303,
+        500.70895650967435,
+        499.176443201655,
+        503.93706128871145,
+        504.2159556051067
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "47c0dc7010b3aad37f299171c9950759569ddf8d08a1d136ae87b343f7de55da",
+      "whole_wave_tok_s": [
+        495.6553339414693,
+        495.883806023769,
+        494.84373553331585,
+        497.21754693417813,
+        495.7767909861513,
+        496.24666043905114
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        249,
+        249,
+        249,
+        249,
+        249,
+        249
+      ]
+    },
+    "draft-views-long-off-a": {
+      "label": "draft-views-long-off-a",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 327.34357742687166,
+      "whole_wave": 314.98261115895554,
+      "per_wave": [
+        330.19108773638834,
+        329.61987311194383,
+        324.49828849835126,
+        331.94124776502576,
+        324.2435514955345,
+        325.0672817417995
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        78,
+        240,
+        235053
+      ],
+      "raw_sha256": "d431419c2cc973059e645064445232f4f1db4e5dc8bdfbe933e4d2439995fe87",
+      "whole_wave_tok_s": [
+        316.1883088976813,
+        315.9291833196013,
+        314.0360389983098,
+        318.06363001200987,
+        312.12680050317846,
+        313.9945105726111
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        119,
+        118,
+        119,
+        119,
+        118
+      ],
+      "per_client_decode_medians": [
+        67.85307494208747,
+        72.74124865897488,
+        72.7877324174649,
+        63.50877104674095,
+        62.37406459597629,
+        57.47608794760108
+      ]
+    },
+    "draft-views-long-on": {
+      "label": "draft-views-long-on",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "1",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 328.4720298798068,
+      "whole_wave": 315.79622356609053,
+      "per_wave": [
+        328.1192816152035,
+        326.86461206015144,
+        328.8247781444102,
+        324.5834784575886,
+        332.8243607755875,
+        329.44165302169375
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        94,
+        464,
+        235161
+      ],
+      "raw_sha256": "6e520e53ef063e0a0969871a94796cdac5164af50be3fb41600e8a3aec3d9e9b",
+      "whole_wave_tok_s": [
+        317.33142321303245,
+        315.98256174504957,
+        315.6098853871315,
+        314.0735343498796,
+        318.63083326362835,
+        314.88805913987665
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        114,
+        118,
+        118,
+        114,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        68.38268020655576,
+        73.02498516894012,
+        72.28144417780334,
+        63.727975007912164,
+        64.19194491782976,
+        56.652125733852806
+      ]
+    },
+    "draft-views-long-off-b": {
+      "label": "draft-views-long-off-b",
+      "image": "sha256:5c52841915b64aab59b10fd179a4a77bddd905ab5c6f3ff22ebeeae879c62512",
+      "env": {
+        "DS4_DRAFT_VIEWS": "0",
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 333.1297778913281,
+      "whole_wave": 319.51585783087296,
+      "per_wave": [
+        334.32777242794896,
+        335.6884238680309,
+        335.59301423179073,
+        331.2189459235225,
+        331.62687810105973,
+        331.9317833547072
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        88,
+        96,
+        235223
+      ],
+      "raw_sha256": "329640bde35cf8bb69211355a5a3aa3c0fe91dc93b5f055c83bd667b41bafc03",
+      "whole_wave_tok_s": [
+        320.87142899983394,
+        322.24837687386076,
+        322.1038499273622,
+        318.1524567359282,
+        317.7571752143079,
+        318.160286661912
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        119,
+        119,
+        118,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        69.03202029597595,
+        73.74437447975939,
+        73.78480672560183,
+        63.82323934523657,
+        64.73621855997204,
+        58.12641437340033
+      ]
+    }
+  },
+  "checkpoint": "checkpoint-2026-11-26-decode-02-draft-views",
+  "decision": "Keep copied drafter inputs in the selected serving profile. Eliminating the copies did not establish a repeatable throughput gain across these coding workloads. The hardware fixture with one-, three- and two-row clients verified exact proposal IDs and confidence scores for nonoverlapping row ranges. The experimental path is available at the checkpoint.",
+  "release_tests": 87
+}
