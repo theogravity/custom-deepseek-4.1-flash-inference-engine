@@ -182,6 +182,7 @@ pub struct Runtime {
     pub verification: bool,
     pub(crate) target_prefill: bool,
     prefill_tiles: i32,
+    verification_tiles: i32,
     packed: bool,
     parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
@@ -205,11 +206,13 @@ impl Runtime {
             Ok("released" | "none") | Err(_) => (),
             Ok(name) => anyhow::bail!("unknown DS4_DRAFTER {name}"),
         }
-        let prefill_tiles = match std::env::var("DS4_PREFILL_MX_TILES").as_deref() {
-            Ok("4") => 4,
-            Ok("2") => 2,
-            Ok("1") | Err(std::env::VarError::NotPresent) => 1,
-            _ => anyhow::bail!("DS4_PREFILL_MX_TILES must be 1, 2 or 4"),
+        let configured_tiles = |name: &str| -> Result<i32> {
+            match std::env::var(name).as_deref() {
+                Ok("4") => Ok(4),
+                Ok("2") => Ok(2),
+                Ok("1") | Err(std::env::VarError::NotPresent) => Ok(1),
+                _ => anyhow::bail!("{name} must be 1, 2 or 4"),
+            }
         };
         let mut rt = Self {
             weights: Arc::new(weights),
@@ -219,7 +222,8 @@ impl Runtime {
             attention_scratch: Default::default(),
             verification: false,
             target_prefill: false,
-            prefill_tiles,
+            prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
+            verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
             packed: packed_dense(),
             parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
@@ -652,6 +656,8 @@ impl Runtime {
         let w = &self.matrices[name];
         let mx_tiles = if self.target_prefill {
             self.prefill_tiles
+        } else if self.verification {
+            self.verification_tiles
         } else {
             1
         };
