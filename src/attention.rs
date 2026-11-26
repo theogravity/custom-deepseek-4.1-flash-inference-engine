@@ -66,6 +66,7 @@ unsafe extern "C" {
         rows: i32,
         picks: *mut i32,
         out_blocks: *mut i32,
+        packed_scores: i32,
     ) -> i32;
     fn ds4_attn_buffer_new() -> *mut c_void;
     fn ds4_attn_buffer_free(device: i32, buf: *mut c_void);
@@ -148,6 +149,7 @@ unsafe extern "C" {
         width: i32,
         batch: i32,
         out: *mut f32,
+        packed_scores: i32,
     ) -> i32;
 }
 
@@ -1208,6 +1210,7 @@ fn select(
                     width as i32,
                     rows as i32,
                     scores.as_mut_ptr(),
+                    i32::from(packed_index()),
                 )
             },
             "scoring compressed index keys",
@@ -1233,6 +1236,11 @@ fn select(
         t += rows;
     }
     Ok(())
+}
+
+fn packed_index() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DS4_PACKED_INDEX").is_none_or(|v| v != "0"))
 }
 
 fn gpu_index() -> bool {
@@ -1307,6 +1315,7 @@ fn device_select(
                     } else {
                         ptr::null_mut()
                     },
+                    i32::from(packed_index()),
                 )
             },
             "ranking index keys on GPU",
@@ -2146,6 +2155,75 @@ mod tests {
 
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_index_packed_scores_match_scalar_bits() -> Result<()> {
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let rows = 7;
+        let keys = 691;
+        let mut packed = vec![0u8; keys * INDEX_BYTES];
+        for (i, key) in packed
+            .as_chunks_mut::<INDEX_BYTES>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            for (j, v) in key[..INDEX_DIM].iter_mut().enumerate() {
+                let code = (i * 41 + j * 137 + 3 * i * j) % 253;
+                *v = (code % 127) as u8 | if code >= 127 { 0x80 } else { 0 };
+            }
+            let scale = 2f32.powi((i % 19) as i32 - 9);
+            key[INDEX_DIM..].copy_from_slice(&scale.to_le_bytes());
+        }
+        let packed = upload(device, &packed)?;
+        let q: Vec<_> = (0..rows * INDEX_HEADS * INDEX_DIM)
+            .map(|i| ((i * 503 % 1093) as f32 - 546.) / 77.)
+            .collect();
+        let w: Vec<_> = (0..rows * INDEX_HEADS)
+            .map(|i| ((i * 571 % 1597) as f32 - 798.) / 109.)
+            .collect();
+        let q = upload(device, &q)?;
+        let w = upload(device, &w)?;
+        let scratch = GpuBuffer::new(device)?;
+        for width in [1, 7, 8, 9, 31, 32, 33, 607] {
+            let ids: Vec<i32> = (0..rows * width)
+                .map(|i| {
+                    let (r, c) = (i / width, i % width);
+                    if r == 0 || c % 5 == r % 5 || c >= width.saturating_sub(r) {
+                        -1
+                    } else {
+                        ((c / 2 * 17 + r * 47) % keys) as i32
+                    }
+                })
+                .collect();
+            for candidates in [ptr::null(), ids.as_ptr()] {
+                let score = |mode| -> Result<Vec<u32>> {
+                    let mut out = vec![0f32; rows * width];
+                    cuda_ok(
+                        unsafe {
+                            ds4_attn_scores(
+                                device,
+                                scratch.ptr.as_ptr(),
+                                packed.ptr.as_ptr(),
+                                q.data(),
+                                w.data(),
+                                candidates,
+                                width as i32,
+                                rows as i32,
+                                out.as_mut_ptr(),
+                                mode,
+                            )
+                        },
+                        "checking packed index score bits",
+                    )?;
+                    Ok(out.into_iter().map(f32::to_bits).collect())
+                };
+                assert_eq!(score(0)?, score(1)?, "index scores width={width}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn cuda_index_matches_cpu_ranking_across_causal_thresholds() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         let short = upload(device, &[-9i32; 6])?;
@@ -2218,6 +2296,7 @@ mod tests {
                         } else {
                             ptr::null_mut()
                         },
+                        1,
                     )
                 },
                 "index fixture",
@@ -2269,6 +2348,7 @@ mod tests {
                             1,
                             picks.data(),
                             ptr::null_mut(),
+                            1,
                         )
                     },
                     "filtered index fixture",
@@ -2461,7 +2541,13 @@ mod tests {
             fn cudaDeviceSynchronize() -> i32;
         }
         let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
-        for (width, n) in [(600, 129), (16391, 8), (524288, 1)] {
+        for (width, n) in [
+            (600, 129),
+            (16391, 64),
+            (262144, 8),
+            (524288, 4),
+            (524288, 1),
+        ] {
             let mut keys = vec![0u8; width * INDEX_BYTES];
             for (k, row) in keys.as_chunks_mut::<INDEX_BYTES>().0.iter_mut().enumerate() {
                 row[0] = 0x38;
@@ -2482,7 +2568,7 @@ mod tests {
             let scratch = GpuBuffer::new(dev)?;
             let has_blocks = width > TOP_BLOCKS * BLOCK;
             let pos = width - n;
-            let run = || {
+            let run = |packed_scores| {
                 cuda_ok(
                     unsafe {
                         ds4_attn_index_select(
@@ -2502,6 +2588,7 @@ mod tests {
                             } else {
                                 ptr::null_mut()
                             },
+                            packed_scores,
                         )
                     },
                     "index benchmark selection",
@@ -2521,6 +2608,7 @@ mod tests {
                             width as i32,
                             n as i32,
                             scores.as_mut_ptr(),
+                            0,
                         )
                     },
                     "index benchmark baseline",
@@ -2538,7 +2626,7 @@ mod tests {
                 }
                 Ok((selected, candidates))
             };
-            run()?;
+            run(1)?;
             let (expected, expected_blocks) = reference()?;
             let mut got = vec![0i32; n * TOP];
             read(&picks, &mut got)?;
@@ -2548,18 +2636,27 @@ mod tests {
                 read(&blocks, &mut got)?;
                 assert_eq!(got, expected_blocks, "512k index block winners");
             }
-            let start = std::time::Instant::now();
-            for _ in 0..3 {
-                run()?;
-            }
-            cuda_ok(unsafe { cudaDeviceSynchronize() }, "timing GPU index")?;
-            let gpu_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
+            let time_gpu = |mode| -> Result<f64> {
+                run(mode)?;
+                cuda_ok(unsafe { cudaDeviceSynchronize() }, "warming GPU index")?;
+                let start = std::time::Instant::now();
+                for _ in 0..5 {
+                    run(mode)?;
+                }
+                cuda_ok(unsafe { cudaDeviceSynchronize() }, "timing GPU index")?;
+                Ok(start.elapsed().as_secs_f64() * 1e6 / 5.)
+            };
+            let scalar_us = time_gpu(0)?;
+            let packed_us = time_gpu(1)?;
             let start = std::time::Instant::now();
             for _ in 0..3 {
                 std::hint::black_box(reference()?);
             }
             let host_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
-            eprintln!("index rows={n} positions={width} workspace={} bytes GPU={gpu_us:.1}us CPU-rank={host_us:.1}us",bytes);
+            eprintln!(
+                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us CPU-rank={host_us:.1}us",
+                bytes
+            );
         }
         Ok(())
     }
@@ -2685,8 +2782,10 @@ mod tests {
                         unsafe { cudaDeviceSynchronize() },
                         "timing attention fixture",
                     )?;
-                    eprintln!("batch={n} width={width} fast={fast} us={:.2} relative_error={relative:.6} max_error={max_err:.6}",
-                        timed.elapsed().as_secs_f64()*1e6/60.);
+                    eprintln!(
+                        "batch={n} width={width} fast={fast} us={:.2} relative_error={relative:.6} max_error={max_err:.6}",
+                        timed.elapsed().as_secs_f64() * 1e6 / 60.
+                    );
                 }
             }
         }

@@ -280,6 +280,7 @@ __global__ void score_keys(const uint8_t *keys, const float *queries, const floa
     }
     if (!lane) scores[t * width + slot] = score;
 }
+#include "attention_score.cuh"
 #include "attention_index.cuh"
 } // namespace
 
@@ -410,7 +411,7 @@ extern "C" int ds4_attn_sparse_fast(int dev, void *scratch, const float *queries
 }
 
 extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const float *queries,
-        const float *weights, const int *ids, int width, int batch, float *out) {
+        const float *weights, const int *ids, int width, int batch, float *out, int packed_scores) {
     TRY(cudaSetDevice(dev));
     auto *b = static_cast<Buffer *>(scratch);
     Layout l;
@@ -419,8 +420,8 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
     TRY(b->grow(l.used));
     if (ids) TRY(cudaMemcpy(at<int>(b,io),ids,ns*4,cudaMemcpyHostToDevice));
     auto *keys = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
-    score_keys<<<dim3((width+block/32-1)/(block/32),batch),block>>>(keys,queries,
-        weights,ids ? at<int>(b,io) : nullptr,width,at<float>(b,so));
+    launch_index_scores(packed_scores,keys,queries,weights,ids ? at<int>(b,io) : nullptr,
+                        width,batch,at<float>(b,so));
     TRY(cudaGetLastError());
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
     return 0;
@@ -451,7 +452,7 @@ extern "C" int ds4_attn_index_ids(int dev, int *out, int width, int pos, int rat
 
 extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, const float *queries,
         const float *weights, const int *candidates, int width, int pos, int ratio, int rows,
-        int *picks, int *out_blocks) {
+        int *picks, int *out_blocks, int packed_scores) {
     TRY(cudaSetDevice(dev));
     IndexWorkspace s;
     TRY(s.plan(width,rows));
@@ -464,7 +465,7 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     dim3 grid((width+block-1)/block,rows);
     index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
     TRY(cudaGetLastError());
-    score_keys<<<dim3((width+block/32-1)/(block/32),rows),block>>>(packed,queries,weights,ids,width,scores);
+    launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores);
     TRY(cudaGetLastError());
     auto sort=[&](int stride)->cudaError_t {
         if (!wide_index_sort(stride,rows)) {
