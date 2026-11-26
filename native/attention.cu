@@ -9,6 +9,8 @@
 #include <cuda_fp8.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <new>
 
@@ -471,6 +473,10 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores);
     TRY(cudaGetLastError());
     auto select=[&](int stride, int keep)->cudaError_t {
+        if (use_tiled_selection(stride,rows,keep)) {
+            // rank_positions has consumed ids; its storage now holds tile winners.
+            return tiled_selection(rank,sorted,reinterpret_cast<unsigned long long *>(ids),stride,rows,keep);
+        }
         if (!wide_index_sort(stride,rows)) {
             index_bounds<<<(rows+block)/block,block>>>(offsets,stride,rows);
             auto e=cudaGetLastError();

@@ -2333,6 +2333,10 @@ mod tests {
         assert_eq!(host, [0, -1, 0, -1, 0, 1]);
         for (pos, ratio, n, zero) in [
             (1020, 2, 129, false),
+            (1530, 1, 7, false),
+            (4096, 1, 7, false),
+            (24575, 1, 8, true),
+            (32760, 1, 8, false),
             (TOP_BLOCKS * BLOCK - 2, 1, 9, false),
             (TOP_BLOCKS * BLOCK + 109, 1, 3, true),
         ] {
@@ -2401,8 +2405,37 @@ mod tests {
             let mut got = vec![0i32; n * TOP];
             read(&picks, &mut got)?;
             let mut chosen = vec![0i32; n * TOP_BLOCKS];
+            let mut batched = vec![0i32; n * TOP];
             if has_blocks {
                 read(&blocks, &mut chosen)?;
+                let filtered_width = (TOP_BLOCKS * BLOCK) as i32;
+                let mut bytes = 0;
+                cuda_ok(
+                    unsafe { ds4_attn_index_bytes(filtered_width, n as i32, &mut bytes) },
+                    "batched filtered index fixture size",
+                )?;
+                let scratch = upload(device, &vec![0u8; bytes])?;
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_index_select(
+                            device,
+                            scratch.data(),
+                            packed.ptr.as_ptr(),
+                            q.data(),
+                            w.data(),
+                            blocks.data(),
+                            filtered_width,
+                            pos as i32,
+                            ratio as i32,
+                            n as i32,
+                            picks.data(),
+                            ptr::null_mut(),
+                            1,
+                        )
+                    },
+                    "batched filtered index fixture",
+                )?;
+                read(&picks, &mut batched)?;
             }
             for j in 0..n {
                 let visible = (pos + j + 1) / ratio;
@@ -2458,6 +2491,11 @@ mod tests {
                     .map(|k| ids[k] as i32)
                     .collect();
                 assert_eq!(actual, want, "filtered visible {visible}");
+                assert_eq!(
+                    batched[j * TOP..(j + 1) * TOP],
+                    want,
+                    "batched visible {visible}"
+                );
             }
         }
         Ok(())

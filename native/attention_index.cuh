@@ -62,6 +62,65 @@ __global__ void chronological_ids(const unsigned long long *rank, int width, int
 inline bool wide_index_sort(int stride, int rows) {
     return stride >= 8192 && (rows <= 2 || stride >= int64_t(rows) * 8192);
 }
+// Each tile contributes at most keep keys to the global winners. Ranking keys
+// already encode the tie break, so selecting again from their union is exact.
+constexpr int sort_tile = 4096;
+inline bool use_tiled_selection(int width, int rows, int keep) {
+    static const bool enabled = [] {
+        const char *v = std::getenv("DS4_BATCH_TOPK");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return enabled && rows > 1 && !wide_index_sort(width, rows) &&
+           (width <= sort_tile || (keep == top && width <= sort_tile * (sort_tile / top)));
+}
+
+template<int Items>
+__global__ void select_tile(const unsigned long long *in, unsigned long long *out,
+        int width, int in_stride, int out_stride, int keep) {
+    using Sort = cub::BlockRadixSort<unsigned long long, block, Items>;
+    __shared__ typename Sort::TempStorage storage;
+    const int first = blockIdx.x * block * Items;
+    const int count = min(block * Items, width - first);
+    const auto *src = in + size_t(blockIdx.y) * in_stride + first;
+    auto *dst = out + size_t(blockIdx.y) * out_stride + blockIdx.x * keep;
+    unsigned long long keys[Items];
+    #pragma unroll
+    for (int i = 0; i < Items; ++i) {
+        int j = threadIdx.x + i * block;
+        keys[i] = j < count ? src[j] : 0;
+    }
+    Sort(storage).SortDescendingBlockedToStriped(keys);
+    #pragma unroll
+    for (int i = 0; i < Items; ++i) {
+        int j = threadIdx.x + i * block;
+        if (j < min(count, keep)) dst[j] = keys[i];
+    }
+}
+
+inline cudaError_t tiled_selection(const unsigned long long *input, unsigned long long *output,
+        unsigned long long *tile_winners, int width, int rows, int keep) {
+    const int tiles = (width + sort_tile - 1) / sort_tile;
+    int stride = width, count = width;
+    if (tiles > 1) {
+        stride = tiles * keep;
+        select_tile<sort_tile / block><<<dim3(tiles, rows), block>>>(
+            input, tile_winners, width, width, stride, keep);
+        auto rc = cudaGetLastError();
+        if (rc != cudaSuccess) return rc;
+        // A partial final tile can contain fewer than keep valid input slots.
+        count = (tiles - 1) * keep + std::min(keep, width - (tiles - 1) * sort_tile);
+        input = tile_winners;
+    }
+    dim3 grid(1, rows);
+    if (count <= 1024)
+        select_tile<4><<<grid, block>>>(input, output, count, stride, width, keep);
+    else if (count <= 2048)
+        select_tile<8><<<grid, block>>>(input, output, count, stride, width, keep);
+    else
+        select_tile<16><<<grid, block>>>(input, output, count, stride, width, keep);
+    return cudaGetLastError();
+}
+
 inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long long *input,
         unsigned long long *output,int stride,int rows,const int *offsets,int keep) {
     if (!wide_index_sort(stride,rows)) return cub::DeviceSegmentedRadixSort::SortKeysDescending(
@@ -98,6 +157,7 @@ struct IndexWorkspace {
         for (int stage = 0; stage < 2; ++stage) {
             int stride = stage == 0 ? width : (width + index_block - 1) / index_block;
             int keep = stage == 0 ? top : candidate_limit;
+            if (use_tiled_selection(stride,rows,keep)) continue;
             size_t size=0;
             auto e=sort_index_rows(nullptr,size,nullptr,nullptr,stride,rows,nullptr,keep);
             if(e!=cudaSuccess)return e;

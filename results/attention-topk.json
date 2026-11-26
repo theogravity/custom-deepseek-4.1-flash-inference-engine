@@ -1,0 +1,484 @@
+{
+  "experiment": "attention-topk",
+  "clients": 6,
+  "gpu_w_each": 375,
+  "cpu_socket_w": 225,
+  "legs": {
+    "attention-topk-edit-off-a": {
+      "label": "attention-topk-edit-off-a",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "median_tok_s": 461.65569575308183,
+      "whole_wave": 456.3880059043307,
+      "per_wave": [
+        457.0024122409597,
+        463.3575998636726,
+        457.2411192406191,
+        461.1539143466923,
+        462.15747715947134,
+        469.44529035829026
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "b4e790a245c871845df42da4ce56ab947df633f9467b964806cbaacb4792f120",
+      "whole_wave_tok_s": [
+        451.6954933960634,
+        459.6441753501265,
+        439.92236649527996,
+        454.28304251162416,
+        458.49296929703735,
+        462.3139041349391
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        249,
+        249,
+        249,
+        248,
+        249,
+        249
+      ]
+    },
+    "attention-topk-edit-on": {
+      "label": "attention-topk-edit-on",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "1"
+      },
+      "median_tok_s": 504.4378776334945,
+      "whole_wave": 496.6421337875166,
+      "per_wave": [
+        504.41788310662946,
+        502.58610263806713,
+        504.7356894481746,
+        504.5514210189016,
+        504.4578721603596,
+        499.721170967007
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "a14311eeda1636ffd155dfbe411512fb0d679a3c47f626191e1e42b103c9f846",
+      "whole_wave_tok_s": [
+        496.22577709316425,
+        496.6556465026759,
+        496.7210997297506,
+        496.61094191729035,
+        496.6286210723574,
+        497.7766942774354
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        249,
+        249,
+        249,
+        249,
+        248,
+        249
+      ]
+    },
+    "attention-topk-edit-off-b": {
+      "label": "attention-topk-edit-off-b",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "median_tok_s": 466.0778926635097,
+      "whole_wave": 462.01884058522046,
+      "per_wave": [
+        468.8566848953273,
+        465.9746327353414,
+        465.97819957163534,
+        466.9737619542299,
+        465.65494223343495,
+        466.17758575538414
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "raw_sha256": "230e037e3e4e867f9f1d673eb2b3d58aa9e7780ca2749c3b1b9189abf55690f0",
+      "whole_wave_tok_s": [
+        461.71977330536583,
+        462.1193925615717,
+        462.18752347082034,
+        461.6882788640436,
+        461.91828860886926,
+        462.37279750725116
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        248,
+        249,
+        249,
+        249,
+        249,
+        249
+      ]
+    },
+    "attention-topk-long-off-a": {
+      "label": "attention-topk-long-off-a",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 318.66558910939284,
+      "whole_wave": 305.2432495584566,
+      "per_wave": [
+        315.9371133324934,
+        319.650598163367,
+        314.2092749428765,
+        321.8729841149904,
+        318.54020790065255,
+        318.7909703181331
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        516,
+        196,
+        235306
+      ],
+      "raw_sha256": "b9d72c7986b8e0b452019b67c1a9f9f2369e88dccd15ed4fc35a851af900a34f",
+      "whole_wave_tok_s": [
+        303.75382238660285,
+        306.2851952605373,
+        304.4541656525294,
+        308.7936340028449,
+        305.2946577910129,
+        305.1918413259003
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        118,
+        114,
+        118,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        65.12711202317467,
+        70.40443836561947,
+        69.48108056919935,
+        61.60833163596068,
+        61.94227137069668,
+        55.97200019252479
+      ]
+    },
+    "attention-topk-long-on": {
+      "label": "attention-topk-long-on",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 333.42177993118753,
+      "whole_wave": 321.8091868119368,
+      "per_wave": [
+        335.58680407028135,
+        333.2960649379539,
+        332.0015784510155,
+        336.4741948182296,
+        333.3069734257689,
+        333.5365864366062
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        380,
+        296,
+        235296
+      ],
+      "raw_sha256": "56f8ccdf6184ac77ddabedd3f8e522fd1ad1a137ffc2f6c8766806f113377f4e",
+      "whole_wave_tok_s": [
+        321.77679827525844,
+        321.1171007875905,
+        321.3304351277653,
+        322.35821402194813,
+        322.4040170160584,
+        321.8415753486152
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        119,
+        119,
+        114,
+        118,
+        114,
+        116
+      ],
+      "per_client_decode_medians": [
+        69.98038268134391,
+        73.010081411416,
+        73.52152043369216,
+        64.78646991830047,
+        65.20617785571423,
+        56.97405871130087
+      ]
+    },
+    "attention-topk-long-off-b": {
+      "label": "attention-topk-long-off-b",
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "env": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 320.01132504685813,
+      "whole_wave": 306.2994167679009,
+      "per_wave": [
+        321.92743318300535,
+        316.33876352741623,
+        319.02656199624596,
+        321.6566183773802,
+        320.99608809747025,
+        318.64784550597886
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        370,
+        214,
+        235346
+      ],
+      "raw_sha256": "c9dbc1e40077f3828a6091b37d0cb8463065f34d29110a09deb17d0c1063f38f",
+      "whole_wave_tok_s": [
+        308.96264851132565,
+        304.89939694693027,
+        306.178683032945,
+        308.6494457403096,
+        306.42015050285676,
+        305.5195168443974
+      ],
+      "warm_responses_matched": 36,
+      "six_target_passes": [
+        118,
+        117,
+        119,
+        118,
+        119,
+        119
+      ],
+      "per_client_decode_medians": [
+        66.25010096754437,
+        70.5973044539378,
+        70.4100805835258,
+        59.91633562937457,
+        62.172882637400406,
+        56.09156085688987
+      ]
+    }
+  },
+  "sort_kernel_microseconds": [
+    {
+      "keys": 3204,
+      "rows": 4,
+      "keep": 2048,
+      "before": 50.95,
+      "enabled": 17.793,
+      "after": 50.92
+    },
+    {
+      "keys": 3204,
+      "rows": 8,
+      "keep": 2048,
+      "before": 51.933,
+      "enabled": 17.856,
+      "after": 52.069
+    },
+    {
+      "keys": 12816,
+      "rows": 4,
+      "keep": 512,
+      "before": 146.187,
+      "enabled": 29.706,
+      "after": 146.194
+    },
+    {
+      "keys": 12816,
+      "rows": 8,
+      "keep": 512,
+      "before": 147.69,
+      "enabled": 29.747,
+      "after": 147.729
+    },
+    {
+      "keys": 16384,
+      "rows": 4,
+      "keep": 512,
+      "before": 179.082,
+      "enabled": 29.711,
+      "after": 179.058
+    },
+    {
+      "keys": 16384,
+      "rows": 8,
+      "keep": 512,
+      "before": 180.779,
+      "enabled": 29.72,
+      "after": 180.829
+    },
+    {
+      "keys": 25625,
+      "rows": 4,
+      "keep": 512,
+      "before": 267.326,
+      "enabled": 35.713,
+      "after": 267.339
+    },
+    {
+      "keys": 25625,
+      "rows": 8,
+      "keep": 512,
+      "before": 270.75,
+      "enabled": 35.765,
+      "after": 270.734
+    }
+  ],
+  "checkpoint": "checkpoint-2026-11-26-decode-01-attention-topk",
+  "decision": "Select tiled ranking for the optimized serving profile. Its enabled median exceeded both controls on both workloads, and the six individual enabled 404k waves each exceeded 332 aggregate tok/s.",
+  "full_window_validation": {
+    "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+    "flags": {
+      "DS4_BATCH_TOPK": "1"
+    },
+    "c1_404k_code": {
+      "before": [
+        234.80973697462363,
+        234.37054746827172,
+        234.97192258900634
+      ],
+      "enabled": [
+        240.5262465750327,
+        240.20574529338427,
+        239.65182482371603
+      ]
+    },
+    "six_full_qualified_waves": 3,
+    "eight_ram": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "matched": 8
+    },
+    "eight_disk": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "matched": 8
+    }
+  },
+  "release_tests": 86
+}
