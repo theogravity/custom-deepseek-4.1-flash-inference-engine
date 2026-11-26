@@ -628,6 +628,7 @@ impl Model {
             .copied()
             .unwrap_or(prompt.len());
         let observe = session.draft.is_some() && pos + n > horizon.saturating_sub(128);
+        self.rt.target_prefill = true;
         let target = self.forward(
             &mut session.cache,
             prompt,
@@ -635,7 +636,9 @@ impl Model {
             n,
             usize::from(last),
             observe,
-        )?;
+        );
+        self.rt.target_prefill = false;
+        let target = target?;
         if let Some(draft) = session.draft.as_mut().filter(|_| observe) {
             draft.observe(
                 &mut self.rt,

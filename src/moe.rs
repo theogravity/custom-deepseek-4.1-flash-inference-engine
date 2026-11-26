@@ -1,6 +1,7 @@
 //! DeepSeek V4.1 Flash text MoE. Weights stay mmap-backed on the host until an
 //! expert is actually selected. Slots are reused in LRU order on each GPU.
 use anyhow::{bail, ensure, Context, Result};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::{c_char, c_void, CStr},
@@ -242,6 +243,7 @@ struct DeviceCache {
     router: RouterRead,
     uploads: usize,
     overlap_router: bool,
+    parallel_prefill_router: bool,
     cached_capacity: bool,
     packed_upload: bool,
     inline_metadata: bool,
@@ -272,6 +274,7 @@ impl DeviceCache {
             scratch_bytes: 0,
             router: RouterRead::default(),
             uploads: 0,
+            parallel_prefill_router: switch("DS4_PARALLEL_PREFILL_ROUTER", false)?,
             overlap_router: switch("DS4_MOE_OVERLAP_ROUTER", true)?,
             cached_capacity: switch("DS4_MOE_CACHED_CAPACITY", true)?,
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
@@ -420,7 +423,7 @@ fn checkpoint_parts(weights: &Weights, (layer, expert): Key) -> Result<[*const c
     Ok(parts)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Route {
     expert: usize,
     token: usize,
@@ -432,13 +435,14 @@ fn routes<const E: usize, const K: usize>(
     logits: &[f32],
     bias: &[f32],
     batch: usize,
+    parallel: bool,
 ) -> Result<Vec<Route>> {
     ensure!(
         logits.len() == batch * E && bias.len() == E,
         "router shape mismatch"
     );
-    let mut output = Vec::with_capacity(batch * K);
-    for (token, scores) in logits.as_chunks::<E>().0.iter().enumerate() {
+    let mut output = vec![Route::default(); batch * K];
+    let assign = |(token, (scores, dest)): (usize, (&[f32; E], &mut [Route; K]))| {
         let mut top = [(f32::NEG_INFINITY, 0.0, 0); K];
         for (expert, &logit) in scores.iter().enumerate() {
             let score = (logit.max(0.0) + (-logit.abs()).exp().ln_1p()).sqrt();
@@ -453,14 +457,30 @@ fn routes<const E: usize, const K: usize>(
             }
         }
         let norm = top.iter().map(|t| t.1).sum::<f32>() + 1e-20;
-        for (_, score, expert) in top {
-            output.push(Route {
+        for (route, (_, score, expert)) in dest.iter_mut().zip(top) {
+            *route = Route {
                 expert,
                 token,
                 rank: 0,
                 weight: 1.5 * score / norm,
-            });
+            };
         }
+    };
+    let scores = logits.as_chunks::<E>().0;
+    let dest = output.as_chunks_mut::<K>().0;
+    if parallel && batch >= 32 {
+        scores
+            .par_iter()
+            .zip(dest.par_iter_mut())
+            .enumerate()
+            .with_min_len(8)
+            .for_each(assign);
+    } else {
+        scores
+            .iter()
+            .zip(dest.iter_mut())
+            .enumerate()
+            .for_each(assign);
     }
     output.sort_unstable_by_key(|r| (r.expert, r.token));
     // Match the original expert-major sequential accumulation, including when
@@ -680,16 +700,18 @@ fn forward<const E: usize, const K: usize>(
     // Only router logits visit the CPU, which computes the checkpoint's top-k
     // and chooses mmap-backed expert weights for the GPU slot cache.
     let cache = rt.moe_cache.device(rt.device)?;
+    let parallel_router =
+        cache.parallel_prefill_router && rt.target_prefill && matches!(layer, Layer::Backbone(_));
     let (routes, mut shared_out) = if cache.overlap_router {
         cache.router.start(&logits)?;
         let shared_out = shared(rt, &base, x, batch)?;
         let read = &rt.moe_cache.device(rt.device)?.router;
         (
-            routes::<E, K>(read.scores(logits.len())?, &bias, batch)?,
+            routes::<E, K>(read.scores(logits.len())?, &bias, batch, parallel_router)?,
             shared_out,
         )
     } else {
-        let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch)?;
+        let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch, parallel_router)?;
         (routes, shared(rt, &base, x, batch)?)
     };
     ensure!(
@@ -1051,7 +1073,7 @@ mod tests {
             }
         }
         let routes =
-            routes::<DRAFT_EXPERTS, DRAFT_TOP_K>(&logits, &[0.; DRAFT_EXPERTS], 2).unwrap();
+            routes::<DRAFT_EXPERTS, DRAFT_TOP_K>(&logits, &[0.; DRAFT_EXPERTS], 2, false).unwrap();
         let rows: Vec<_> = routes.iter().map(|r| (r.expert, r.token, r.rank)).collect();
         assert_eq!(
             rows,
@@ -1067,12 +1089,26 @@ mod tests {
     }
 
     #[test]
+    fn parallel_prefill_router_preserves_every_assignment() {
+        let rows = 131;
+        let logits: Vec<f32> = (0..rows * EXPERTS)
+            .map(|i| ((i * 29 + i / EXPERTS) % 37) as f32 / 5. - 3.)
+            .collect();
+        let bias: Vec<f32> = (0..EXPERTS).map(|i| (i % 7) as f32 * 0.01).collect();
+        let serial = routes::<EXPERTS, TOP_K>(&logits, &bias, rows, false).unwrap();
+        assert_eq!(
+            serial,
+            routes::<EXPERTS, TOP_K>(&logits, &bias, rows, true).unwrap()
+        );
+    }
+
+    #[test]
     fn correction_bias_selects_experts_but_does_not_weight_them() {
         let mut bias = vec![0.0; EXPERTS];
         bias[300] = 2.0;
         let mut logits = vec![0.0; EXPERTS];
         logits[42] = 2.0;
-        let selected = routes::<EXPERTS, TOP_K>(&logits, &bias, 1).unwrap();
+        let selected = routes::<EXPERTS, TOP_K>(&logits, &bias, 1, false).unwrap();
         assert_eq!(
             selected.iter().map(|r| r.expert).collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 42, 300]

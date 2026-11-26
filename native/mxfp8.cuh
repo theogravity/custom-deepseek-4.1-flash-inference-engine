@@ -22,16 +22,16 @@ __device__ __forceinline__ unsigned mx_bf_pair(unsigned short q, __nv_bfloat162 
     __nv_bfloat162_raw pair=__hmul2(__nv_bfloat162(raw),scale);
     return (unsigned(pair.y)<<16)|pair.x;
 }
-template<bool PerRowScale>
+template<bool PerRowScale, int TokenTiles = 1>
 __global__ void mx_project(const uint2 *weights,const unsigned char *scales,
         const __nv_bfloat16 *input,float *partial,int rows,int cols,int batch,int groups,int splits) {
     int lane=threadIdx.x%32,warp=threadIdx.x/32;
     int row=blockIdx.x*64+warp*16;
     int group=row/(rows/groups);
-    int token=blockIdx.y*8+lane/4;
+    const int first_token = blockIdx.y * (8 * TokenTiles);
     int kt=cols/16;
     int kbeg=(blockIdx.z*kt/splits),kend=((blockIdx.z+1)*kt/splits);
-    float c[4]={};
+    float c[TokenTiles][4] = {};
     for(int tile=kbeg;tile<kend;++tile) {
         uint2 w=weights[(size_t(blockIdx.x)*kt+tile)*128+threadIdx.x];
         const int scale_row=PerRowScale ? row+lane/4 : row/32;
@@ -45,22 +45,38 @@ __global__ void mx_project(const uint2 *weights,const unsigned char *scales,
         }
         unsigned a0=mx_bf_pair(w.x,s),a1=mx_bf_pair(w.x>>16,s8);
         unsigned a2=mx_bf_pair(w.y,s),a3=mx_bf_pair(w.y>>16,s8);
-        unsigned b0=0,b1=0;
-        if(token<batch){
-            const auto *v=input+(size_t(token)*groups+group)*cols+tile*16+2*(lane%4);
-            b0=*reinterpret_cast<const unsigned*>(v);
-            b1=*reinterpret_cast<const unsigned*>(v+8);
+        // Separate accumulators share the expanded weights. Each token retains
+        // the same MMA instruction sequence and split-K reduction order.
+#pragma unroll
+        for (int t = 0; t < TokenTiles; ++t) {
+            int token = first_token + 8 * t + lane / 4;
+            unsigned b0 = 0, b1 = 0;
+            if (token < batch) {
+                const auto *v = input + (size_t(token) * groups + group) * cols
+                                + tile * 16 + 2 * (lane % 4);
+                b0 = *reinterpret_cast<const unsigned *>(v);
+                b1 = *reinterpret_cast<const unsigned *>(v + 8);
+            }
+            asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                         "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};"
+                         : "+f"(c[t][0]), "+f"(c[t][1]), "+f"(c[t][2]), "+f"(c[t][3])
+                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
         }
-        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-          "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};"
-          : "+f"(c[0]),"+f"(c[1]),"+f"(c[2]),"+f"(c[3])
-          : "r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1));
     }
-    int t=blockIdx.y*8+2*(lane%4);
-    row+=lane/4;
-    float *out=partial+(size_t(blockIdx.z)*batch+t)*rows+row;
-    if(t<batch) {out[0]=c[0];out[8]=c[2];}
-    if(t+1<batch){out[rows]=c[1];out[rows+8]=c[3];}
+    row += lane / 4;
+#pragma unroll
+    for (int t = 0; t < TokenTiles; ++t) {
+        const int token = first_token + 8 * t + 2 * (lane % 4);
+        if (token < batch) {
+            float *out = partial + (size_t(blockIdx.z) * batch + token) * rows + row;
+            out[0] = c[t][0];
+            out[8] = c[t][2];
+            if (token + 1 < batch) {
+                out[rows] = c[t][1];
+                out[rows + 8] = c[t][3];
+            }
+        }
+    }
 }
 __global__ void mx_sum(const float *parts,float *result,size_t count,int splits,bool round) {
     size_t i=size_t(blockIdx.x)*blockDim.x+threadIdx.x;

@@ -7,7 +7,7 @@
 struct Context;
 extern "C" int ds_project(Context *ctx, const void *w, const float *x, float *y,
                           int rows, int cols, int batch, int groups, int mode,
-                          int round_output, int prefill, int full_rows);
+                          int round_output, int prefill, int mx_tiles, int full_rows);
 namespace {
 struct Fence {
   int device = -1;
@@ -87,7 +87,7 @@ extern "C" int ds_tp_project(Link *l, Context *home_ctx, Context *peer_ctx,
                             const float *x, float *out, float *parts_home,
                             float *x_peer, float *out_peer,
                             int rows, int cols, int batch, int mode,
-                            int round_output, int prefill) {
+                            int round_output, int prefill, int mx_tiles) {
   const int home = l->owner.device, peer = l->peer.device, half = rows / 2;
   const size_t x_bytes = size_t(batch) * cols * sizeof(float);
   const int n = batch * half;
@@ -100,7 +100,7 @@ extern "C" int ds_tp_project(Link *l, Context *home_ctx, Context *peer_ctx,
     TRY(cudaEventRecord(l->input_ready, l->peer.transfer));
     TRY(cudaStreamWaitEvent(nullptr, l->input_ready));
     if (ds_project(peer_ctx, w_peer, x_peer, out_peer, half, cols, batch, 1,
-                   mode, round_output, prefill, rows)) return -1;
+                   mode, round_output, prefill, mx_tiles, rows)) return -1;
     TRY(cudaEventRecord(l->peer.done, nullptr));
 
     TRY(cudaSetDevice(home));
@@ -108,7 +108,7 @@ extern "C" int ds_tp_project(Link *l, Context *home_ctx, Context *peer_ctx,
     TRY(cudaMemcpyPeerAsync(parts_home+n, home, out_peer, peer, size_t(n)*4, l->owner.transfer));
     TRY(cudaEventRecord(l->output_ready, l->owner.transfer));
     if (ds_project(home_ctx, w_home, x, parts_home, half, cols, batch, 1,
-                   mode, round_output, prefill, rows)) return -1;
+                   mode, round_output, prefill, mx_tiles, rows)) return -1;
     TRY(cudaStreamWaitEvent(nullptr, l->output_ready));
     interleave<<<(n+255)/256,256>>>(parts_home,out,half,n);
     return cudaGetLastError();

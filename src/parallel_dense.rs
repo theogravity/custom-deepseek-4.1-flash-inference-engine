@@ -28,6 +28,7 @@ unsafe extern "C" {
         mode: i32,
         round: i32,
         prefill: i32,
+        mx_tiles: i32,
     ) -> i32;
     fn cudaGetErrorString(code: i32) -> *const c_char;
 }
@@ -203,6 +204,7 @@ impl ParallelDense {
         y: *mut f32,
         batch: usize,
         prefill: bool,
+        mx_tiles: i32,
     ) -> Result<()> {
         let peer = w.peer.as_ref().context("missing peer weight")?;
         let link = self
@@ -245,6 +247,7 @@ impl ParallelDense {
                     w.mode,
                     w.round_output.into(),
                     prefill.into(),
+                    mx_tiles,
                 )
             })
         })();
@@ -372,12 +375,14 @@ mod tests {
                 ));
             }
             let mut pending = Vec::new();
-            for (batch, prefill) in [
-                (1usize, false),
-                (8, false),
-                (129, true),
-                (129, false),
-                (3, false),
+            for (batch, prefill, tiles) in [
+                (1usize, false, 1),
+                (8, false, 1),
+                (33, true, 2),
+                (64, true, 4),
+                (129, true, 4),
+                (129, false, 1),
+                (3, false, 1),
             ] {
                 for (owner, (full, shards)) in matrices.iter().enumerate() {
                     rt.layer(if owner == 0 { 0 } else { 20 })?;
@@ -400,6 +405,7 @@ mod tests {
                             mode,
                             full.round_output.into(),
                             prefill.into(),
+                            1,
                             rows as i32,
                         )
                     })?;
@@ -412,6 +418,7 @@ mod tests {
                         out.as_mut_ptr(),
                         batch,
                         prefill,
+                        tiles,
                     )?;
                     pending.push((expected, out));
                 }

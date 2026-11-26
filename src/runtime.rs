@@ -72,6 +72,7 @@ extern "C" {
         mode: c_int,
         round_output: c_int,
         prefill: c_int,
+        mx_tiles: c_int,
         full_rows: c_int,
     ) -> c_int;
     #[cfg(test)]
@@ -179,6 +180,8 @@ pub struct Runtime {
     pub moe_cache: MoeCache,
     pub(crate) attention_scratch: crate::attention::Workspace,
     pub verification: bool,
+    pub(crate) target_prefill: bool,
+    prefill_tiles: i32,
     packed: bool,
     parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
@@ -202,6 +205,12 @@ impl Runtime {
             Ok("released" | "none") | Err(_) => (),
             Ok(name) => anyhow::bail!("unknown DS4_DRAFTER {name}"),
         }
+        let prefill_tiles = match std::env::var("DS4_PREFILL_MX_TILES").as_deref() {
+            Ok("4") => 4,
+            Ok("2") => 2,
+            Ok("1") | Err(std::env::VarError::NotPresent) => 1,
+            _ => anyhow::bail!("DS4_PREFILL_MX_TILES must be 1, 2 or 4"),
+        };
         let mut rt = Self {
             weights,
             device: devices[0],
@@ -209,6 +218,8 @@ impl Runtime {
             moe_cache: MoeCache::default(),
             attention_scratch: Default::default(),
             verification: false,
+            target_prefill: false,
+            prefill_tiles,
             packed: packed_dense(),
             parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
@@ -639,6 +650,11 @@ impl Runtime {
         let n = batch.checked_mul(w.rows).context("dense output overflow")?;
         let mut out = self.buffer(n)?;
         let w = &self.matrices[name];
+        let mx_tiles = if self.target_prefill {
+            self.prefill_tiles
+        } else {
+            1
+        };
         if w.peer.is_some() {
             ensure!(groups == 1, "grouped call on tensor-parallel weight {name}");
             let peer_device = self.peer_device();
@@ -654,6 +670,7 @@ impl Runtime {
                     out.as_mut_ptr(),
                     batch,
                     !self.verification,
+                    mx_tiles,
                 )
                 .with_context(|| format!("parallel project {name}"))?;
             return Ok(out);
@@ -685,6 +702,7 @@ impl Runtime {
                 w.mode,
                 w.round_output.into(),
                 (!self.verification).into(),
+                mx_tiles,
                 w.rows.try_into()?,
             )
         })
