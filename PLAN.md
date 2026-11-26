@@ -73,3 +73,7 @@ Selected shared packed rows with LFU for the 375 W service. At six independent 4
 ## vLLM CPU experts and native speculative verification
 
 On the same six 25,625-token edits, vLLM delivered 537–561 aggregate tok/s with CPU experts and 485 with GPU experts alone. The native shared-prefix LFU controls delivered 462–463. Native expert uploads fell to two and then zero across two warm measured waves. Lowering the native learned draft maximum to five lost 8.5–8.7% against both seven-proposal controls with identical continuations. Both the seven-proposal default and the four-warp expert kernel remain selected. [Controlled comparison and native CUDA trace](EDIT-SCALING-EXPERIMENT.md)
+
+## Selective CPU experts
+
+At six 404k coding sessions, CPU experts delivered 266 and 289 aggregate tok/s at output budgets of 512 and 768. GPU-only controls delivered 297–299 and 321–325 respectively. The experimental host path stays disabled. [Performance and numerical checks](CPU-EXPERT-EXPERIMENT.md)
