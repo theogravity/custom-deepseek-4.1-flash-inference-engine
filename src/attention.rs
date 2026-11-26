@@ -2204,8 +2204,8 @@ mod tests {
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn cuda_index_packed_scores_match_scalar_bits() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
-        let rows = 7;
-        let keys = 691;
+        let rows = 8;
+        let keys = 65_551;
         let mut packed = vec![0u8; keys * INDEX_BYTES];
         for (i, key) in packed
             .as_chunks_mut::<INDEX_BYTES>()
@@ -2230,7 +2230,7 @@ mod tests {
         let q = upload(device, &q)?;
         let w = upload(device, &w)?;
         let scratch = GpuBuffer::new(device)?;
-        for width in [1, 7, 8, 9, 31, 32, 33, 607] {
+        for width in [1, 7, 8, 9, 31, 32, 33, 607, 65_537] {
             let ids: Vec<i32> = (0..rows * width)
                 .map(|i| {
                     let (r, c) = (i / width, i % width);
