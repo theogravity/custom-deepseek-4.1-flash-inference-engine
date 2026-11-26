@@ -689,7 +689,11 @@ fn forward<const E: usize, const K: usize>(
     let peer_id = rt.peer_device();
     let cache = rt.moe_cache.device(rt.device)?;
     let parallel = cache.parallel && (matches!(layer, Layer::Backbone(_)) || cache.parallel_draft);
-    let stage_copy = parallel && cache.staged;
+    // Wide staged prompt batches triggered a copy-engine fault on the dual
+    // RTX PRO 6000. Peer kernels can read and write the primary buffers
+    // directly. Keep compact transfers for decode and smaller prompt batches.
+    let wide_prefill = rt.target_prefill && batch > 128;
+    let stage_copy = parallel && cache.staged && !wide_prefill;
     let peer_work = if parallel {
         Some(PeerWork::begin(cache, peer_id)?)
     } else {
@@ -1057,6 +1061,51 @@ mod tests {
                             .slots
                             .keys()
                             .all(|&(_, e)| (e % 2 == 0) == (*device == rt.device)));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs in CUDA_VISIBLE_DEVICES"]
+    fn peer_staging_boundary_preserves_expert_outputs() -> Result<()> {
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        let input: Vec<_> = (0..129 * HIDDEN)
+            .map(|i| (i as f32 * 0.057).cos())
+            .collect();
+        for layer in [0, 20] {
+            rt.layer(layer)?;
+            for (batch, prefill, expect_staged) in
+                [(128, true, true), (129, true, false), (129, false, true)]
+            {
+                rt.target_prefill = prefill;
+                let x = rt.to_device(&input[..batch * HIDDEN])?;
+                let mut expected = Vec::new();
+                for parallel in [false, true] {
+                    rt.moe_cache = MoeCache::default();
+                    let primary = rt.device;
+                    let peer = rt.peer_device();
+                    {
+                        let cache = rt.moe_cache.device(primary)?;
+                        cache.parallel = parallel;
+                        cache.staged = true;
+                        cache.fused = true;
+                    }
+                    let y = forward_dev(&mut rt, layer, &x, batch)?;
+                    let actual: Vec<_> = rt.to_host(&y)?.into_iter().map(f32::to_bits).collect();
+                    if parallel {
+                        assert!(!rt.moe_cache.device(peer)?.slots.is_empty());
+                        let link = rt.moe_cache.device(primary)?.peer_link;
+                        assert!(!link.is_null());
+                        assert_eq!(unsafe { ds_moe_peer_capacity(link) } > 0, expect_staged);
+                        assert_eq!(actual, expected);
+                    } else {
+                        expected = actual;
                     }
                 }
             }
