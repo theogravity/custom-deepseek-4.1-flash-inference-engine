@@ -1,7 +1,7 @@
 //! DSpark stages attend to a rolling window of committed target projections
 //! plus every fresh KV in the candidate block, including later noise rows.
 use crate::{
-    attention::{project, rotary_freqs},
+    attention::{project, rotary_freqs, Freq},
     runtime::{Dev, Runtime},
 };
 use anyhow::{ensure, Context, Result};
@@ -121,7 +121,6 @@ pub struct DraftAttention {
     rings: [Option<Dev>; STAGES],
     start: usize,
     end: usize,
-    proposal_freqs: Option<(usize, usize, Dev)>,
 }
 
 pub(crate) fn validate_snapshot(pos: usize, bytes: &[u8]) -> Result<usize> {
@@ -263,71 +262,103 @@ impl DraftAttention {
         self.start = start.max(end.saturating_sub(WINDOW));
         Ok(())
     }
+}
 
-    /// pos is the absolute position of the first noise-block token, directly
-    /// after the most recently observed target token.
-    pub fn forward(
-        &mut self,
-        rt: &mut Runtime,
-        stage: usize,
-        x: &Dev,
-        pos: usize,
-        width: usize,
-    ) -> Result<Dev> {
+// Each proposal can see its own committed ring and all of its fresh rows.
+// Only row-independent projections and RoPE evaluation span requests.
+pub(crate) struct ProposalSpan<'a> {
+    pub attention: &'a DraftAttention,
+    pub pos: usize,
+    pub width: usize,
+}
+
+pub(crate) fn proposal_angles(rt: &mut Runtime, spans: &[ProposalSpan<'_>]) -> Result<Dev> {
+    let mut freqs = Vec::new();
+    for span in spans {
         ensure!(
-            stage < STAGES && width > 0 && width <= WINDOW && x.len() == width * HIDDEN,
-            "invalid DSpark attention input"
+            (1..=WINDOW).contains(&span.width)
+                && span.pos == span.attention.end
+                && span
+                    .pos
+                    .checked_add(span.width)
+                    .is_some_and(|end| end <= i32::MAX as usize),
+            "invalid DSpark proposal width or position"
         );
-        ensure!(
-            pos == self.end
-                && pos
-                    .checked_add(width)
-                    .is_some_and(|p| p <= i32::MAX as usize),
-            "DSpark proposal position does not follow observed target rows"
-        );
-        if self
-            .proposal_freqs
-            .as_ref()
-            .is_none_or(|(p, n, _)| (*p, *n) != (pos, width))
-        {
-            self.proposal_freqs = Some((pos, width, angles(rt, pos, width)?));
+        freqs.extend((span.pos..span.pos + span.width).map(|p| rotary_freqs(p, false)));
+    }
+    rt.to_device(freqs.as_flattened().as_flattened())
+}
+
+pub(crate) fn proposal_attention(
+    rt: &mut Runtime,
+    stage: usize,
+    x: &Dev,
+    spans: &[ProposalSpan<'_>],
+    freqs: &Dev,
+) -> Result<Dev> {
+    let rows: usize = spans.iter().map(|s| s.width).sum();
+    ensure!(
+        stage < STAGES && rows > 0 && rows * HIDDEN == x.len(),
+        "invalid DSpark attention input"
+    );
+    const ANGLES_PER_ROW: usize = size_of::<Freq>() / size_of::<f32>();
+    ensure!(
+        freqs.len() == rows * ANGLES_PER_ROW,
+        "invalid DSpark angle buffer"
+    );
+    if spans.len() > 1 && !rt.uses_packed_weights() {
+        // cuBLAS may select a different accumulation path when the matrix
+        // dimensions change. Keep the reference span shapes for unpacked weights.
+        let mut out = rt.buffer(rows * HIDDEN)?;
+        let mut offset = 0;
+        for span in spans {
+            let one = rt.slice(x, offset * HIDDEN, span.width * HIDDEN)?;
+            let angles = rt.slice(freqs, offset * ANGLES_PER_ROW, span.width * ANGLES_PER_ROW)?;
+            let y = proposal_attention(rt, stage, &one, std::slice::from_ref(span), &angles)?;
+            rt.copy_into(&mut out, offset * HIDDEN, &y)?;
+            offset += span.width;
         }
-        let freqs = &self.proposal_freqs.as_ref().unwrap().2;
-        let stem = format!("mtp.{stage}.attn");
-        let mut qr = project(rt, &stem, "wq_a", x, width, 1280, 1)?;
-        normalize(rt, &mut qr, &format!("{stem}.q_norm.weight"), 1280, width)?;
-        let mut q = project(rt, &stem, "wq_b", &qr, width, HEADS * DIM, 1)?;
-        transform(rt, &mut q, freqs, width, HEADS, 0, false)?;
-        let kv = key_values(rt, &stem, x, width, freqs)?;
-        let sink = rt.vector_ptr(&format!("{stem}.attn_sink"), HEADS)?;
-        let ring: *const c_void = self.rings[stage]
+        return Ok(out);
+    }
+    let stem = format!("mtp.{stage}.attn");
+    let mut qr = project(rt, &stem, "wq_a", x, rows, 1280, 1)?;
+    normalize(rt, &mut qr, &format!("{stem}.q_norm.weight"), 1280, rows)?;
+    let mut q = project(rt, &stem, "wq_b", &qr, rows, HEADS * DIM, 1)?;
+    transform(rt, &mut q, freqs, rows, HEADS, 0, false)?;
+    let kv = key_values(rt, &stem, x, rows, freqs)?;
+    let sink = rt.vector_ptr(&format!("{stem}.attn_sink"), HEADS)?;
+    let mut out = rt.buffer(q.len())?;
+    let mut offset = 0;
+    for span in spans {
+        let state = span.attention;
+        let ring: *const c_void = state.rings[stage]
             .as_ref()
             .map_or(ptr::null(), |r| r.as_ptr().cast());
-        let valid = self.end - self.start;
+        let valid = state.end - state.start;
         ensure!(
-            valid == 0 || !ring.is_null(),
-            "missing DSpark attention cache"
+            valid <= WINDOW && (valid == 0 || !ring.is_null()),
+            "invalid DSpark attention window"
         );
-        let mut out = rt.buffer(q.len())?;
         checked(
             unsafe {
                 ds_draft_attend(
-                    q.as_ptr(),
+                    q.as_ptr().add(offset * HEADS * DIM),
                     ring,
-                    kv.as_ptr(),
-                    (self.start % WINDOW) as i32,
+                    kv.as_ptr().add(offset * DIM),
+                    (state.start % WINDOW) as i32,
                     valid as i32,
-                    width as i32,
+                    span.width as i32,
                     sink,
-                    out.as_mut_ptr(),
+                    out.as_mut_ptr().add(offset * HEADS * DIM),
                 )
             },
             "attending to DSpark target window and proposal block",
         )?;
-        transform(rt, &mut out, freqs, width, HEADS, 32, true)?;
-        let down = project(rt, &stem, "wo_a", &out, width, 8192, 8)?;
-        project(rt, &stem, "wo_b", &down, width, HIDDEN, 1)
+        offset += span.width;
     }
+    transform(rt, &mut out, freqs, rows, HEADS, 32, true)?;
+    let down = project(rt, &stem, "wo_a", &out, rows, 8192, 8)?;
+    project(rt, &stem, "wo_b", &down, rows, HIDDEN, 1)
 }
 
 #[cfg(test)]
@@ -370,6 +401,68 @@ mod tests {
             assert!(restored.ready(pos));
             assert!(!restored.ready(pos + 1));
             assert_eq!(restored.snapshot(&mut rt, pos)?, bytes);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
+    fn joint_proposal_attention_preserves_each_sessions_projected_rows() -> Result<()> {
+        let mut rt = Runtime::open_with_packing(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+            true,
+        )?;
+        rt.layer(39)?;
+        let layout: [(usize, usize); 4] = [(1, 1), (127, 7), (132, 3), (404151, 6)];
+        let mut states = Vec::new();
+        for (index, (pos, _)) in layout.iter().copied().enumerate() {
+            let mut bytes = Vec::from(*b"DS4DRF01");
+            bytes.extend_from_slice(&(pos as u64).to_le_bytes());
+            for j in 0..STAGES * pos.min(WINDOW) * DIM {
+                let value = ((j * 23 + index * 13) % 211) as f32 / 83. - 1.;
+                bytes.extend_from_slice(&half::bf16::from_f32(value).to_bits().to_le_bytes());
+            }
+            states.push(DraftAttention::restore(&mut rt, pos, &bytes)?);
+        }
+        let spans: Vec<_> = states
+            .iter()
+            .zip(layout)
+            .map(|(attention, (pos, width))| ProposalSpan {
+                attention,
+                pos,
+                width,
+            })
+            .collect();
+        let rows: usize = spans.iter().map(|s| s.width).sum();
+        let x = rt.to_device(
+            &(0..rows * HIDDEN)
+                .map(|j| ((j * 71) % 113) as f32 / 37. - 1.)
+                .collect::<Vec<_>>(),
+        )?;
+        let angles = proposal_angles(&mut rt, &spans)?;
+        let short = rt.buffer(1)?;
+        assert!(proposal_attention(&mut rt, 0, &x, &spans, &short).is_err());
+        for stage in 0..STAGES {
+            let y = proposal_attention(&mut rt, stage, &x, &spans, &angles)?;
+            let combined = rt.to_host(&y)?;
+            let mut offset = 0;
+            for span in &spans {
+                let one = std::slice::from_ref(span);
+                let a = proposal_angles(&mut rt, one)?;
+                let n = span.width * HIDDEN;
+                let local = rt.slice(&x, offset, n)?;
+                let y = proposal_attention(&mut rt, stage, &local, one, &a)?;
+                let serial = rt.to_host(&y)?;
+                assert!(
+                    combined[offset..offset + n]
+                        .iter()
+                        .zip(serial)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "joint DSpark stage {stage} changed an output at offset {offset}"
+                );
+                offset += n;
+            }
         }
         Ok(())
     }

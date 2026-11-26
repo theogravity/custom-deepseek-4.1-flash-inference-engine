@@ -196,6 +196,12 @@ pub struct Runtime {
 unsafe impl Send for Runtime {}
 impl Runtime {
     pub fn open(path: &Path, devices: [i32; 2]) -> Result<Self> {
+        Self::open_with_packing(path, devices, packed_dense())
+    }
+    pub(crate) fn uses_packed_weights(&self) -> bool {
+        self.packed
+    }
+    pub(crate) fn open_with_packing(path: &Path, devices: [i32; 2], packed: bool) -> Result<Self> {
         ensure!(
             devices[0] != devices[1],
             "two distinct CUDA devices required"
@@ -224,7 +230,7 @@ impl Runtime {
             target_prefill: false,
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
-            packed: packed_dense(),
+            packed,
             parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
             vectors: HashMap::new(),

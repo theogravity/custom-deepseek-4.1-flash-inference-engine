@@ -1,6 +1,6 @@
 //! Live DSpark images contain exactly the initialized chronological KV rows.
 //! During sparse prefill the observed interval may end before the target's
-//! committed position. The remaining physical slots and RoPE cache are scratch.
+//! committed position. The remaining physical slots are scratch.
 use super::*;
 
 const MAGIC: &[u8; 8] = b"DS4DRS01";
@@ -68,9 +68,6 @@ impl DraftAttention {
     pub(crate) fn release_device(self) {
         for ring in self.rings.into_iter().flatten() {
             ring.release();
-        }
-        if let Some((_, _, freqs)) = self.proposal_freqs {
-            freqs.release();
         }
     }
 
@@ -231,7 +228,7 @@ mod tests {
         ] {
             let bytes = image(pos, start, end, &trace);
             rt.layer(0)?;
-            let (mut state, scores) = DraftAttention::decode_rotation(&mut rt, pos, &bytes)?;
+            let (state, scores) = DraftAttention::decode_rotation(&mut rt, pos, &bytes)?;
             assert_eq!(scores.as_deref(), Some(&trace[..]));
             assert_eq!(
                 state.ready(pos),
@@ -252,9 +249,6 @@ mod tests {
                     }
                 }
             }
-            // Cached angles are reconstructible and can be freed with the ring.
-            rt.layer(39)?;
-            state.proposal_freqs = Some((pos, 2, angles(&mut rt, pos, 2)?));
             rt.layer(0)?;
             assert_eq!(state.encode_rotation(&rt, pos, scores.as_deref())?, bytes);
             state.release_device();

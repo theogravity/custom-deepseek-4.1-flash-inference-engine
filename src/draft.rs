@@ -1,7 +1,7 @@
 //! DSpark's noise block is refined by three MTP layers, then a rank-256
 //! Markov head conditions each proposed token on the one proposed before it.
 use crate::{
-    draft_attention::DraftAttention,
+    draft_attention::{proposal_angles, proposal_attention, DraftAttention, ProposalSpan},
     model::residual,
     moe,
     runtime::{Dev, Runtime},
@@ -107,25 +107,19 @@ pub(crate) fn propose_many(
     let rows = noise.len();
     let mut h = residual::embed(rt, &noise)?;
     let mut mix = residual::initial_mix(rt, rows)?;
+    let spans: Vec<_> = requests
+        .iter()
+        .map(|r| ProposalSpan {
+            attention: &r.state.attention,
+            pos: r.pos,
+            width: r.width,
+        })
+        .collect();
+    let freqs = proposal_angles(rt, &spans)?;
     for stage in 0..3 {
         let stem = format!("mtp.{stage}");
         let x = residual::prepare(rt, &stem, "attn", &h, &mut mix, rows)?;
-        let y = if let [r] = requests {
-            r.state.attention.forward(rt, stage, &x, r.pos, r.width)?
-        } else {
-            let mut all = rt.buffer(x.len())?;
-            let mut offset = 0;
-            for r in requests.iter_mut() {
-                let part = rt.slice(&x, offset, r.width * crate::model::DIM)?;
-                let y = r
-                    .state
-                    .attention
-                    .forward(rt, stage, &part, r.pos, r.width)?;
-                rt.copy_into(&mut all, offset, &y)?;
-                offset += y.len();
-            }
-            all
-        };
+        let y = proposal_attention(rt, stage, &x, &spans, &freqs)?;
         residual::expand(rt, &mut h, &y, &mix, rows)?;
         drop((x, y));
         let x = residual::prepare(rt, &stem, "ffn", &h, &mut mix, rows)?;
