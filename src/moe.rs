@@ -573,12 +573,11 @@ fn group_shape(routes: &[Route], max_experts: usize) -> (usize, usize) {
         })
 }
 
-fn split_count(jobs: usize, verification: bool) -> i32 {
-    if verification || jobs < 32 {
-        8
-    } else {
-        2
-    }
+// Prefix snapshots must reproduce the same arithmetic at any physical slot limit.
+fn logical_plan(routes: &[Route], verification: bool) -> (usize, i32) {
+    let (rows, jobs) = group_shape(routes, MAX_GROUP_EXPERTS);
+    let splits = if verification || jobs < 32 { 8 } else { 2 };
+    (rows, splits)
 }
 
 struct Placement {
@@ -716,9 +715,6 @@ fn forward<const E: usize, const K: usize>(
     let device = rt.moe_cache.device(rt.device)?;
     let mut primary = Placement::prepare(device, layer, local, false)?;
     let report = device.metrics;
-    // A user's slot limit also sets the logical group boundary. Splitting a
-    // physical partition further for VRAM pressure does not change split-K.
-    let max_experts = MAX_GROUP_EXPERTS.min(device.limit);
     let mut peer = if let Some(work) = &peer_work {
         let buffers = if compact.is_some() {
             let required = x.len() + remote.len() * HIDDEN;
@@ -762,8 +758,10 @@ fn forward<const E: usize, const K: usize>(
     };
     let (mut begin, mut ni, mut pi) = (0, 0, 0);
     while begin < routes.len() {
-        let (count, jobs) = group_shape(&routes[begin..], max_experts);
-        let splits = split_count(jobs, rt.verification && matches!(layer, Layer::Backbone(_)));
+        let (count, splits) = logical_plan(
+            &routes[begin..],
+            rt.verification && matches!(layer, Layer::Backbone(_)),
+        );
         let nr = if let Some(peer) = &mut peer {
             let n = routes[begin..begin + count]
                 .iter()
@@ -875,18 +873,20 @@ mod tests {
                 weight: 1.,
             })
             .collect();
-        let (rows, jobs) = group_shape(&routes, MAX_GROUP_EXPERTS);
-        assert_eq!((rows, jobs), (40, 40));
+        assert_eq!(logical_plan(&routes, false), (40, 2));
+        assert_eq!(logical_plan(&routes, true), (40, 8));
         let owned: Vec<_> = routes
             .iter()
             .copied()
             .filter(|r| r.expert % 2 == 1)
             .collect();
-        assert_eq!(group_shape(&owned, 8), (8, 8));
-        // The physical subset would independently choose eight splits; all
-        // subsets must receive the logical group's two splits.
-        assert_eq!(split_count(jobs, false), 2);
-        assert_eq!(split_count(jobs, true), 8);
+        for limit in [1, 8, MAX_GROUP_EXPERTS] {
+            let (n, _) = group_shape(&owned, limit);
+            assert_eq!(n, limit.min(owned.len()));
+            // An isolated physical subset would choose eight splits. Dispatch
+            // uses the full group’s two splits at every VRAM/cache limit.
+            assert_eq!(logical_plan(&owned[..n], false), (n, 8));
+        }
     }
 
     #[test]
