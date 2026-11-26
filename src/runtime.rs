@@ -401,7 +401,13 @@ impl Runtime {
             })
             .collect()
     }
-    pub fn sample(&mut self, logits: &Dev, rows: usize, temperature: f32) -> Result<Vec<u32>> {
+    pub fn sample(
+        &mut self,
+        logits: &Dev,
+        rows: usize,
+        temperature: f32,
+        seed: u64,
+    ) -> Result<Vec<u32>> {
         const VOCAB: usize = 129280;
         ensure!(
             rows > 0
@@ -431,7 +437,7 @@ impl Runtime {
                     rows as i32,
                     VOCAB as i32,
                     temperature,
-                    rand::random(),
+                    seed,
                 )
             }
         };
@@ -697,6 +703,26 @@ impl Drop for Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an inference GPU"]
+    fn failed_request_allocation_leaves_next_cuda_launch_clean() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> i32;
+            fn cudaPeekAtLastError() -> i32;
+        }
+        let dev = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        checked(unsafe { ds_set_device(dev) })?;
+        let (mut free, mut total) = (0, 0);
+        assert_eq!(unsafe { cudaMemGetInfo(&mut free, &mut total) }, 0);
+        let mut p = ptr::null_mut();
+        assert_ne!(unsafe { ds_alloc_f32(dev, &mut p, total / 4 + 1) }, 0);
+        assert!(p.is_null());
+        assert_eq!(unsafe { cudaPeekAtLastError() }, 0);
+        checked(unsafe { ds_alloc_f32(dev, &mut p, 1) })?;
+        unsafe { ds_free(dev, p.cast()) };
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]

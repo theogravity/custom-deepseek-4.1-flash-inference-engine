@@ -8,6 +8,7 @@ mod model;
 mod moe;
 mod prefix;
 mod runtime;
+mod swap;
 mod weights;
 
 use anyhow::{anyhow, ensure, Context, Result};

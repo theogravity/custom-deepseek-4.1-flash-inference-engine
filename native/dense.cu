@@ -188,7 +188,15 @@ __global__ void prepare(const float *x, __nv_bfloat16 *y, size_t n,
 }
 extern "C" int ds_alloc_f32(int device, float **out, size_t n) {
   CUDA(cudaSetDevice(device));
-  CUDA(cudaMalloc(out, n * sizeof(float)));
+  auto rc = cudaMalloc(out, n * sizeof(float));
+  if (rc != cudaSuccess) {
+    // An out-of-memory restore can release its request and keep serving peers.
+    if (rc == cudaErrorMemoryAllocation && cudaPeekAtLastError() == rc)
+      cudaGetLastError();
+    snprintf(error_message, sizeof(error_message), "cudaMalloc(%zu bytes): %s",
+             n * sizeof(float), cudaGetErrorString(rc));
+    return -1;
+  }
   return 0;
 }
 extern "C" int ds_copy_f32(int device, float *dst, const float *src, size_t n,

@@ -4,8 +4,10 @@ use crate::{
     engram::Engram,
     prefix::PrefixCache,
     runtime::{Dev, Runtime},
+    swap::{SwapHandle, SwapStore},
 };
 use anyhow::{bail, ensure, Context, Result};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -77,10 +79,6 @@ fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
 // Rejected suffix samples are discarded with the corresponding target state.
 struct Scores(Vec<u32>);
 impl Scores {
-    fn read(rt: &mut Runtime, target: &Target, rows: usize, temperature: f32) -> Result<Self> {
-        let logits = target.logits.as_ref().context("missing target scores")?;
-        Ok(Self(rt.sample(logits, rows, temperature)?))
-    }
     fn sample(&self, row: usize) -> Result<u32> {
         self.0.get(row).copied().context("missing target sample")
     }
@@ -163,6 +161,8 @@ pub(crate) struct Session {
     pos: usize,
     limit: usize,
     temperature: f32,
+    rng: Option<StdRng>,
+    suspended: Option<SwapHandle>,
     cache: AttentionState,
     draft: Option<DraftState>,
     lookup: prompt_lookup::PromptLookup,
@@ -186,6 +186,16 @@ impl Session {
     /// Number of committed target input positions currently in this request's KV.
     pub(crate) fn processed_tokens(&self) -> usize {
         self.pos
+    }
+
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended.is_some()
+    }
+
+    fn scores(&mut self, rt: &mut Runtime, target: &Target, rows: usize) -> Result<Scores> {
+        let logits = target.logits.as_ref().context("missing target scores")?;
+        let seed = self.rng.as_mut().map_or(0, RngCore::next_u64);
+        Ok(Scores(rt.sample(logits, rows, self.temperature, seed)?))
     }
 
     pub(crate) fn is_prefill(&self) -> bool {
@@ -214,6 +224,21 @@ struct Proposal {
     source: ProposalSource,
     tokens: Vec<u32>,
     learned_width: usize,
+}
+
+fn rotation_payload(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
+    let (body, footer) = bytes.split_at(bytes.len().saturating_sub(16));
+    ensure!(
+        footer.len() == 16 && &footer[8..] == b"DS4LIVE1",
+        "invalid live session payload"
+    );
+    let draft_len: usize = u64::from_le_bytes(footer[..8].try_into()?).try_into()?;
+    let target_len = body
+        .len()
+        .checked_sub(draft_len)
+        .context("invalid live draft size")?;
+    ensure!(target_len >= 16, "missing live target cache");
+    Ok(body.split_at(target_len))
 }
 
 struct DecodePlan {
@@ -380,6 +405,8 @@ impl Model {
             pos,
             limit,
             temperature,
+            rng: (temperature > 0.).then(StdRng::from_entropy),
+            suspended: None,
             cache,
             draft,
             lookup,
@@ -393,13 +420,74 @@ impl Model {
         })
     }
 
+    /// Persist committed state before releasing either GPU cache. A failed
+    /// backing allocation leaves this request runnable in its original slot.
+    pub(crate) fn suspend(&mut self, session: &mut Session, backing: &SwapStore) -> Result<()> {
+        ensure!(!session.finished, "cannot suspend a finished request");
+        if session.is_suspended() {
+            return Ok(());
+        }
+        let draft = session
+            .draft
+            .as_ref()
+            .map(|d| d.rotation_snapshot(&mut self.rt, session.pos))
+            .transpose()?;
+        let draft = draft.as_deref().unwrap_or_default();
+        let mut payload = session
+            .cache
+            .encode_snapshot_with_tail(session.pos, draft.len() + 16)?;
+        payload.extend_from_slice(draft);
+        payload.extend_from_slice(&(draft.len() as u64).to_le_bytes());
+        payload.extend_from_slice(b"DS4LIVE1");
+        let handle = backing.put(payload)?;
+        session.suspended = Some(handle);
+        session.cache = AttentionState::default();
+        if let Some(draft) = session.draft.take() {
+            draft.release_device();
+        }
+        Ok(())
+    }
+
+    /// Rebuild both caches at the recorded position without generating or
+    /// sampling. Keep the handle until both caches are ready to commit.
+    pub(crate) fn resume(&mut self, session: &mut Session) -> Result<()> {
+        let Some(handle) = session.suspended.as_ref() else {
+            return Ok(());
+        };
+        let bytes = handle.read()?;
+        let (target, draft) = rotation_payload(&bytes)?;
+        let cache = AttentionState::restore_rotation(
+            target,
+            session.pos,
+            session.prompt_len,
+            session.prompt_len + session.limit,
+        )?;
+        let draft = if draft.is_empty() {
+            None
+        } else {
+            Some(DraftState::restore_rotation(
+                &mut self.rt,
+                session.pos,
+                draft,
+            )?)
+        };
+        session.cache = cache;
+        session.draft = draft;
+        session.suspended = None;
+        Ok(())
+    }
+
     /// Advance each admitted request by one prefill chunk or one verification
     /// round. Each result corresponds to its input slot. Drop failed sessions.
     pub(crate) fn step_batch(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
         let mut results: Vec<_> = (0..sessions.len()).map(|_| None).collect();
         let mut decoding = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate() {
-            if session.finished {
+            if session.is_suspended() {
+                results[index] = Some(Err(anyhow::anyhow!(
+                    "suspended request must resume before execution"
+                )));
+            } else if session.finished {
                 results[index] = Some(Ok(Step {
                     finished: true,
                     ..Step::default()
@@ -530,7 +618,7 @@ impl Model {
         if !last {
             return Ok(Step::default());
         }
-        let token = Scores::read(&mut self.rt, &target, 1, session.temperature)?.sample(0)?;
+        let token = session.scores(&mut self.rt, &target, 1)?.sample(0)?;
         eprintln!(
             "prefill tokens={} reused={} seconds={:.3}",
             session.prompt_len,
@@ -625,8 +713,8 @@ impl Model {
         target: Target,
     ) -> Result<Step> {
         let pos = session.pos;
+        let scores = session.scores(&mut self.rt, &target, plan.rows)?;
         let proposed = &session.ids[pos + 1..];
-        let scores = Scores::read(&mut self.rt, &target, plan.rows, session.temperature)?;
         let (accepted, next) = verify_proposals(proposed, |row| scores.sample(row))?;
         let committed = accepted + 1;
         if plan.rows > 1 {
@@ -659,6 +747,131 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_payload_checks_trailer_and_lengths() {
+        let target = [42; 16];
+        let mut bytes = target.to_vec();
+        bytes.extend_from_slice(b"draft");
+        bytes.extend_from_slice(&5u64.to_le_bytes());
+        bytes.extend_from_slice(b"DS4LIVE1");
+        assert_eq!(
+            rotation_payload(&bytes).unwrap(),
+            (&target[..], &b"draft"[..])
+        );
+        for short in [
+            &bytes[..0],
+            &bytes[..8],
+            &bytes[1..],
+            &bytes[..bytes.len() - 1],
+        ] {
+            assert!(rotation_payload(short).is_err());
+        }
+        let len = bytes.len();
+        bytes[len - 16..len - 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(rotation_payload(&bytes).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and CUDA_VISIBLE_DEVICES set to both inference GPUs"]
+    fn cuda_live_session_rotates_before_prefill_mid_prompt_and_during_sampled_decode() -> Result<()>
+    {
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "mask both inference GPUs"
+        );
+        let pack = std::path::PathBuf::from(std::env::var("DS4_TEST_PACK")?);
+        let tok = Tokenizer::from_file(pack.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut plain = tok.clone();
+        plain.with_added_vocabulary(tokenizers::AddedVocabulary::new());
+        let req = serde_json::json!({
+            "messages":[{"role":"user","content": format!(
+                "Transcript {}. Print the numbers from one through one hundred, one number per line. Start immediately with one.", rand::random::<u64>()
+            )}],"reasoning_effort":"none"});
+        let (chat, _, _) = crate::chat::render(&req)?;
+        let ids = chat.encode(&tok, &plain)?;
+        let mut model = Model::open(&pack, &tok, [0, 1], 256, 8)?;
+        model.spec_k = 4; // The base pack also ships its three learned MTP stages.
+        let mut reference = model.start_request(ids.clone(), 16, 0.5)?;
+        let mut rotated = model.start_request(ids, 16, 0.5)?;
+        reference.rng = Some(StdRng::seed_from_u64(194));
+        rotated.rng = reference.rng.clone();
+        let dir = tempfile::tempdir()?;
+        let ram = SwapStore::new(32 << 20, 0, None)?;
+        let disk = SwapStore::new(0, 32 << 20, Some(dir.path().to_owned()))?;
+        let tiny = SwapStore::new(1, 0, None)?;
+        let (mut before, mut mid, mut decoding) = (false, false, false);
+        let mut ticks = 0;
+        while !reference.finished {
+            let pos = rotated.pos;
+            before |= pos == 0;
+            mid |= pos > 0 && rotated.is_prefill();
+            decoding |= !rotated.is_prefill();
+            let target = rotated.cache.encode_snapshot(pos)?;
+            let draft = rotated
+                .draft
+                .as_ref()
+                .unwrap()
+                .rotation_snapshot(&mut model.rt, pos)?;
+            if ticks < 2 {
+                assert!(model.suspend(&mut rotated, &tiny).is_err());
+                assert!(!rotated.is_suspended() && rotated.draft.is_some());
+            }
+            let store = if ticks % 2 == 0 { &ram } else { &disk };
+            model.suspend(&mut rotated, store)?;
+            assert!(rotated.is_suspended() && rotated.draft.is_none());
+            assert_eq!(
+                rotated.cache.encode_snapshot(0)?,
+                AttentionState::default().encode_snapshot(0)?
+            );
+            if ticks == 0 {
+                // A malformed drafter can fail after decoding a valid target.
+                // Preserve the failed handle and keep all state unpublished.
+                let saved = rotated.suspended.take().unwrap();
+                let mut broken = saved.read()?.to_vec();
+                broken[target.len()] ^= 1;
+                rotated.suspended = Some(store.put(broken)?);
+                assert!(model.resume(&mut rotated).is_err());
+                assert!(rotated.is_suspended() && rotated.draft.is_none());
+                assert_eq!(
+                    rotated.cache.encode_snapshot(0)?,
+                    AttentionState::default().encode_snapshot(0)?
+                );
+                rotated.suspended = Some(saved);
+            }
+            let mut both = model
+                .step_batch(&mut [&mut rotated, &mut reference])
+                .into_iter();
+            assert!(both.next().unwrap().is_err());
+            let expected = both.next().unwrap()?;
+            assert_eq!(rotated.processed_tokens(), pos);
+            model.resume(&mut rotated)?;
+            assert_eq!(rotated.cache.encode_snapshot(pos)?, target);
+            assert_eq!(
+                rotated
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .rotation_snapshot(&mut model.rt, pos)?,
+                draft
+            );
+            assert_eq!(store.stats().ram_bytes + store.stats().disk_bytes, 0);
+            let got = model.step_batch(&mut [&mut rotated]).pop().unwrap()?;
+            assert_eq!(
+                (got.tokens, got.eos, got.finished),
+                (expected.tokens, expected.eos, expected.finished)
+            );
+            assert_eq!(
+                (rotated.pos, rotated.emitted, &rotated.ids),
+                (reference.pos, reference.emitted, &reference.ids)
+            );
+            ticks += 1;
+        }
+        assert!(before && mid && decoding);
+        assert!(ram.stats().ram_reads > 0 && disk.stats().disk_reads > 0);
+        Ok(())
+    }
+
+    #[test]
     fn independent_sessions_emit_verified_tokens_and_count_eos_once() {
         fn sequence(limit: usize) -> Session {
             let ids = vec![5, 6, 7];
@@ -667,6 +880,8 @@ mod tests {
                 pos: ids.len(),
                 limit,
                 temperature: 0.,
+                rng: None,
+                suspended: None,
                 cache: AttentionState::default(),
                 draft: None,
                 lookup: prompt_lookup::PromptLookup::new(&ids, Default::default()),
