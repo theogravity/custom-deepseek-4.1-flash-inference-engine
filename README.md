@@ -39,7 +39,10 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | Setting | Deployed value | Purpose |
 |---|---|---|
 | `DS4_DRAFTER` | `code` | `released` selects the pack's original weights, `none` disables learned drafting |
-| `DS4_MAX_SEQS` | 6 | Maximum active requests, from 1 through 6 |
+| `DS4_MAX_SEQS` | 6 | Maximum GPU-resident requests, from 1 through 6 |
+| `DS4_MAX_LIVE_SEQS` | 32 | Maximum admitted requests sharing the GPU slots, configurable up to 64 |
+| `DS4_SWAP_QUANTUM_STEPS` | 32 | Number of prefill or decode steps a runnable request receives before it can yield a GPU slot |
+| `DS4_SWAP_RAM_MIB`, `DS4_SWAP_DISK_MIB` | 49152, 131072 | On-demand host RAM and NVMe budgets for suspended live requests |
 | `DS4_BATCH_DRAFT` | 1 | Evaluate the learned drafter for multiple ready requests together |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
@@ -62,7 +65,15 @@ The native prefix cache saves target attention state and the drafter's last 128 
 
 The worker serves up to **six concurrent text requests of 524,288 tokens each**, for **3,145,728 total context positions**. Input and generated output share each request's window. Each request has independent sliding-window KV, compressed KV, drafter state and sampling. At full size the six sets of compressed target KV and sliding windows occupy 3,252 MiB on the first inference GPU and 2,178 MiB on the second. Drafter windows, index buffers, activations, model weights and expert slots use additional VRAM. The 2 GiB RAM and 64 GiB disk prefix tiers store reusable snapshots separately.
 
-The scheduler advances each runnable prompt by up to 64 input tokens per round and batches ready requests for drafting and target verification. A small request can start decoding while another is ingesting a long prompt. Eight additional requests can queue. When the queue is full, new requests receive HTTP 429. The authenticated `/metrics` endpoint exposes active, prefilling and decoding requests, their total processed positions, and successful six-request target passes.
+The scheduler advances each GPU-resident runnable prompt by up to 64 input tokens per round and batches ready requests for drafting and target verification. A small request can start decoding while another is ingesting a long prompt. At the default settings, up to 32 requests can participate in rotation and another 32 can wait in the bounded intake queue. A full intake queue returns HTTP 429. The authenticated `/metrics` endpoint exposes resident, waiting and suspended requests, processed GPU positions, and successful six-request target passes.
+
+### Live KV offload
+
+When another runnable client needs a GPU slot, the worker saves one request's committed target KV and learned drafter state. It keeps that request's sampler, token history, stream and pending output alive. It releases the GPU buffers and lets the waiting client advance. On the next turn the suspended request resumes at the same token position. With six or fewer runnable clients the worker can serve each on a resident slot.
+
+The backing store places each image in RAM if space is available, then uses an anonymous file on the NVMe drive mounted at `/prefix/live`. It checks disk writeback before releasing the GPU state and verifies the checksum on restore. Completion and cancellation release the backing space. These files belong to ongoing connections and disappear when their owner exits. Reusable prompt snapshots survive a service restart in the separate prefix cache.
+
+The live tiers use the original LMCache budgets of **48 GiB RAM and 128 GiB disk**. With the separate prefix tier budgets, the combined payload limits are 50 GiB RAM and 192 GiB disk. A full 524,288-position suspended target image is about 900 MiB, plus drafter state. GPU staging, live token histories and the operating system's reclaimable file cache use additional host memory. If both live tiers fill, resident requests can finish and release their slots. The `swap` object in `/metrics` reports charged/peak bytes, reads, writes and failures for the two tiers; `rotations` and `resumes` count successful slot changes.
 
 The server exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both chat APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The Rust profile serves text. The original recipe also supports vision.
 
@@ -77,6 +88,7 @@ python3 tools/code_speed.py --rounds 7
 python3 tools/code_speed.py --rounds 7 --tokens 3000 --edit-source ../model-cli/internal/selfupdate/selfupdate.go
 python3 tools/six_streams.py --output 256 --rounds 7
 python3 tools/six_streams.py --input 524160 --output 128 --rounds 2 --seed 417129047
+python3 tools/kv_rotation.py --agents 8 --input 12000 --output 512 --expect-tier ram
 ```
 
 `code_speed.py` sends one request at a time, with reasoning disabled and temperature zero. It consumes the SSE stream, uses the engine's completion token count and measures from first to last visible content. The benchmark reports first-token latency separately and excludes one warm-up per prompt. Each short new-code prompt fits inside a single prefill chunk. Source edits can use cached prefix state and source-token proposals. `six_streams.py` releases six clients together, checks output and completion IDs separately, and measures the interval when all six streams are producing output. Its aggregate decode rate uses the earliest first content and latest last content across the entire wave. Its wall rate also includes prompt ingestion. A fresh seed gives the six long histories distinct contents from the beginning.
