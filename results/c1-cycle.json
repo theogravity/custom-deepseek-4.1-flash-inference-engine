@@ -1,0 +1,865 @@
+{
+  "checkpoint": "checkpoint-2026-11-26-c2-01-repetition",
+  "decision": "Keep the two-period single-client proposal. The 25.6k edit gain repeated (+5.55%, +4.88%). The 404k continuation after edits lost 1.23% and 1.96%, while fresh long-only measured +0.43%. The cause of the workload-order difference is unresolved.",
+  "suite": "One warm-up and six warm waves per workload on a freshly started process for each leg. Edit first, then coding.",
+  "devices": "host GPUs 1, 2; RTX PRO 6000 Blackwell, 375 W per GPU, 225 W CPU socket",
+  "edit": "25,625 input, 1,500 output, published first-token-to-end metric including reasoning; deterministic edit of functions 50\u201390.",
+  "long": "404,151 input, 512 output, first-to-last visible text excluding first token; frozen coding history.",
+  "gpu_tests_passed": 90,
+  "base_profile": "compose.yml + compose.c1-optimized.yml; DS4_BATCH_TOPK=1, DS4_EXPERT_EVICTION=lfu, DS4_C1_OUTPUT_CONSENSUS=1, DS4_PROMPT_LOOKUP=1, DS4_OUTPUT_LOOKUP=single, DS4_ADAPTIVE_LOOKUP=1, DS4_LOOKUP_K=128. Each leg additionally sets the flags in config.",
+  "config": [
+    [
+      "off-a",
+      "ds4-flash-rs:c1-cycle",
+      {
+        "DS4_EXTEND_REPETITION": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "on",
+      "ds4-flash-rs:c1-cycle",
+      {
+        "DS4_EXTEND_REPETITION": "1"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "off-b",
+      "ds4-flash-rs:c1-cycle",
+      {
+        "DS4_EXTEND_REPETITION": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ]
+  ],
+  "legs": {
+    "off-a": {
+      "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+      "env": {
+        "DS4_EXTEND_REPETITION": "0"
+      },
+      "edit": {
+        "rates": [
+          366.01752788569286,
+          365.82017046656813,
+          366.4176842953413,
+          365.80195421496546,
+          366.69777301898495,
+          366.49106534058035
+        ],
+        "median": 366.21760609051705,
+        "whole": 360.7130208183154,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "8eec311cbda498e1060627eef6797d6eac367201e6bf2d320644c2a2046c0079",
+        "spec_including_warmup": {
+          "learned": [
+            1050,
+            4578,
+            2975
+          ],
+          "lookup": [
+            175,
+            7042,
+            6293
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          255.92952652322418,
+          255.5490329590068,
+          249.97316115025745,
+          256.97358017426734,
+          255.12759153063027,
+          255.94673467782223
+        ],
+        "median": 255.7392797411155,
+        "whole": 196.57244590242277,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "1c4008da2b7596bdccd7341eb05f20dce42ba305a817b2b6b23fe8a2e01fb982",
+        "spec_including_warmup": {
+          "learned": [
+            602,
+            3794,
+            2968
+          ]
+        }
+      }
+    },
+    "on": {
+      "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+      "env": {
+        "DS4_EXTEND_REPETITION": "1"
+      },
+      "edit": {
+        "rates": [
+          386.8789027664914,
+          387.3307519558723,
+          387.45067273663386,
+          384.35456318543004,
+          384.65826917979314,
+          383.6123386791565
+        ],
+        "median": 385.7685859731423,
+        "whole": 379.61168026071635,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "a3388ed9cb2a7d79b1381f83356c2991ea6cd9aac75b21dc49864d5cec79ebd1",
+        "spec_including_warmup": {
+          "learned": [
+            1043,
+            4557,
+            2954
+          ],
+          "lookup": [
+            112,
+            7105,
+            6384
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          252.52752015192456,
+          252.02850903719093,
+          251.88548808018083,
+          253.79576272297675,
+          253.33124539489435,
+          253.4673838373712
+        ],
+        "median": 252.92938277340946,
+        "whole": 194.43223598726865,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "6be312620ce2681cbb331f605667761f78e1c8e7a36c661fc543f92541fd2ce3",
+        "spec_including_warmup": {
+          "learned": [
+            602,
+            3794,
+            2968
+          ]
+        }
+      }
+    },
+    "off-b": {
+      "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+      "env": {
+        "DS4_EXTEND_REPETITION": "0"
+      },
+      "edit": {
+        "rates": [
+          365.17629231901674,
+          365.0366889764477,
+          364.53866682866806,
+          364.9149492742039,
+          364.0050268683004,
+          364.6173914339334
+        ],
+        "median": 364.76617035406866,
+        "whole": 359.16516534058917,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "fccf0273e5f9c43589a35d7db6fef28ddd4ba01f2331220184207c8a0d835425",
+        "spec_including_warmup": {
+          "learned": [
+            1050,
+            4578,
+            2975
+          ],
+          "lookup": [
+            175,
+            7042,
+            6293
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          258.11194198634337,
+          256.0676745068086,
+          256.2418808469766,
+          256.8379231921197,
+          255.89182142746574,
+          256.64456379113915
+        ],
+        "median": 256.4432223190579,
+        "whole": 197.70487477014387,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "baca3ed37b32843ddfe63c15294d6119ec5109909282a090166d94bac70803a2",
+        "spec_including_warmup": {
+          "learned": [
+            602,
+            3794,
+            2968
+          ]
+        }
+      }
+    }
+  },
+  "repeat-summary": {
+    "config": [
+      [
+        "repeat-off-a",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        [
+          "edit",
+          "long"
+        ],
+        6
+      ],
+      [
+        "repeat-on",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "1"
+        },
+        [
+          "edit",
+          "long"
+        ],
+        6
+      ],
+      [
+        "repeat-off-b",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        [
+          "edit",
+          "long"
+        ],
+        6
+      ]
+    ],
+    "legs": {
+      "repeat-off-a": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        "edit": {
+          "rates": [
+            366.08570517567614,
+            364.74958015100356,
+            365.25519378117014,
+            367.3213741367905,
+            366.18105887763903,
+            365.24853311909715
+          ],
+          "median": 365.67044947842317,
+          "whole": 360.35611333134386,
+          "hashes": [
+            [
+              "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+              "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+              "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+            ]
+          ],
+          "raw_sha256": "54d60e3252f2e7a30fe46a2d1c9e30e02530a4725a40169614a1f5ca510fd766",
+          "spec_including_warmup": {
+            "learned": [
+              1050,
+              4578,
+              2975
+            ],
+            "lookup": [
+              175,
+              7042,
+              6293
+            ]
+          }
+        },
+        "long": {
+          "rates": [
+            256.117973869584,
+            256.4787331046631,
+            255.65257473555914,
+            256.6956793614145,
+            256.3937589020715,
+            257.3093661421397
+          ],
+          "median": 256.4362460033673,
+          "whole": 197.19246351515147,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "65758f3deb9e60a1614b3c4b7ca78878217a5f8aa97df1302efa2759c4acb400",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      },
+      "repeat-on": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "1"
+        },
+        "edit": {
+          "rates": [
+            382.75847095375764,
+            383.3886862122335,
+            382.8229761285048,
+            383.26414686945094,
+            383.36109768231364,
+            383.50999327067694
+          ],
+          "median": 383.3126222758823,
+          "whole": 377.3626686943958,
+          "hashes": [
+            [
+              "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+              "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+              "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+            ]
+          ],
+          "raw_sha256": "9b307443e1bdee70ec633cb17c53080b3690ef7c421b77a276ace43fdd9cf82e",
+          "spec_including_warmup": {
+            "learned": [
+              1043,
+              4557,
+              2954
+            ],
+            "lookup": [
+              112,
+              7105,
+              6384
+            ]
+          }
+        },
+        "long": {
+          "rates": [
+            251.71447358339088,
+            251.25362677527158,
+            249.6245566065509,
+            251.886596968083,
+            250.98405777794324,
+            253.38634787990844
+          ],
+          "median": 251.48405017933123,
+          "whole": 194.18156133937998,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "5b04ee05b7f16cd051f9dbfa3d7424fd05a17538c76b28130e9aea8753b85f3f",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      },
+      "repeat-off-b": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        "edit": {
+          "rates": [
+            366.13186544145316,
+            364.1172097619412,
+            365.48083492420454,
+            365.31828183219784,
+            365.2524846616546,
+            364.88954879595786
+          ],
+          "median": 365.28538324692624,
+          "whole": 359.85115762940006,
+          "hashes": [
+            [
+              "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+              "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+              "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+            ]
+          ],
+          "raw_sha256": "8cf9758fecd2c419950fc22f9f21812f8b687520df1748598c08c2b2307a4227",
+          "spec_including_warmup": {
+            "learned": [
+              1050,
+              4578,
+              2975
+            ],
+            "lookup": [
+              175,
+              7042,
+              6293
+            ]
+          }
+        },
+        "long": {
+          "rates": [
+            257.2584930017843,
+            256.7136780910772,
+            256.6071593020797,
+            256.3545574034234,
+            256.14495480865503,
+            256.59806329866757
+          ],
+          "median": 256.6026113003736,
+          "whole": 197.36439667975324,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "1dd9ae559718e884719ffd5f3a551fee3be2098064e7c754334d8e95763f7519",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      }
+    }
+  },
+  "isolated-summary": {
+    "config": [
+      [
+        "isolated-off-a",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        [
+          "long"
+        ],
+        6
+      ],
+      [
+        "isolated-on",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "1"
+        },
+        [
+          "long"
+        ],
+        6
+      ],
+      [
+        "isolated-off-b",
+        "ds4-flash-rs:c1-cycle",
+        {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        [
+          "long"
+        ],
+        6
+      ]
+    ],
+    "legs": {
+      "isolated-off-a": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        "long": {
+          "rates": [
+            259.24915932787457,
+            259.2856804839274,
+            259.2734836538527,
+            258.0260307193617,
+            258.67288968391995,
+            259.2134230654429
+          ],
+          "median": 259.23129119665873,
+          "whole": 199.78855626727037,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "1e525229291387065086a8c4dea3304419db82c16a006e8dde0b54fe2d266c17",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      },
+      "isolated-on": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "1"
+        },
+        "long": {
+          "rates": [
+            259.93136290008096,
+            260.1364066217925,
+            260.4598134191907,
+            260.47146092921304,
+            260.3887166534155,
+            259.1348481055939
+          ],
+          "median": 260.262561637604,
+          "whole": 204.5569075562751,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "bdc719f7f9cfe83e8ea7be1e6fca3736a29bf5b052d77a97e78cdc401990cb71",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      },
+      "isolated-off-b": {
+        "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+        "env": {
+          "DS4_EXTEND_REPETITION": "0"
+        },
+        "long": {
+          "rates": [
+            258.50742706633645,
+            259.3878936766524,
+            259.37786495201254,
+            258.9619958527586,
+            258.99027781801055,
+            259.14416164822046
+          ],
+          "median": 259.0672197331155,
+          "whole": 200.08071046737558,
+          "hashes": [
+            "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+          ],
+          "raw_sha256": "f3ccbb7e86eedfac83f11980fbc09990ccd52e4c33dd95098fa40c5ea53c9ef0",
+          "spec_including_warmup": {
+            "learned": [
+              602,
+              3794,
+              2968
+            ]
+          }
+        }
+      }
+    }
+  },
+  "heldout-summary": {
+    "greedy_fixed_output": {
+      "game": [
+        23,
+        512,
+        "b2c86077f876b4c7e598de83dbf4e0f45c0fdd951bbfc3b0fc8ce91317b6e168",
+        "length"
+      ],
+      "parser": [
+        37,
+        512,
+        "1ce6fa7675f6d38a78e76d8848ed4d004d3deabd8a08e2ffac54fdeba6710dee",
+        "length"
+      ],
+      "cache": [
+        27,
+        512,
+        "6df96ea8819036b5ee773d53bc0dc8bdb2de5694f8125a43ce20c0ad4028c908",
+        "length"
+      ]
+    },
+    "by_leg": {
+      "off-a": {
+        "game": {
+          "rates": [
+            296.01681265790586,
+            293.5221773301116,
+            294.94360612048797,
+            294.8321230048345,
+            295.55435627938505,
+            294.3261964974345
+          ],
+          "median": 294.8878645626612
+        },
+        "parser": {
+          "rates": [
+            348.1681374308195,
+            348.29879987847175,
+            348.2374063865116,
+            349.57705725523294,
+            348.2723219158812,
+            347.573817859518
+          ],
+          "median": 348.25486415119644
+        },
+        "cache": {
+          "rates": [
+            328.6136761081346,
+            329.36681773179436,
+            326.7299187744443,
+            329.78074221597484,
+            328.52384475521035,
+            327.51664960102545
+          ],
+          "median": 328.56876043167244
+        },
+        "raw_sha256": "4580648c8d9975d365e5af28b392ae5f0afdce72183a124918fb0a75d6f1c0be"
+      },
+      "on": {
+        "game": {
+          "rates": [
+            297.0767304967539,
+            296.699177178195,
+            294.90596597818836,
+            293.6588744492761,
+            295.052396621541,
+            295.1194876906799
+          ],
+          "median": 295.08594215611043
+        },
+        "parser": {
+          "rates": [
+            349.7445599873699,
+            347.9011969098248,
+            347.69048524367116,
+            348.74407512567603,
+            348.3856251579143,
+            347.5712336426989
+          ],
+          "median": 348.1434110338696
+        },
+        "cache": {
+          "rates": [
+            328.4638087299551,
+            328.00526501953567,
+            326.89348100660175,
+            327.6835137974637,
+            327.41690242982264,
+            326.9786481309311
+          ],
+          "median": 327.5502081136432
+        },
+        "raw_sha256": "38833d6a2463a1dd1dbc2e464642733607b9342a15bb99a38816808dc4975949"
+      },
+      "off-b": {
+        "game": {
+          "rates": [
+            295.7220320165733,
+            296.26721731700314,
+            294.760790706064,
+            295.7739851221714,
+            295.6212842063596,
+            296.48259180016123
+          ],
+          "median": 295.74800856937236
+        },
+        "parser": {
+          "rates": [
+            348.9327690489157,
+            348.5799827991756,
+            348.9972417650533,
+            349.3797638115433,
+            349.2182061580537,
+            350.1131033198644
+          ],
+          "median": 349.10772396155346
+        },
+        "cache": {
+          "rates": [
+            329.4993498288965,
+            328.7148054072292,
+            329.7280158001934,
+            328.7543395261672,
+            329.66085442937475,
+            329.510625754904
+          ],
+          "median": 329.50498779190025
+        },
+        "raw_sha256": "a65f61840c21b3d4d8ae90a32e0b7c320bbbe698a4a410df19a6efedd57c0614"
+      }
+    },
+    "images": {
+      "off-a": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+      "on": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+      "off-b": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6"
+    }
+  },
+  "full-validation": {
+    "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+    "flags": {
+      "DS4_EXTEND_REPETITION": "1"
+    },
+    "retrieval": [
+      {
+        "context": "half",
+        "length": 266174,
+        "exact": true
+      },
+      {
+        "context": "full",
+        "length": 520362,
+        "exact": true
+      }
+    ],
+    "six_full_waves_matched": 3,
+    "eight_ram": {
+      "passed": true,
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "shared_register": true,
+      "peak_logical": 8,
+      "matched_serial_responses": 8,
+      "swap_delta": {
+        "ram_reads": 8,
+        "ram_writes": 8,
+        "disk_reads": 0,
+        "disk_writes": 0,
+        "read_failures": 0,
+        "write_failures": 0
+      },
+      "concurrent_seconds": 24.171590132988058
+    },
+    "eight_disk": {
+      "passed": true,
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "shared_register": true,
+      "peak_logical": 8,
+      "matched_serial_responses": 8,
+      "swap_delta": {
+        "ram_reads": 0,
+        "ram_writes": 0,
+        "disk_reads": 8,
+        "disk_writes": 8,
+        "read_failures": 0,
+        "write_failures": 0
+      },
+      "concurrent_seconds": 35.75959935900755
+    },
+    "memory": {
+      "context-needles": {
+        "min_free_mib": [
+          56268,
+          54982,
+          238109
+        ],
+        "peak_sampled_cgroup_anon_mib": 1938.640625
+      },
+      "six-full": {
+        "min_free_mib": [
+          26072,
+          23712,
+          232039
+        ],
+        "peak_sampled_cgroup_anon_mib": 7131.94921875
+      },
+      "eight-ram": {
+        "min_free_mib": [
+          26700,
+          24022,
+          234258
+        ],
+        "peak_sampled_cgroup_anon_mib": 5510.26171875
+      },
+      "eight-disk": {
+        "min_free_mib": [
+          26854,
+          23802,
+          236156
+        ],
+        "peak_sampled_cgroup_anon_mib": 3574.53125
+      }
+    },
+    "raw_sha256": {
+      "context-needles": "ef2c775daa15e618bcf79e2a662c560cf6dd4b6a7e98a0918b464397df49a2f7",
+      "six-full": "3543b64cf95ef94392ab9db4924ac7d85af67bc828f4ab9f6e56bfc2bd09df50",
+      "eight-ram": "6f22f7a5072a7f3332585a424ddf8b91b6ddbb756edc4de2d9e51328f3e5ad0c",
+      "eight-disk": "e1be69ffadf1f5fb49e54f059047a3500e53cd8946005cc48ad6185c6a352e61"
+    }
+  },
+  "detail": {
+    "image": "sha256:7f91ba0b2c1c67b97b4572e4bc3ef119185060ad85fac39d87771b8c385608a6",
+    "tested_release_sha256": "2b575d36023811744b44864930050748e29b83ab911e8fc057f29b305b8393ec",
+    "gpu_suite": {
+      "passed": 90,
+      "log_sha256": "aecb41df0b167f7e16c0b17306162bc430d995fb7d27cd92f82260c334c57287",
+      "host_devices": [
+        1,
+        2
+      ],
+      "effective_flags": {
+        "DS4_C1_OUTPUT_CONSENSUS": "1",
+        "DS4_EXPERT_EVICTION": "lfu",
+        "DS4_BATCH_TOPK": "1",
+        "DS4_PROMPT_LOOKUP": "1",
+        "DS4_OUTPUT_LOOKUP": "single",
+        "DS4_ADAPTIVE_LOOKUP": "1",
+        "DS4_LOOKUP_K": "128",
+        "DS4_EXTEND_REPETITION": "1"
+      }
+    },
+    "starting_service": {
+      "image": "sha256:7d5eb7b2e8b1626a07696c4eaf1b74179e00b5d93ebabb944ac664280c00812e",
+      "serving": {
+        "DS4_C1_OUTPUT_CONSENSUS": "1",
+        "DS4_EXPERT_EVICTION": "lfu",
+        "DS4_BATCH_TOPK": "1",
+        "DS4_PROMPT_LOOKUP": "1",
+        "DS4_OUTPUT_LOOKUP": "single",
+        "DS4_ADAPTIVE_LOOKUP": "1",
+        "DS4_LOOKUP_K": "128"
+      },
+      "timing": "read back after baseline on the same configured release"
+    },
+    "discarded_capacity_trial": {
+      "reason": "Nine requests reached the server during an eight-client trial. Excluded from validation.",
+      "wave_passed": false,
+      "requests_started": 9,
+      "peak_logical_active": 9,
+      "matching_serial_responses": 8,
+      "swap_delta": {
+        "ram_reads": 0,
+        "ram_writes": 0,
+        "disk_reads": 8,
+        "disk_writes": 8,
+        "read_failures": 0,
+        "write_failures": 0
+      },
+      "raw_sha256": "61456504926cb45f2f5cf9f59e4b2425864b96600d9cbd5e3d6be7eebbe169df"
+    }
+  }
+}

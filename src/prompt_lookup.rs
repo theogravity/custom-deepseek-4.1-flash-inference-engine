@@ -17,6 +17,7 @@ pub(super) struct Config {
     adaptive: bool,
     prior_output: OutputLookup,
     consensus: Option<Arc<DecimalTokens>>,
+    extend_repetition: bool,
 }
 
 pub(super) fn configured(tokenizer: &Tokenizer) -> Result<Config> {
@@ -50,7 +51,13 @@ pub(super) fn configured(tokenizer: &Tokenizer) -> Result<Config> {
         Ok("1") => Some(Arc::new(DecimalTokens::new(|s| tokenizer.token_to_id(s)))),
         _ => bail!("DS4_C1_OUTPUT_CONSENSUS must be 0 or 1"),
     };
+    let extend_repetition = match std::env::var("DS4_EXTEND_REPETITION").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => bail!("DS4_EXTEND_REPETITION must be 0 or 1"),
+    };
     Ok(Config {
+        extend_repetition,
         consensus,
         prior_output,
         max_width: width,
@@ -136,7 +143,8 @@ impl PromptLookup {
             let recent = &output[output.len().saturating_sub(2048)..];
             let (prior, matched) = prior_output_proposal(recent, width);
             if let (true, Some(decimals)) = (single_client, &self.config.consensus) {
-                let proposed = repeating_output(recent, width, decimals);
+                let proposed =
+                    repeating_output(recent, width, decimals, self.config.extend_repetition);
                 if !proposed.is_empty() && (matched < 16 || proposed.len() >= prior.len()) {
                     return proposed;
                 }
@@ -219,11 +227,16 @@ impl DecimalTokens {
 }
 
 // Compare the current suffix against the corresponding positions in two
-// completed repetitions. Cap the lookahead at one period so every source
-// position is already committed. A changing numeric field needs a third
+// completed repetitions. Advance a second period only when a third source
+// agrees for each position. A changing numeric field needs a third
 // previous value confirming its step before it can enter a proposal.
-fn repeating_output(recent: &[u32], width: usize, decimals: &DecimalTokens) -> Vec<u32> {
-    const LIMIT: usize = 48;
+fn repeating_output(
+    recent: &[u32],
+    width: usize,
+    decimals: &DecimalTokens,
+    extend: bool,
+) -> Vec<u32> {
+    const LIMIT: usize = 96;
     let n = recent.len();
     let mut best = Vec::new();
     let mut rank = (0, 0);
@@ -237,13 +250,19 @@ fn repeating_output(recent: &[u32], width: usize, decimals: &DecimalTokens) -> V
         if suffix < 4 {
             continue;
         }
-        let cap = if suffix < 8 { 12 } else { LIMIT };
+        let cap = if extend && suffix >= 12 && n >= 3 * period {
+            LIMIT.min(2 * period)
+        } else {
+            period.min(if suffix < 8 { 12 } else { 48 })
+        };
         let mut tokens = [0; LIMIT];
         let mut length = 0;
-        for (offset, slot) in tokens[..width.min(cap).min(period)].iter_mut().enumerate() {
-            let i = n + offset;
+        for (offset, slot) in tokens[..width.min(cap)].iter_mut().enumerate() {
+            let second = offset >= period;
+            let phase = if second { offset - period } else { offset };
+            let i = n + phase;
             let (older, newer) = (recent[i - 2 * period], recent[i - period]);
-            if older != newer
+            if (second || older != newer)
                 && i.checked_sub(3 * period)
                     .and_then(|j| decimals.predict(recent[j], older))
                     != Some(newer)
@@ -253,7 +272,14 @@ fn repeating_output(recent: &[u32], width: usize, decimals: &DecimalTokens) -> V
             let Some(token) = decimals.predict(older, newer) else {
                 break;
             };
-            *slot = token;
+            *slot = if second {
+                let Some(advanced) = decimals.predict(newer, token) else {
+                    break;
+                };
+                advanced
+            } else {
+                token
+            };
             length += 1;
         }
         // A six-token agreement competes with a learned draft of up to seven.
@@ -280,6 +306,7 @@ mod tests {
             adaptive,
             prior_output: OutputLookup::Disabled,
             consensus: None,
+            extend_repetition: false,
         }
     }
 
@@ -327,11 +354,11 @@ mod tests {
         let output = [block(70), block(71), block(72)].concat();
         let decimals = DecimalTokens::default();
         assert_eq!(
-            repeating_output(&output, 48, &decimals),
+            repeating_output(&output, 48, &decimals, false),
             [20, 21, 22, 23, 24, 25]
         );
-        assert!(repeating_output(&output, 5, &decimals).is_empty());
-        assert!(repeating_output(&block(70), 48, &decimals).is_empty());
+        assert!(repeating_output(&output, 5, &decimals, false).is_empty());
+        assert!(repeating_output(&block(70), 48, &decimals, false).is_empty());
         let prompt = [9090; 8];
         let lookup = PromptLookup::new(
             &prompt,
@@ -351,7 +378,7 @@ mod tests {
         assert!(lookup.propose(&ids, 5, true, true).is_empty());
         let mut disagreement = output;
         disagreement[12 + 2] = 800;
-        assert!(repeating_output(&disagreement, 48, &decimals).is_empty());
+        assert!(repeating_output(&disagreement, 48, &decimals, false).is_empty());
     }
 
     #[test]
@@ -365,10 +392,10 @@ mod tests {
         };
         let mut history = [block(9), block(12), block(15)].concat();
         history.extend_from_slice(&block(18)[..8]);
-        let draft = repeating_output(&history, 12, &decimals);
+        let draft = repeating_output(&history, 12, &decimals, false);
         assert_eq!(draft, block(18)[8..]);
         history[10] = id(8);
-        assert!(repeating_output(&history, 12, &decimals).is_empty());
+        assert!(repeating_output(&history, 12, &decimals, false).is_empty());
         assert_eq!(decimals.predict(id(12), id(9)), Some(id(6)));
         assert_eq!(decimals.predict(id(20), id(8)), None);
         let invalid = DecimalTokens::new(|s| match s {
@@ -379,6 +406,35 @@ mod tests {
         });
         assert_eq!(invalid.predict(910, 911), None);
         assert_eq!(decimals.predict(id(998), id(999)), None);
+    }
+
+    #[test]
+    fn extended_repetition_uses_committed_witnesses_and_stops_at_the_budget() {
+        let decimals = DecimalTokens::new(|s| s.parse::<u32>().ok().map(|n| 3000 + n));
+        let block = |i: u32| {
+            let mut b: Vec<u32> = (10..42).collect();
+            b[9] = 3000 + i;
+            b[11] = 3200 - i;
+            b
+        };
+        let history = [block(0), block(1), block(2)].concat();
+        let expected = [block(3), block(4)].concat();
+        for budget in [6, 32, 33, 47, 63, 64, 128] {
+            assert_eq!(
+                repeating_output(&history, budget, &decimals, true),
+                expected[..budget.min(64)]
+            );
+        }
+        assert_eq!(
+            repeating_output(&history, 128, &decimals, false),
+            expected[..32]
+        );
+        let mut disagreement = history;
+        disagreement[1] = 7000;
+        assert_eq!(
+            repeating_output(&disagreement, 128, &decimals, true),
+            expected[..33]
+        );
     }
 
     #[test]
@@ -448,6 +504,7 @@ mod tests {
                 adaptive: true,
                 prior_output: OutputLookup::Disabled,
                 consensus: None,
+                extend_repetition: false,
             },
         );
         assert_eq!(
