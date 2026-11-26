@@ -273,8 +273,10 @@ impl PendingPairs {
             gates: src.pending_gate.clone(),
         };
         for (k, g) in kv
-            .chunks_exact(DIM)
-            .zip(gates.chunks_exact(DIM))
+            .as_chunks::<DIM>()
+            .0
+            .iter()
+            .zip(gates.as_chunks::<DIM>().0)
             .skip(pos % 2)
             .step_by(2)
         {
@@ -314,7 +316,8 @@ impl AttentionState {
             "attention verification already active"
         );
         ensure!(
-            (1..=WINDOW).contains(&batch) && pos.checked_add(batch).is_some_and(|n| n <= MAX_POS),
+            (1..=WINDOW + 1).contains(&batch)
+                && pos.checked_add(batch).is_some_and(|n| n <= MAX_POS),
             "invalid attention verification block"
         );
         ensure!(
@@ -1294,7 +1297,9 @@ mod tests {
     fn cuda_window_wrap_snapshot_and_speculative_rewind() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         let pos = 291;
-        let batch = WINDOW;
+        let batch = WINDOW + 1;
+        let mut state = AttentionState::default();
+        state.begin_verify(pos, batch)?;
         let rows: Vec<_> = (0..(pos + batch) * DIM)
             .map(|i| (i * 613 % 65521) as u16)
             .collect();

@@ -9,7 +9,7 @@
 namespace {
 constexpr int dim = 512, heads = 64, win = 128, top = 512;
 constexpr int ih = 32, idim = 128;
-// Retains up to 128 tentative rows alongside the 127 committed rows needed by attention.
+// Retains up to 129 tentative rows alongside the 127 committed rows needed by attention.
 constexpr int ring_rows = 2 * win;
 constexpr int block = 256;
 constexpr int align = 256;
