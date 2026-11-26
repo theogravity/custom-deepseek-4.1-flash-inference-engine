@@ -6,15 +6,15 @@ The native benchmarks cover code generation at 404k context and six independent 
 
 ## Run on this workstation
 
-The measured shared-prefix and LFU image is installed locally on this workstation. Start it from the engine repository.
+The measured decode profile is installed locally on this workstation. It uses tiled attention ranking, shared prefix restoration and LFU expert eviction. [Decode experiments and checkpoints](DECODE-OPTIMIZATIONS.md)
 
 ```sh
 cd ~/llm/ds4-flash-rs
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose --env-file ../models/.env -f compose.yml -f compose.shared-prefix-lfu.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-optimized.yml up --no-build -d --wait
 ```
 
-For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build instructions and measurements](SHARED-PREFIX-EXPERIMENT.md#full-window-rotation-and-reproduction)
+For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](DECODE-OPTIMIZATIONS.md#run-or-roll-back)
 
 This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. LiteLLM continues to serve clients on port 4000. The prior LFU and base LRU images have separate launch commands. [Checkpoint profiles](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation)
 
@@ -48,7 +48,8 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_SWAP_RAM_MIB`, `DS4_SWAP_DISK_MIB` | 49152, 131072 | On-demand host RAM and NVMe budgets for suspended live requests |
 | `DS4_TIMING_RESTORES` | 0 | Set to 1 at launch to log one JSON event per completed target KV restore, including timings for each GPU and cache tier |
 | `DS4_BATCH_DRAFT` | 1 | Evaluate the learned drafter for multiple ready requests together |
-| `DS4_EXPERT_EVICTION` | lru | Select `lfu` to keep frequently used experts on each card. Counts span the process lifetime. Ties use least-recent access. [Tested image and launch command](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation) |
+| `DS4_BATCH_TOPK` | 1 | Selects exact attention candidates in tiles for the qualified multirow shapes. [Benchmark](DECODE-ATTENTION-TOPK.md) |
+| `DS4_EXPERT_EVICTION` | lfu | Keeps frequently used experts on each card. Counts span the process lifetime. Ties use least-recent access. [Tested image and launch command](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation) |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
@@ -63,7 +64,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 For example, select the released drafter with the following command. Omit the environment overrides to return to the deployed profile.
 
 ```sh
-DS4_DRAFTER=released docker compose --env-file ../models/.env up -d --wait
+DS4_DRAFTER=released docker compose --env-file ../models/.env -f compose.yml -f compose.decode-optimized.yml up --no-build -d --wait
 ```
 
 For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`. Standalone commands also accept `--drafter code|released|none` and `--spec-k N`. Compose sets the numerical and hardware switches used in the benchmarks. [Deployment configuration](compose.yml)
@@ -121,10 +122,10 @@ python3 tools/kv_rotation.py --agents 8 --input 12000 --output 512 --expect-tier
 To run the full Rust test suite, drain the server and select the two inference GPU UUIDs. The suite includes checkpoint tokenizer, real EXL3, attention, peer-copy, speculative rollback and sampling fixtures.
 
 ```sh
-docker compose --env-file ../models/.env stop
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-optimized.yml stop
 export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noheader | awk -F', ' '/RTX PRO 6000/{print $2}' | paste -sd,)"
-DS4_TEST_DEVICE=1 DS4_TEST_CUDA_DEVICE=1 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
-docker compose --env-file ../models/.env up -d --wait
+DS4_BATCH_TOPK=1 DS4_TEST_DEVICE=0 DS4_TEST_CUDA_DEVICE=0 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-optimized.yml up --no-build -d --wait
 ```
 
 ## Measurements on this workstation

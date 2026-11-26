@@ -1,0 +1,6 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:attention-topk-checkpoint
+    environment:
+      DS4_EXPERT_EVICTION: lfu
+      DS4_BATCH_TOPK: "1"

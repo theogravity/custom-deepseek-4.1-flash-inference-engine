@@ -1,0 +1,175 @@
+{
+  "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+  "tag": "ds4-flash-rs:attention-topk-checkpoint",
+  "flags": {
+    "DS4_BATCH_TOPK": "1"
+  },
+  "c6_404k_512": [
+    302.09466919003063,
+    308.5888076510728,
+    308.67870739249355
+  ],
+  "six_full_matched": 18,
+  "c6_524160_receipt_128": [
+    248.87858038916085,
+    265.489673781235
+  ],
+  "logical_limit": 32,
+  "full_min": {
+    "min_free_mib": [
+      344,
+      78,
+      232955
+    ],
+    "peak_sampled_cgroup_anon_mib": 8311.89453125
+  },
+  "code_min": {
+    "min_free_mib": [
+      514,
+      464,
+      235180
+    ],
+    "peak_sampled_cgroup_anon_mib": 5806.88671875
+  },
+  "bracketed_coding_to_full_window": {
+    "off-a": {
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "tag": "ds4-flash-rs:attention-topk-checkpoint",
+      "flags": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "c6_404k_512": [
+        297.1800764286841,
+        299.052188295822,
+        295.2619966108997
+      ],
+      "six_full_matched": 42,
+      "c6_524160_receipt_128": [
+        249.35749996797395,
+        268.38069578220984,
+        272.3487065632847,
+        278.6304069339329,
+        280.006532500872,
+        285.39430423103903
+      ],
+      "logical_limit": 32,
+      "full_min": {
+        "min_free_mib": [
+          468,
+          296,
+          232883
+        ],
+        "peak_sampled_cgroup_anon_mib": 8067.97265625
+      },
+      "code_min": {
+        "min_free_mib": [
+          512,
+          92,
+          235127
+        ],
+        "peak_sampled_cgroup_anon_mib": 5735.01171875
+      },
+      "code_raw_sha256": "c0dd704ee6a31b275877a32f979ed3fa2d3691600d83283b90a5cfbc025e517c",
+      "code_median_tok_s": 297.1800764286841,
+      "full_raw_sha256": "ec492d45fcad8b076685b9377c1066f98b37d7c4629034969cbcacce96b2f036",
+      "full_median_tok_s": 275.4895567486088
+    },
+    "on": {
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "tag": "ds4-flash-rs:attention-topk-checkpoint",
+      "flags": {
+        "DS4_BATCH_TOPK": "1"
+      },
+      "c6_404k_512": [
+        307.2692465841776,
+        304.1273226079839,
+        306.88635648767576
+      ],
+      "six_full_matched": 42,
+      "c6_524160_receipt_128": [
+        260.40048801538313,
+        281.4003579787319,
+        284.6716827740567,
+        288.6436560432081,
+        290.31627845182857,
+        293.8914219020313
+      ],
+      "logical_limit": 32,
+      "full_min": {
+        "min_free_mib": [
+          340,
+          472,
+          232974
+        ],
+        "peak_sampled_cgroup_anon_mib": 8300.93359375
+      },
+      "code_min": {
+        "min_free_mib": [
+          416,
+          468,
+          235179
+        ],
+        "peak_sampled_cgroup_anon_mib": 5821.96875
+      },
+      "code_raw_sha256": "4fd831a33442beb18bf9ef05116d91955a3f6e84d305c884a071d86c7d133fb9",
+      "code_median_tok_s": 306.88635648767576,
+      "full_raw_sha256": "2934d4cc04415a30b12263cf8ec888aad075c6e43e6f38d426a03399b747cbc0",
+      "full_median_tok_s": 286.6576694086324
+    },
+    "off-b": {
+      "image": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+      "tag": "ds4-flash-rs:attention-topk-checkpoint",
+      "flags": {
+        "DS4_BATCH_TOPK": "0"
+      },
+      "c6_404k_512": [
+        297.24000316664893,
+        302.8842360912486,
+        303.1865433162451
+      ],
+      "six_full_matched": 42,
+      "c6_524160_receipt_128": [
+        252.1885299571318,
+        268.959237842777,
+        273.89314349592485,
+        279.14140930638087,
+        282.31548817625895,
+        284.2902696779841
+      ],
+      "logical_limit": 32,
+      "full_min": {
+        "min_free_mib": [
+          372,
+          76,
+          232617
+        ],
+        "peak_sampled_cgroup_anon_mib": 8283.67578125
+      },
+      "code_min": {
+        "min_free_mib": [
+          514,
+          512,
+          235309
+        ],
+        "peak_sampled_cgroup_anon_mib": 5846.5
+      },
+      "code_raw_sha256": "6a9ba2b6da784c171d73148c18844f3280b153f8f5602be9ca655da89b199f07",
+      "code_median_tok_s": 302.8842360912486,
+      "full_raw_sha256": "df827bb080049cb2d075cfb758a8302ee4c94da8297905cc3cefa9a6bb673729",
+      "full_median_tok_s": 276.51727640115286
+    }
+  },
+  "activation": {
+    "image": "ds4-flash-rs:attention-topk-checkpoint",
+    "identity": "sha256:888d1ec86cd7e4fb55cd80add72f6338c6afead29619c8bd4cd86027c4947182",
+    "healthy": true,
+    "smoke_reply": "4",
+    "finish": "stop",
+    "max_seqs": 6,
+    "max_live_seqs": 32,
+    "flags": {
+      "DS4_BATCH_TOPK": "1",
+      "DS4_EXPERT_EVICTION": "lfu"
+    }
+  }
+}
