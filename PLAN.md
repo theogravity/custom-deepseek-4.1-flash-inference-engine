@@ -53,3 +53,7 @@ The release validates context limits before GPU admission, preserves valid parti
 With warm prefixes, 224 single-client requests compared the native and LiteLLM routes over the same eight context lengths and two wire protocols. The largest difference between route median output rates was 0.43%. Rates exceeded 300 tok/s through the 65,536-token case on this receipt-generation workload and dropped to about 238 tok/s at 524,160. [C1 comparison](C1-BENCHMARK.md)
 
 Future performance runs use the native OpenAI Chat endpoint on port 8001. The completed transport comparison remains available in [the C1 results](C1-BENCHMARK.md).
+
+## Long-context decode and prefix RAM at 375 W
+
+Tagged the stable engine and serving image before changing the CUDA scorer. Reducing packed index scoring to eight or sixteen lanes preserved raw scores and improved single-client full-window retrieval from 321–322 to 372 tok/s. At 404k, six coding clients delivered 252 aggregate tok/s with the scorer alone and 285 with a 6 GiB host prefix tier. The joint drafter projection experiment measured 228 against controls of 231 and remained on its experiment branch. [Controls, workloads and gates](LONG-CONTEXT-BENCHMARK.md)

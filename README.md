@@ -2,7 +2,7 @@
 
 A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of DeepSeek V4.1 Flash on two RTX PRO 6000 Blackwell workstation cards. The server opens the original 48 safetensors shards and generates tokens locally. Rust owns checkpoint loading, tokenization, scheduling, sampling, and the model loop. The GPU runtime uses CUDA C++, tensor-core instructions and cuBLAS. The HTTP server uses Axum.
 
-The published 1-, 4- and 6-client workload has been replayed on this engine at both power limits. [Native and published benchmarks](UPSTREAM-COMPARISON.md)
+The native benchmarks cover code generation at 404k context and six independent full windows at 375 W. The published edit benchmark has also been replayed at both power limits. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Published comparison](UPSTREAM-COMPARISON.md)
 
 ## Run on this workstation
 
@@ -55,7 +55,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_PARALLEL_PREFILL_ROUTER` | 1 | Select routed experts across prompt rows using the CPU worker pool |
 | `DS4_OVERLAP_PREFILL_ENGRAM` | 0 | Optionally overlap Engram reads with target GPU work during prefill |
 | `DS4_ADAPTIVE_LOOKUP` | 1 | Select learned vs. source proposals from contiguous matches. Use 0 for fixed-width source lookup |
-| `DS4_PREFIX_RAM_MIB`, `DS4_PREFIX_DISK_MIB` | 2048, 65536 | Separate RAM and disk cache budgets in MiB |
+| `DS4_PREFIX_RAM_MIB`, `DS4_PREFIX_DISK_MIB` | 6144, 65536 | Compose prefix budgets in MiB. A standalone process defaults to 2048 MiB RAM. |
 | `DS4_HOST_PREFIX_DIR` | `~/.cache/ds4-flash-rs/prefix` | Private host bind mount for restart-persistent KV and drafter windows |
 
 For example, select the released drafter with the following command. Omit the environment overrides to return to the deployed profile.
@@ -70,7 +70,7 @@ For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`
 
 The native prefix cache saves target attention state and the drafter's last 128 positions at completed prefill boundaries. Keys cover the token prefix, attention layout and numerical settings, checkpoint files and tokenizer. Draft sidecars also bind to the drafter weights. Entries carry checksums, disk writes use atomic renames, and the store bounds RAM and disk independently. A request can restore a shared prefix after a tool call or a process restart. The engine evaluates the suffix and generates the new completion. Set both cache budgets to 0 to disable persistence and cross-request memoization.
 
-The worker serves up to **six concurrent text requests of 524,288 tokens each**, for **3,145,728 total context positions**. Input and generated output share each request's window. Each request has independent sliding-window KV, compressed KV, drafter state and sampling. At full size the six sets of compressed target KV and sliding windows occupy 3,252 MiB on the first inference GPU and 2,178 MiB on the second. Drafter windows, index buffers, activations, model weights and expert slots use additional VRAM. The 2 GiB RAM and 64 GiB disk prefix tiers store reusable snapshots separately.
+The worker serves up to **six concurrent text requests of 524,288 tokens each**, for **3,145,728 total context positions**. Input and generated output share each request's window. Each request has independent sliding-window KV, compressed KV, drafter state and sampling. At full size the six sets of compressed target KV and sliding windows occupy 3,252 MiB on the first inference GPU and 2,178 MiB on the second. Drafter windows, index buffers, activations, model weights and expert slots use additional VRAM. The 6 GiB RAM prefix tier can hold the last prefill checkpoint for six full-window requests. At 524,096 cached positions their six target images and drafter sidecars total 5.27 GiB. The disk prefix tier holds another 64 GiB.
 
 The scheduler advances each GPU-resident runnable prompt by up to 64 input tokens per round and batches ready requests for drafting and target verification. A small request can start decoding while another is ingesting a long prompt. At the default settings, up to 32 requests can participate in rotation and another 32 can wait in the bounded intake queue. A full intake queue returns HTTP 429. The authenticated `/metrics` endpoint exposes resident, waiting and suspended requests, processed GPU positions, and successful six-request target passes.
 
@@ -80,7 +80,7 @@ When another runnable client needs a GPU slot, the worker saves one request's co
 
 The backing store places each image in RAM if space is available, then uses an anonymous file on the NVMe drive mounted at `/prefix/live`. It checks disk writeback before releasing the GPU state and verifies the checksum on restore. Completion and cancellation release the backing space. These files belong to ongoing connections and disappear when their owner exits. Reusable prompt snapshots survive a service restart in the separate prefix cache.
 
-The live tiers use the original LMCache budgets of **48 GiB RAM and 128 GiB disk**. With the separate prefix tier budgets, the combined payload limits are 50 GiB RAM and 192 GiB disk. A full 524,288-position suspended target image is about 900 MiB, plus drafter state. GPU staging, live token histories and the operating system's reclaimable file cache use additional host memory. If both live tiers fill, resident requests can finish and release their slots. The `swap` object in `/metrics` reports charged/peak bytes, reads, writes and failures for the two tiers; `rotations` and `resumes` count successful slot changes.
+The live tiers use the original LMCache budgets of **48 GiB RAM and 128 GiB disk**. With the separate prefix tier budgets, the combined payload limits are 54 GiB RAM and 192 GiB disk. A full 524,288-position suspended target image is about 900 MiB, plus drafter state. GPU staging, live token histories and the operating system's reclaimable file cache use additional host memory. If both live tiers fill, resident requests can finish and release their slots. The `swap` object in `/metrics` reports charged/peak bytes, reads, writes and failures for the two tiers; `rotations` and `resumes` count successful slot changes.
 
 The server exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both chat APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The Rust profile serves text. The original recipe also supports vision.
 

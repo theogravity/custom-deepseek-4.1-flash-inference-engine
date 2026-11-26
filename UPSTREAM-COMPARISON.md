@@ -2,6 +2,10 @@
 
 The two engines use the same workstation class and EXL3 model pack. The first table uses the upstream Python client unmodified, against port 8001. The benchmark first submits a 25,625-token Python module, then rewrites a different 41-function span per client. Each stream generates 1,500 tokens at temperature zero with default thinking. The published aggregate divides the total generated tokens by the longest individual post-first-token interval. [Upstream code](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/bench/decode_bench2.py) · [Published benchmark](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/docs/BENCHMARKS.md)
 
+## 375 W long-context release
+
+The selected attention scorer and 6 GiB prefix RAM tier measured **278 / 422 / 460 aggregate tok/s** at C1/C4/C6 on the unchanged published 25,625-token edit script's second pass. The tagged 375 W checkpoint previously measured 275 / 414 / 448. The published comparison points are 282 / 518 / 557; the largest remaining gaps on this edit are at four and six clients. These single script passes use the upstream timing convention. The 404k coding and full-window retrieval results use repeated waves and explicit cache checks. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Upstream replay](results/long-context-published-375w.txt)
+
 ## Matched GPU power test on the tuned release
 
 The same server process ran at 600 W, then 375 W, then 600 W again on both inference cards. The table gives the second pass of the unchanged upstream code-edit script at each setting. All entries are output tok/s, aggregate across active clients. The measured CPU socket cap stayed at 225 W. [Runs, hardware readbacks and output hashes](results/power-ab-tuned.json)
