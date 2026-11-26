@@ -29,7 +29,12 @@ struct Buffer {
         size_t n = exact ? bytes : std::max(bytes, capacity + capacity / 2);
         void *next = nullptr;
         cudaError_t rc = cudaMalloc(&next, n);
-        if (rc != cudaSuccess) return rc;
+        if (rc != cudaSuccess) {
+            // An allocation failure is recoverable for another live session.
+            // Consume only the matching last error to keep later launches clean.
+            if (rc == cudaErrorMemoryAllocation && cudaPeekAtLastError() == rc) cudaGetLastError();
+            return rc;
+        }
         if (preserve) {
             rc = cudaMemcpy(next, ptr, preserve, cudaMemcpyDeviceToDevice);
             if (rc != cudaSuccess) { cudaFree(next); return rc; }
@@ -500,4 +505,9 @@ extern "C" int ds4_attn_pack_compressed(int dev,const float *values,const float 
     TRY(cudaSetDevice(dev));
     pack_compressor<<<n,block>>>(values,keys,value_bytes,key_bytes);
     return cudaGetLastError();
+}
+
+extern "C" int ds4_attn_zero(int dev,float *dst,size_t len) {
+    TRY(cudaSetDevice(dev));
+    return cudaMemsetAsync(dst,0,len*sizeof(float));
 }

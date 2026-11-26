@@ -30,6 +30,7 @@ const NOPE: usize = DIM - ROPE;
 const INDEX_BYTES: usize = INDEX_DIM + 4;
 
 unsafe extern "C" {
+    fn ds4_attn_zero(dev: i32, dst: *mut f32, len: usize) -> i32;
     fn ds4_attn_sparse_bytes(fast: i32, span: i32, width: i32, batch: i32) -> usize;
     fn ds4_attn_capacity(buf: *mut c_void) -> usize;
     fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
@@ -177,9 +178,20 @@ impl GpuBuffer {
         }
         Ok(())
     }
+    fn writable(&self, cache: &mut crate::moe::MoeCache, bytes: usize) -> Result<()> {
+        let growth = unsafe { ds4_attn_growth(self.ptr.as_ptr(), bytes) };
+        if growth != 0 {
+            cache.reserve(self.device, growth)?;
+            state_allocation(
+                unsafe { ds4_attn_prepare_tail(self.device, self.ptr.as_ptr(), 0, growth) },
+                "allocating session index workspace",
+            )?;
+        }
+        Ok(())
+    }
     fn write<T: Copy>(&self, data: &[T]) -> Result<()> {
         if !data.is_empty() {
-            cuda_ok(
+            state_allocation(
                 unsafe {
                     ds4_attn_upload(
                         self.device,
@@ -201,6 +213,33 @@ impl Drop for GpuBuffer {
     }
 }
 
+#[derive(Debug)]
+struct StateError(String);
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for StateError {}
+fn state_error(message: impl Into<String>) -> anyhow::Error {
+    StateError(message.into()).into()
+}
+pub(crate) fn request_local(error: &anyhow::Error) -> bool {
+    error.is::<StateError>()
+}
+macro_rules! require_state {
+    ($condition:expr, $($message:tt)+) => {
+        if !$condition {return Err(state_error(format!($($message)+)));}
+    };
+}
+// Physical KV, window and index-pick allocations belong to one session. The
+// runtime's activation pool, model projections and execution scratch are shared.
+fn state_allocation(code: i32, op: &str) -> Result<()> {
+    if code == 2 {
+        return Err(state_error(format!("CUDA {op} failed with error {code}")));
+    }
+    cuda_ok(code, op)
+}
 fn cuda_ok(code: i32, op: &str) -> Result<()> {
     ensure!(code == 0, "CUDA {op} failed with error {code}");
     Ok(())
@@ -289,7 +328,7 @@ impl Rows {
     ) -> Result<*mut c_void> {
         use std::collections::hash_map::Entry;
         if let Some(writer) = self.writer {
-            ensure!(writer == dev, "compressed source device changed");
+            require_state!(writer == dev, "compressed source device changed");
         }
         let requested = self.len() + tail;
         let current = self
@@ -307,7 +346,7 @@ impl Rows {
             if let Some(cache) = cache {
                 cache.reserve(dev, capacity)?;
             }
-            cuda_ok(
+            state_allocation(
                 unsafe { ds4_attn_prepare_tail(dev, buf.ptr.as_ptr(), *old, capacity - *old) },
                 "growing compressed GPU rows",
             )?;
@@ -353,11 +392,11 @@ impl Window {
                 ring.reserve_growth(cache, 2 * WINDOW * DIM * size_of::<u16>())?;
             }
             let rows = self.next_pos.min(WINDOW - 1);
-            ensure!(
+            require_state!(
                 self.rows.len() == rows * DIM,
                 "invalid restored attention window"
             );
-            cuda_ok(
+            state_allocation(
                 unsafe {
                     ds4_attn_window(
                         dev,
@@ -374,7 +413,7 @@ impl Window {
             self.rows = Vec::new();
         }
         let ring = self.ring.as_ref().unwrap();
-        ensure!(ring.device == dev, "attention window device changed");
+        require_state!(ring.device == dev, "attention window device changed");
         Ok(ring)
     }
 
@@ -451,10 +490,9 @@ pub struct AttentionState {
     sources: HashMap<usize, Source>,
     selected: Vec<Vec<i32>>,
     picks: HashMap<i32, GpuBuffer>,
-    device_picks: Option<Dev>,
-    device_blocks: Option<Dev>,
+    device_blocks: Option<GpuBuffer>,
     width: usize,
-    freqs: HashMap<(i32, bool), (usize, usize, Dev)>,
+    freqs: HashMap<(i32, bool), (usize, usize, GpuBuffer)>,
     blocks: Vec<Vec<usize>>,
 }
 
@@ -462,16 +500,16 @@ impl AttentionState {
     /// Start a speculative target forward. The device ring retains the prior
     /// window and every tentative row until the caller commits an accepted prefix.
     pub fn begin_verify(&mut self, pos: usize, batch: usize) -> Result<()> {
-        ensure!(
+        require_state!(
             self.verify.is_none(),
             "attention verification already active"
         );
-        ensure!(
+        require_state!(
             (1..=WINDOW + 1).contains(&batch)
                 && pos.checked_add(batch).is_some_and(|n| n <= MAX_POS),
             "invalid attention verification block"
         );
-        ensure!(
+        require_state!(
             self.windows.values().all(|w| w.next_pos == pos),
             "discontinuous verification start"
         );
@@ -489,25 +527,26 @@ impl AttentionState {
         let mark = self
             .verify
             .as_ref()
-            .context("no active attention verification")?;
-        ensure!(
+            .ok_or_else(|| state_error("no active attention verification"))?;
+        require_state!(
             accepted <= mark.batch,
             "accepted prefix exceeds verified block"
         );
         let verified = mark.pos + mark.batch;
-        ensure!(
+        require_state!(
             self.windows.len() == 40 && self.windows.values().all(|w| w.next_pos == verified),
             "incomplete verification forward"
         );
         if accepted < mark.batch {
             let next = mark.pos + accepted;
             for (&owner, src) in &mut self.sources {
-                let (_, ratio) = source(owner).context("unknown compressed source")?;
+                let (_, ratio) =
+                    source(owner).ok_or_else(|| state_error("unknown compressed source"))?;
                 if ratio == 2 && next % 2 == 1 {
                     let pairs = mark
                         .pending
                         .get(&owner)
-                        .context("missing verified compressor rows")?;
+                        .ok_or_else(|| state_error("missing verified compressor rows"))?;
                     let start = ((next - 1) / 2 - mark.pos / 2) * DIM;
                     src.pending_kv.clear();
                     src.pending_gate.clear();
@@ -772,18 +811,20 @@ fn device_freqs(
     compressed: bool,
 ) -> Result<*const f32> {
     let key = (rt.device, compressed);
-    if let Some((p, len, freqs)) = state.freqs.get(&key) {
-        if (*p, *len) == (pos, n) {
-            return Ok(freqs.as_ptr());
-        }
+    use std::collections::hash_map::Entry;
+    let (p, len, freqs) = match state.freqs.entry(key) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => e.insert((0, 0, GpuBuffer::new(rt.device)?)),
+    };
+    if (*p, *len) != (pos, n) {
+        let host: Vec<_> = (pos..pos + n)
+            .map(|i| rotary_freqs(i, compressed))
+            .collect();
+        freqs.reserve_growth(&mut rt.moe_cache, std::mem::size_of_val(host.as_slice()))?;
+        freqs.write(&host)?;
+        (*p, *len) = (pos, n);
     }
-    let host: Vec<_> = (pos..pos + n)
-        .map(|p| rotary_freqs(p, compressed))
-        .collect();
-    let freqs = rt.to_device(host.as_flattened().as_flattened())?;
-    let ptr = freqs.as_ptr();
-    state.freqs.insert(key, (pos, n, freqs));
-    Ok(ptr)
+    Ok(freqs.data())
 }
 
 fn pool_pairs(
@@ -829,7 +870,7 @@ fn append_source(
     verify: Option<&mut Verification>,
     resident: bool,
 ) -> Result<()> {
-    ensure!(
+    require_state!(
         src.keys.len() == pos / ratio * INDEX_BYTES && src.values.len() == pos / ratio * KV_BYTES,
         "discontinuous compressed cache at {pos}"
     );
@@ -1020,28 +1061,39 @@ fn select(
     let gpu = gpu_index();
     if gpu {
         state.width = max_len.min(TOP);
-        state.device_picks = if state.width == 0 {
-            None
-        } else {
-            Some(rt.buffer(n * state.width)?)
-        };
+        if state.width != 0 {
+            use std::collections::hash_map::Entry;
+            let ids = match state.picks.entry(rt.device) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
+            };
+            ids.writable(&mut rt.moe_cache, n * state.width * size_of::<i32>())?;
+        }
     }
     if layer == CANDIDATE_LAYER {
-        state.device_blocks = if gpu && max_len > TOP_BLOCKS * BLOCK {
-            Some(rt.buffer(n * TOP_BLOCKS)?)
+        if gpu && max_len > TOP_BLOCKS * BLOCK {
+            if state.device_blocks.is_none() {
+                state.device_blocks = Some(GpuBuffer::new(rt.device)?);
+            }
+            state
+                .device_blocks
+                .as_ref()
+                .unwrap()
+                .writable(&mut rt.moe_cache, n * TOP_BLOCKS * size_of::<i32>())?;
         } else {
-            None
-        };
+            state.device_blocks = None;
+        }
         state.blocks.clear();
     }
     if max_len <= TOP {
         if gpu {
-            if let Some(ids) = state.device_picks.as_mut() {
+            if state.width != 0 {
+                let ids = &state.picks[&rt.device];
                 cuda_ok(
                     unsafe {
                         ds4_attn_index_ids(
                             rt.device,
-                            ids.as_mut_ptr().cast(),
+                            ids.data(),
                             state.width as i32,
                             pos as i32,
                             ratio as i32,
@@ -1090,18 +1142,18 @@ fn select(
     let keys = state
         .sources
         .get_mut(&owner)
-        .context("missing index key source")?
+        .ok_or_else(|| state_error("missing index key source"))?
         .keys
         .on(rt.device, Some(&mut rt.moe_cache))?;
     if gpu {
         let picks = state
-            .device_picks
-            .as_mut()
-            .context("missing GPU index output")?;
+            .picks
+            .get(&rt.device)
+            .ok_or_else(|| state_error("missing GPU index output"))?;
         let blocks = state
             .device_blocks
             .as_mut()
-            .map_or(ptr::null_mut(), |v| v.as_mut_ptr().cast::<i32>());
+            .map_or(ptr::null_mut(), |v| v.data::<i32>());
         return device_select(
             rt, layer, pos, n, ratio, max_len, keys, &q, &w, blocks, picks,
         );
@@ -1109,6 +1161,10 @@ fn select(
     // Tile host scores to keep long-context prefill scratch bounded. After layer
     // 20, only the 2048 winning eight-token blocks need scoring.
     let filtered_width = TOP_BLOCKS * BLOCK;
+    require_state!(
+        layer <= CANDIDATE_LAYER || state.blocks.len() == n,
+        "missing causal index candidates"
+    );
     let mut t = 0;
     while t < n {
         let filtering = layer > CANDIDATE_LAYER && !state.blocks[t].is_empty();
@@ -1196,7 +1252,7 @@ fn device_select(
     q: &Dev,
     w: &Dev,
     blocks: *mut i32,
-    picks: &mut Dev,
+    picks: &GpuBuffer,
 ) -> Result<()> {
     let block_span = TOP_BLOCKS * BLOCK;
     // Layers after 20 use its candidate blocks only when the individual row
@@ -1223,7 +1279,7 @@ fn device_select(
             "sizing index sort scratch",
         )?;
         let mut work = rt.buffer(bytes.div_ceil(4))?;
-        ensure!(
+        require_state!(
             !filtered || !blocks.is_null(),
             "missing GPU candidate blocks"
         );
@@ -1245,7 +1301,7 @@ fn device_select(
                     (pos + t) as i32,
                     ratio as i32,
                     rows as i32,
-                    picks.as_mut_ptr().cast::<i32>().add(t * TOP),
+                    picks.data::<i32>().add(t * TOP),
                     if layer == CANDIDATE_LAYER {
                         b
                     } else {
@@ -1265,8 +1321,14 @@ pub(crate) fn fast_attention() -> bool {
     *FAST.get_or_init(|| std::env::var_os("DS4_FAST_ATTN").is_some_and(|v| v == "1"))
 }
 
-/// Process one contiguous prompt chunk or one decode token in token-major order.
-/// A new request owns a fresh state. Layers are invoked in model order.
+/// Each span owns its causal state. The projections operate on concatenated
+/// rows, keeping every sequence's rotary positions and KV selections local.
+pub(crate) struct Span<'a> {
+    pub state: &'a mut AttentionState,
+    pub pos: usize,
+    pub rows: usize,
+    pub error: &'a mut Option<anyhow::Error>,
+}
 pub fn forward_dev(
     rt: &mut Runtime,
     state: &mut AttentionState,
@@ -1275,28 +1337,35 @@ pub fn forward_dev(
     x: &Dev,
     batch: usize,
 ) -> Result<Dev> {
-    ensure!(
-        layer < 40 && batch > 0 && pos.checked_add(batch).is_some_and(|end| end <= MAX_POS),
-        "invalid backbone attention layer or position"
-    );
-    ensure!(
-        x.len() == batch * HIDDEN,
-        "attention input has incorrect shape"
-    );
-    if let Some(mark) = &state.verify {
-        ensure!(
-            mark.pos == pos && mark.batch == batch,
-            "attention verification block changed"
-        );
+    let mut error = None;
+    let out = forward_group(
+        rt,
+        layer,
+        x,
+        &mut [Span {
+            state,
+            pos,
+            rows: batch,
+            error: &mut error,
+        }],
+    )?;
+    if let Some(error) = error {
+        return Err(error);
     }
-    let prior = state.windows.get(&layer);
+    Ok(out)
+}
+pub(crate) fn forward_group(
+    rt: &mut Runtime,
+    layer: usize,
+    x: &Dev,
+    spans: &mut [Span<'_>],
+) -> Result<Dev> {
+    let batch: usize = spans.iter().map(|s| s.rows).sum();
     ensure!(
-        prior.map_or(0, |w| w.next_pos) == pos,
-        "non-contiguous attention window at layer {layer}, position {pos}"
+        layer < 40 && batch > 0 && x.len() == batch * HIDDEN,
+        "invalid grouped attention shape"
     );
     let prefix = format!("layers.{layer}.attn");
-    let group = source(layer);
-    let freqs = device_freqs(rt, state, pos, batch, group.is_some())?;
     let mut qr = project(rt, &prefix, "wq_a", x, batch, 1280, 1)?;
     let gamma = rt.vector_ptr(&format!("{prefix}.q_norm.weight"), 1280)?;
     cuda_ok(
@@ -1304,11 +1373,111 @@ pub fn forward_dev(
         "normalizing attention query projection",
     )?;
     let mut q = project(rt, &prefix, "wq_b", &qr, batch, HEADS * DIM, 1)?;
+    let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
+    let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32) },
+        "normalizing window keys",
+    )?;
+    let mut o = rt.buffer(q.len())?;
+    let mut start = 0;
+    for s in spans {
+        let count = s.rows * HEADS * DIM;
+        let out_ptr = unsafe { o.as_mut_ptr().add(start * HEADS * DIM) };
+        if s.error.is_none() {
+            let result = apply_span(
+                rt,
+                s.state,
+                layer,
+                &prefix,
+                s.pos,
+                s.rows,
+                x,
+                &qr,
+                start,
+                unsafe { q.as_mut_ptr().add(start * HEADS * DIM) },
+                unsafe { kv.as_mut_ptr().add(start * DIM) },
+                out_ptr,
+            );
+            if let Err(err) = result {
+                if !request_local(&err) {
+                    return Err(err);
+                }
+                *s.error = Some(err);
+                *s.state = AttentionState::default();
+            }
+        }
+        if s.error.is_some() {
+            cuda_ok(
+                unsafe { ds4_attn_zero(rt.device, out_ptr, count) },
+                "clearing failed attention rows",
+            )?;
+        }
+        start += s.rows;
+    }
+    drop((q, kv, qr));
+    let down = project(rt, &prefix, "wo_a", &o, batch, 8 * 1024, 8)?;
+    drop(o);
+    project(rt, &prefix, "wo_b", &down, batch, HIDDEN, 1)
+}
+#[allow(clippy::too_many_arguments)]
+fn apply_span(
+    rt: &mut Runtime,
+    state: &mut AttentionState,
+    layer: usize,
+    prefix: &str,
+    pos: usize,
+    batch: usize,
+    x: &Dev,
+    qr: &Dev,
+    start: usize,
+    q_ptr: *mut f32,
+    kv_ptr: *mut f32,
+    out_ptr: *mut f32,
+) -> Result<()> {
+    require_state!(
+        batch > 0 && pos.checked_add(batch).is_some_and(|v| v <= MAX_POS),
+        "invalid attention position {pos} and span {batch}"
+    );
+    if let Some(mark) = &state.verify {
+        require_state!(
+            mark.pos == pos && mark.batch == batch,
+            "attention verification block changed"
+        );
+    }
+    let prior = state.windows.get(&layer);
+    require_state!(
+        prior.map_or(0, |w| w.next_pos) == pos,
+        "non-contiguous attention window at layer {layer}, position {pos}"
+    );
+    let group = source(layer);
+    let freqs = device_freqs(rt, state, pos, batch, group.is_some())?;
+    // Only the four compressors and the learned indexers read input rows
+    // after the shared projections. Slicing those smaller operands avoids
+    // copying the 32K query/output features per token between sessions.
+    let owner = group.is_some_and(|(owner, _)| owner == layer);
+    let index = group.is_some_and(|(s, ratio)| {
+        (layer == s || [24, 28, 32, 36].contains(&layer)) && (pos + batch) / ratio > TOP
+    });
+    let x_slice;
+    let local_x = if (owner || index) && x.len() != batch * HIDDEN {
+        x_slice = rt.slice(x, start * HIDDEN, batch * HIDDEN)?;
+        &x_slice
+    } else {
+        x
+    };
+    let qr_slice;
+    let local_qr = if index && qr.len() != batch * 1280 {
+        qr_slice = rt.slice(qr, start * 1280, batch * 1280)?;
+        &qr_slice
+    } else {
+        qr
+    };
     cuda_ok(
         unsafe {
             ds4_attn_transform(
                 rt.device,
-                q.as_mut_ptr(),
+                q_ptr,
                 ptr::null_mut(),
                 freqs,
                 HEADS as i32,
@@ -1320,19 +1489,13 @@ pub fn forward_dev(
         },
         "rotating attention queries",
     )?;
-    let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
-    let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
-    cuda_ok(
-        unsafe { ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32) },
-        "normalizing window keys",
-    )?;
     // Storage is packed BF16, with two values in each pooled four-byte element.
     let mut current = rt.buffer(batch * DIM / 2)?;
     cuda_ok(
         unsafe {
             ds4_attn_transform(
                 rt.device,
-                kv.as_mut_ptr(),
+                kv_ptr,
                 current.as_mut_ptr().cast(),
                 freqs,
                 1,
@@ -1344,7 +1507,6 @@ pub fn forward_dev(
         },
         "packing attention window",
     )?;
-    drop(kv);
 
     let mut width = 0;
     let mut ids: *const i32 = ptr::null();
@@ -1361,8 +1523,8 @@ pub fn forward_dev(
             append_source(
                 rt,
                 src,
-                &prefix,
-                x,
+                prefix,
+                local_x,
                 pos,
                 batch,
                 ratio,
@@ -1373,10 +1535,10 @@ pub fn forward_dev(
         }
         if layer == owner || [24, 28, 32, 36].contains(&layer) {
             select(
-                rt, state, owner, ratio, &prefix, layer, x, &qr, pos, batch, freqs,
+                rt, state, owner, ratio, prefix, layer, local_x, local_qr, pos, batch, freqs,
             )?;
             if !gpu_index() {
-                ensure!(
+                require_state!(
                     state.selected.len() == batch,
                     "missing shared top-k index rows"
                 );
@@ -1399,34 +1561,25 @@ pub fn forward_dev(
         }
         width = state.width;
         if width != 0 {
-            ids = if gpu_index() {
-                state
-                    .device_picks
-                    .as_ref()
-                    .context("missing GPU index row")?
-                    .as_ptr()
-                    .cast()
-            } else {
-                state
-                    .picks
-                    .get(&rt.device)
-                    .context("missing selected attention indices")?
-                    .data()
-            };
+            ids = state
+                .picks
+                .get(&rt.device)
+                .ok_or_else(|| state_error("missing selected attention indices"))?
+                .data();
             values = state
                 .sources
                 .get_mut(&owner)
-                .context("missing compressed attention source")?
+                .ok_or_else(|| state_error("missing compressed attention source"))?
                 .values
                 .on(rt.device, Some(&mut rt.moe_cache))?;
         }
     }
-    drop(qr);
+
     let sink = rt.vector_ptr(&format!("{prefix}.attn_sink"), HEADS)?;
     let (span, decode) = state.window_layout(pos, batch);
     let window = state.windows.entry(layer).or_default();
     let ring = window.on(rt.device, Some(&mut rt.moe_cache))?;
-    let mut o = rt.buffer(q.len())?;
+
     // Bound temporary expanded compressed values to 16 MiB per call.
     let fast = fast_attention();
     let mut t = 0;
@@ -1459,7 +1612,7 @@ pub fn forward_dev(
                 sparse(
                     rt.device,
                     work,
-                    q.as_ptr().add(t * HEADS * DIM),
+                    q_ptr.add(t * HEADS * DIM),
                     ring.data(),
                     current.as_ptr().cast(),
                     pos as i32,
@@ -1471,14 +1624,14 @@ pub fn forward_dev(
                     width as i32,
                     sink,
                     n as i32,
-                    o.as_mut_ptr().add(t * HEADS * DIM),
+                    out_ptr.add(t * HEADS * DIM),
                 )
             },
             "sparse attention",
         )?;
         t += n;
     }
-    drop(q);
+
     let kept = batch.min(2 * WINDOW);
     cuda_ok(
         unsafe {
@@ -1502,7 +1655,7 @@ pub fn forward_dev(
         unsafe {
             ds4_attn_transform(
                 rt.device,
-                o.as_mut_ptr(),
+                out_ptr,
                 ptr::null_mut(),
                 freqs,
                 HEADS as i32,
@@ -1514,16 +1667,138 @@ pub fn forward_dev(
         },
         "rotating and quantizing attention output",
     )?;
-    let down = project(rt, &prefix, "wo_a", &o, batch, 8 * 1024, 8)?;
-    drop(o);
-    let out = project(rt, &prefix, "wo_b", &down, batch, HIDDEN, 1)?;
     window.next_pos = pos + batch;
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_state_continuity_and_session_memory_errors_are_request_local() {
+        let mut state = AttentionState::default();
+        state.windows.insert(
+            0,
+            Window {
+                next_pos: 4,
+                ..Window::default()
+            },
+        );
+        let e = state
+            .begin_verify(3, 1)
+            .unwrap_err()
+            .context("prepare target verification");
+        assert!(request_local(&e));
+        assert!(request_local(
+            &state_allocation(2, "allocating one request's KV").unwrap_err()
+        ));
+        let picks = state_allocation(2, "uploading index picks")
+            .unwrap_err()
+            .context("preparing source rows");
+        assert!(request_local(&picks));
+        assert!(!request_local(
+            &state_allocation(700, "restoring KV").unwrap_err()
+        ));
+        assert!(!request_local(
+            &cuda_ok(2, "allocating shared workspace").unwrap_err()
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
+    fn cuda_grouped_attention_matches_live_spans_and_retires_only_failed_state() -> Result<()> {
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "mask to both inference GPUs"
+        );
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        rt.verification = true;
+        fn values(rows: usize, seed: usize) -> Vec<f32> {
+            (0..rows * HIDDEN)
+                .map(|i| b16((((i * 13 + seed) % 257) as f32 - 129.) / 97.))
+                .collect()
+        }
+        for layer in [0, 2, 20] {
+            rt.layer(layer)?;
+            let (mut left, mut right) = (AttentionState::default(), AttentionState::default());
+            for (cache, rows, seed) in [(&mut left, 3, 17), (&mut right, 7, 57)] {
+                cache.begin_prefill_with_limit(rows, 640);
+                let input = rt.to_device(&values(rows, seed))?;
+                forward_dev(&mut rt, cache, layer, 0, &input, rows)?;
+            }
+            let mut bad = left.host_snapshot()?;
+            let runs = [(3, 4, 55), (7, 2, 99)];
+            let mut expected = Vec::new();
+            for (s, (pos, rows, seed)) in [left.host_snapshot()?, right.host_snapshot()?]
+                .into_iter()
+                .zip(runs)
+            {
+                let mut s = s;
+                s.begin_prefill_with_limit(pos, 640);
+                let input = rt.to_device(&values(rows, seed))?;
+                let y = forward_dev(&mut rt, &mut s, layer, pos, &input, rows)?;
+                expected.push(rt.to_host(&y)?);
+            }
+            let mut all = values(4, 55);
+            all.extend(values(3, 71));
+            all.extend(values(2, 99));
+            let input = rt.to_device(&all)?;
+            let (mut l, mut b, mut r) = (None, None, None);
+            let combined = forward_group(
+                &mut rt,
+                layer,
+                &input,
+                &mut [
+                    Span {
+                        state: &mut left,
+                        pos: 3,
+                        rows: 4,
+                        error: &mut l,
+                    },
+                    Span {
+                        state: &mut bad,
+                        pos: 9,
+                        rows: 3,
+                        error: &mut b,
+                    },
+                    Span {
+                        state: &mut right,
+                        pos: 7,
+                        rows: 2,
+                        error: &mut r,
+                    },
+                ],
+            )?;
+            assert!(l.is_none() && r.is_none());
+            assert!(request_local(&b.unwrap()));
+            assert!(bad.windows.is_empty() && bad.sources.is_empty());
+            let out = rt.to_host(&combined)?;
+            assert!(out[4 * HIDDEN..7 * HIDDEN].iter().all(|&x| x == 0.));
+            for (actual, reference) in [
+                (&out[..4 * HIDDEN], &expected[0]),
+                (&out[7 * HIDDEN..], &expected[1]),
+            ] {
+                if crate::runtime::packed_dense() {
+                    assert_eq!(actual, reference);
+                } else {
+                    let sq = actual
+                        .iter()
+                        .zip(reference)
+                        .map(|(&a, &b)| (a - b).powi(2))
+                        .sum::<f32>();
+                    let norm = reference.iter().map(|x| x * x).sum::<f32>();
+                    assert!((sq / norm.max(1e-20)).sqrt() < 0.01);
+                }
+            }
+            assert_eq!(left.windows[&layer].next_pos, 7);
+            assert_eq!(right.windows[&layer].next_pos, 9);
+        }
+        Ok(())
+    }
 
     #[test]
     fn six_full_sessions_reserve_only_their_live_compressed_bytes() {
