@@ -246,6 +246,7 @@ struct DeviceCache {
     packed_upload: bool,
     inline_metadata: bool,
     fused: bool,
+    packed_decode: bool,
     parallel: bool,
     parallel_draft: bool,
     staged: bool,
@@ -276,6 +277,7 @@ impl DeviceCache {
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
             inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
             fused: switch("DS4_MOE_FUSED", false)?,
+            packed_decode: switch("DS4_MOE_PACKED_DECODE", false)?,
             parallel: switch("DS4_EXPERT_PARALLEL", false)?,
             parallel_draft: switch("DS4_EXPERT_PARALLEL_DRAFT", false)?,
             staged: switch("DS4_EXPERT_STAGED", true)?,
@@ -548,7 +550,11 @@ impl Dispatch<'_> {
                 i32::from(matches!(self.layer, Layer::Draft(_))),
                 splits,
                 device.inline_metadata.into(),
-                device.fused.into(),
+                if device.fused {
+                    1 + i32::from(device.packed_decode)
+                } else {
+                    0
+                },
             )
         };
         device.scratch = scratch as usize;

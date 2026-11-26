@@ -195,7 +195,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
             with ExitStack() as stack:
                 weighted = upload(stack, output)
                 inp = upload(stack, inputs)
-                for fused in (0, 1):
+                for fused in (0, 1, 2):
                     check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), (Job * len(jobs))(*jobs),
                                              len(jobs), rows, n, inp, weighted, mcg, 8, 1, fused))
                     download(weighted, output)
@@ -232,7 +232,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
                 rows = (RoutedRow * n)(*(RoutedRow(slabs[i % 2], i % 2, i, .5) for i in range(n)))
                 jobs = (Job * n)(*(Job(slabs[i % 2], i, 1) for i in range(n)))
                 check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), jobs, n,
-                                         rows, n, inp, dst, 0, 8, 1, 1))
+                                         rows, n, inp, dst, 0, 8, 1, 2))
                 download(dst, output)
                 for i in range(2):
                     row = RoutedRow(slabs[i], i, 0, .5)
@@ -253,7 +253,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
                     subset_rows = (RoutedRow * n_sub)(*(rows[i] for i in range(parity, n, 2)))
                     subset_jobs = (Job * n_sub)(*(Job(slabs[parity], i, 1) for i in range(n_sub)))
                     check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), subset_jobs, n_sub,
-                                             subset_rows, n_sub, inp, dst, 0, 2, 1, 1))
+                                             subset_rows, n_sub, inp, dst, 0, 2, 1, 2))
                 partitioned = np.empty_like(output)
                 download(dst, partitioned)
                 np.testing.assert_array_equal(partitioned.view("u4"), output.view("u4"))

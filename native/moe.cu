@@ -54,6 +54,29 @@ __device__ __forceinline__ unsigned pair_bits(half a, half b) {
     return unsigned(__half_as_ushort(a)) | (unsigned(__half_as_ushort(b)) << 16);
 }
 
+// Decode both consecutive trellis states directly into an MMA B register.
+// Low and high half lanes reproduce the scalar codebook arithmetic independently.
+template <bool mcg>
+__device__ __forceinline__ unsigned decode_pair(unsigned a, unsigned b) {
+    constexpr unsigned multiplier = mcg ? 0xcbac1fedu : 0x83dcd12du;
+    a = (a & 0xffffu) * multiplier;
+    b = (b & 0xffffu) * multiplier;
+    unsigned pair;
+    if constexpr (mcg) {
+        a = (a & 0x8fff8fffu) ^ 0x3b603b60u;
+        b = (b & 0x8fff8fffu) ^ 0x3b603b60u;
+        unsigned low = __byte_perm(a, b, 0x5410);
+        unsigned high = __byte_perm(a, b, 0x7632);
+        asm("add.rn.f16x2 %0, %1, %2;" : "=r"(pair) : "r"(low), "r"(high));
+    } else {
+        a = __dp4a(a, 0x01010101u, 0x6400u);
+        b = __dp4a(b, 0x01010101u, 0x6400u);
+        unsigned sums = __byte_perm(a, b, 0x5410);
+        asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(pair) : "r"(sums), "r"(0x1eee1eeeu), "r"(0xc931c931u));
+    }
+    return pair;
+}
+
 __device__ __forceinline__ void mma(const unsigned (&a)[4], unsigned b0, unsigned b1,
                                     float (&c)[4]) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
@@ -65,7 +88,7 @@ __device__ __forceinline__ void mma(const unsigned (&a)[4], unsigned b0, unsigne
 // Four warps cover 64 output columns. Each job covers up to 16 inputs routed
 // to one expert, sharing the decoded weights. Split K keeps a one-token job
 // large enough to distribute across the SMs. Partials are reduced in order.
-template <int projection, bool mcg, bool paired = false>
+template <int projection, bool mcg, bool paired = false, bool packed_decode = false>
 __global__ void project(const Job *jobs, const half *x, float *partial, int rows, int splits) {
     constexpr int K = projection == Down ? I : H;
     constexpr int N = projection == Down ? H : I;
@@ -101,8 +124,12 @@ __global__ void project(const Job *jobs, const half *x, float *partial, int rows
         unsigned b[4];
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            b[j] = pair_bits(decode<mcg>(unsigned(windows >> (21 - j * 6))),
-                             decode<mcg>(unsigned(windows >> (18 - j * 6))));
+            unsigned left = unsigned(windows >> (21 - j * 6));
+            unsigned right = unsigned(windows >> (18 - j * 6));
+            if constexpr (packed_decode)
+                b[j] = decode_pair<mcg>(left, right);
+            else
+                b[j] = pair_bits(decode<mcg>(left), decode<mcg>(right));
         }
         unsigned a[4] = {};
         const half *start = x + size_t(job.begin) * K + kt * 16 + ak;
@@ -327,16 +354,16 @@ void launch_ffn(Job *device_jobs, RoutedRow *device_rows, int n_jobs, int rows, 
     launch_projection<Down, mcg>(device_jobs, device_rows, n_jobs, rows, splits, gate, rotated,
                             partial, weighted);
 }
-template <bool mcg>
+template <bool mcg, bool packed_decode>
 void launch_fused(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows, int splits,
                   const float *x, half *rotated, float *partial, float *weighted) {
     // The partial allocation is sized for H down columns, sufficient for
     // 2*I gate/up columns. The contiguous gate/up/rotated buffers hold 2*H halves.
     static_assert(2 * I <= H && 2 * I * sizeof(float) >= H * sizeof(half));
     rotate_input<Gate, true><<<dim3((H+511)/512,rows,2),128>>>(routes, x, rotated);
-    project<Gate, mcg, true><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
+    project<Gate, mcg, true, packed_decode><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
     prepare_down<<<dim3((I+511)/512,rows),128>>>(routes, partial, rotated, rows, splits);
-    project<Down, mcg><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
+    project<Down, mcg, false, packed_decode><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
     rotate_output<Down><<<dim3((H+511)/512,rows),128>>>(routes, partial, weighted, rows, splits);
 }
 
@@ -472,8 +499,10 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
     }
     if (fused) {
         half *work = reinterpret_cast<half *>(gate);
-        if (mcg) launch_fused<true>(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
-        else launch_fused<false>(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
+        // Mode 1 is the original fused reference, 2 packs codebook arithmetic by pairs.
+        auto launch = mcg ? (fused == 2 ? launch_fused<true,true> : launch_fused<true,false>)
+                          : (fused == 2 ? launch_fused<false,true> : launch_fused<false,false>);
+        launch(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
     } else if (mcg)
         launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
     else
