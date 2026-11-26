@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub(super) struct Config {
     max_width: usize,
     adaptive: bool,
+    prior_output: bool,
 }
 
 pub(super) fn configured() -> Result<Config> {
@@ -28,7 +29,13 @@ pub(super) fn configured() -> Result<Config> {
         Ok("1") => true,
         _ => bail!("DS4_ADAPTIVE_LOOKUP must be 0 or 1"),
     };
+    let prior_output = match std::env::var("DS4_OUTPUT_LOOKUP").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => bail!("DS4_OUTPUT_LOOKUP must be 0 or 1"),
+    };
     Ok(Config {
+        prior_output,
         max_width: width,
         adaptive,
     })
@@ -41,9 +48,8 @@ pub(super) struct PromptLookup {
     previous: Vec<u32>,
 }
 impl PromptLookup {
-    /// Restrict lookup to the source text supplied by this request. Generic
-    /// code generation can reuse punctuation from its own output frequently
-    /// even when the subsequent code differs, wasting a long verification pass.
+    /// Index the supplied prompt once. Previous output is searched only on a
+    /// prompt lookup miss and only when explicitly enabled.
     pub(super) fn new(prompt: &[u32], config: Config) -> Self {
         let mut lookup = Self {
             prompt_len: prompt.len(),
@@ -97,9 +103,53 @@ impl PromptLookup {
             (true, 32..64) => available.min(64),
             _ => available,
         };
+        if length == 0 && self.config.prior_output {
+            return prior_output_proposal(&ids[self.prompt_len..], width).to_vec();
+        }
         prompt[source..source + length].to_vec()
     }
 }
+// Repeated code edits often share generated signatures or documentation that
+// never occurred in the supplied file. Read only the committed output already
+// present at this scheduler boundary. The target verifies these tokens as usual.
+fn prior_output_proposal(output: &[u32], width: usize) -> &[u32] {
+    const MATCH: usize = 8;
+    let recent = &output[output.len().saturating_sub(2048)..];
+    if recent.len() <= MATCH || width == 0 {
+        return &[];
+    }
+    let suffix = &recent[recent.len() - MATCH..];
+    let mut best = (0, 0);
+    let mut source = 0;
+    for (start, _) in recent[..recent.len() - 1]
+        .windows(MATCH)
+        .enumerate()
+        .rev()
+        .filter(|(_, w)| *w == suffix)
+        .take(16)
+    {
+        let end = start + MATCH;
+        let mut matched = MATCH;
+        while matched < end.min(64)
+            && recent[end - matched - 1] == recent[recent.len() - matched - 1]
+        {
+            matched += 1;
+        }
+        let available = width.min(recent.len() - end);
+        if available >= 4 && (matched, available) > best {
+            best = (matched, available);
+            source = end;
+        }
+    }
+    let cap = match best.0 {
+        0..8 => 0,
+        8..16 => 12,
+        16..32 => 24,
+        _ => 48,
+    };
+    &recent[source..source + best.1.min(cap)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,7 +161,29 @@ mod tests {
         Config {
             max_width: 128,
             adaptive,
+            prior_output: false,
         }
+    }
+
+    #[test]
+    fn generated_lookup_requires_a_previous_matching_suffix_and_reads_only_committed_ids() {
+        let passage: Vec<u32> = (1..=32).collect();
+        let output = [passage.as_slice(), &[81, 82, 83, 84, 85], &passage].concat();
+        assert_eq!(prior_output_proposal(&output, 5), [81, 82, 83, 84, 85]);
+        assert!(prior_output_proposal(&passage, 16).is_empty());
+        assert!(prior_output_proposal(&[12; 7], 16).is_empty());
+        assert!(prior_output_proposal(&output, 0).is_empty());
+        let mut cfg = config(true);
+        cfg.prior_output = true;
+        let prompt = [999; 32];
+        let ids = [prompt.as_slice(), &output].concat();
+        assert!(PromptLookup::new(&prompt, config(true))
+            .propose(&ids, 5, true)
+            .is_empty());
+        assert_eq!(
+            PromptLookup::new(&prompt, cfg).propose(&ids, 5, true),
+            [81, 82, 83, 84, 85]
+        );
     }
 
     #[test]
@@ -154,6 +226,7 @@ mod tests {
             Config {
                 max_width: 9,
                 adaptive: true,
+                prior_output: false,
             },
         );
         assert_eq!(
