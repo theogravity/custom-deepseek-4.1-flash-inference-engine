@@ -218,7 +218,7 @@ impl Runtime {
             weights: Arc::new(weights),
             device: devices[0],
             devices,
-            moe_cache: MoeCache::default(),
+            moe_cache: MoeCache::open(path)?,
             attention_scratch: Default::default(),
             verification: false,
             target_prefill: false,
@@ -327,6 +327,24 @@ impl Runtime {
         }
         copied?;
         Ok(out)
+    }
+    pub(crate) fn write_host_range(&self, dst: &mut Dev, offset: usize, src: &[f32]) -> Result<()> {
+        ensure!(
+            dst.device() == self.device
+                && offset
+                    .checked_add(src.len())
+                    .is_some_and(|n| n <= dst.len()),
+            "invalid host write range"
+        );
+        checked(unsafe {
+            ds_copy_f32(
+                self.device,
+                dst.as_mut_ptr().add(offset),
+                src.as_ptr(),
+                src.len(),
+                0,
+            )
+        })
     }
     pub fn slice(&mut self, x: &Dev, start: usize, len: usize) -> Result<Dev> {
         ensure!(

@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--sample-steady", action="store_true",
                         help="sample committed positions every 200 ms during all-client decode")
     parser.add_argument("--base", default="http://127.0.0.1:8001")
+    parser.add_argument("--allow-output-variation", action="store_true", help="allow varying output hashes for approximate numerical experiments")
     args = parser.parse_args()
     if args.rounds < 1 or args.output < 2 or args.chunk_size < 1:
         parser.error("need positive rounds and chunk size, and at least two output tokens")
@@ -128,10 +129,13 @@ def main():
                     and row["finish"] == "length" for row, spec in zip(rows, prompts, strict=True))
         delta = {k: after[k] - before[k] for k in ("requests_started", "prefix_reused_tokens",
                  "multi_target_passes", "six_target_passes", "rotations")}
+        for k in ("cpu_expert_jobs", "cpu_expert_rows"):
+            if k in after:
+                delta[k] = after[k] - before[k]
         overlap = min(r["last"] for r in rows) - max(r["first"] for r in rows)
         if (not valid or after["logical_active"] or delta["requests_started"] != args.clients
                 or len({r["stream_id"] for r in rows}) != args.clients or delta["rotations"]
-                or (identities is not None and hashes != identities) or overlap <= 0
+                or (not args.allow_output_variation and identities is not None and hashes != identities) or overlap <= 0
                 or (wave and delta["prefix_reused_tokens"] != expected_reuse)
                 or (args.clients > 1 and delta["multi_target_passes"] <= 0)
                 or (args.clients == 6 and delta["six_target_passes"] <= 0)):
@@ -152,7 +156,7 @@ def main():
               wall_tok_s=wall_rate, seconds=elapsed, resident_decode=steady, first_response_spread_s=first_spread, decode_span_s=span, overlap_s=overlap, delta=delta, rows=rows)), flush=True)
     print(json.dumps(dict(clients=args.clients, workload=args.workload, output=args.output,
           seed=frozen["seed"], prompts=proofs, expected_reused_tokens=expected_reuse, chunk_size=args.chunk_size,
-          measured_waves=len(rates), median_decode_tok_s=median(rates), median_wall_tok_s=median(wall_rates))))
+          allow_output_variation=args.allow_output_variation, measured_waves=len(rates), median_decode_tok_s=median(rates), median_wall_tok_s=median(wall_rates))))
 
 
 if __name__ == "__main__":

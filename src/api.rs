@@ -468,6 +468,8 @@ struct Metrics {
     processed_tokens: usize,
     peak_processed_tokens: usize,
     six_target_passes: u64,
+    cpu_expert_jobs: u64,
+    cpu_expert_rows: u64,
     multi_target_passes: u64,
     peak_target_batch: usize,
 }
@@ -476,6 +478,7 @@ async fn metrics(State(s): State<Arc<ServerState>>) -> Json<Metrics> {
     (sample.multi_target_passes, sample.peak_target_batch) =
         crate::model::batch::target_batch_stats();
     sample.six_target_passes = crate::model::batch::six_target_passes();
+    (sample.cpu_expert_jobs, sample.cpu_expert_rows) = crate::moe::cpu_counters();
     sample.swap = s.swap.stats();
     Json(sample)
 }

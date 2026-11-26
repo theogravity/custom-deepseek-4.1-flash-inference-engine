@@ -1,0 +1,854 @@
+{
+  "measured_image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+  "gpu_cap_w_each": 375,
+  "cpu_socket_cap_w": 225,
+  "input_history_sha256": "1bde155d1d810e589a9cc5a7c298d6438693b7fa5416ffa1df6bef937d960990",
+  "per_route_relative_l2": [
+    0.000903,
+    0.0009264,
+    0.0009058,
+    0.0009364,
+    0.0009758,
+    0.0010396,
+    0.000954,
+    0.0009475,
+    0.0009538
+  ],
+  "legs": {
+    "cpu-512-off-a": {
+      "label": "cpu-512-off-a",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "0"
+      },
+      "clients": 6,
+      "output": 512,
+      "workload": "code",
+      "median_tok_s": 297.20829474763804,
+      "whole_wave": 281.435759771711,
+      "per_wave": [
+        285.1054250788189,
+        301.787791972143,
+        296.81563078560913,
+        297.86224905050403,
+        295.7396353500132,
+        297.60095870966694
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        266,
+        70,
+        235369
+      ],
+      "raw_sha256": "7377f919911cee25d21bcfcfa58676bc617a0e2cb528cba484d7de4d2ec2006c",
+      "warm_cpu_jobs": 0,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        269.5895757084452,
+        285.5266768687022,
+        280.59177610082037,
+        281.1360843329721,
+        283.0499801877898,
+        281.7354352104499
+      ],
+      "resident_tok_s": 338.67558937460103
+    },
+    "cpu-512-on": {
+      "label": "cpu-512-on",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "1"
+      },
+      "clients": 6,
+      "output": 512,
+      "workload": "code",
+      "median_tok_s": 266.42774749652676,
+      "whole_wave": 254.2722169833017,
+      "per_wave": [
+        240.80684103031516,
+        250.01668673831026,
+        275.9335406992145,
+        270.4625308116538,
+        262.3929641813997,
+        279.30879511143695
+      ],
+      "matches": [
+        0,
+        0,
+        1,
+        1,
+        0,
+        2
+      ],
+      "per_wave_cpu_jobs": [
+        755,
+        565,
+        580,
+        500,
+        537,
+        452
+      ],
+      "per_wave_cpu_rows": [
+        787,
+        596,
+        601,
+        513,
+        559,
+        468
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        434,
+        242,
+        234553
+      ],
+      "raw_sha256": "cb10c6d481c89f7d1277ceb0152aa6bb0daa850e00a8dec9ad5cacc8abfd7e2a",
+      "warm_cpu_jobs": 745,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "d8a005be5077bb0b1526a59252a7abba0ade8ee133e9d44a435343d7b3b908fe",
+          "272663f5e11fa99e17f2a987466aca6e1d56d7ec18c7ad0641a0d11278335d66",
+          "0a7669f9f02a73ea86934b30b17988b3aaf6458780351ef2ebc8c7155355e737",
+          "69cc88627ca025e89ccf016717748830f1c5dad59380e53098f9d96ad6c3c764",
+          "95ea615ba07dfb46cfaac768eed59ef7fd69cb223d1ac572b52de0ba2e4a673f",
+          "960d40c4bcedb4286b5aca078a5cd9e981680ea866bcde34de8b7ed5db44263a"
+        ],
+        [
+          "23f7442cd528d5f5c5e3da0fd9f4fdfecb8d7d8a59185107f8b744b2888c5f97",
+          "272663f5e11fa99e17f2a987466aca6e1d56d7ec18c7ad0641a0d11278335d66",
+          "9b04e769dc5819c64a55f95913c5b70f2f22ad9b0916764210df22188eabf4c7",
+          "6ca8a798effb0d73cdb7adb1c2677ccf06d021bce375004262be1530a9c77e08",
+          "b027eb655f2a47485bd8cf4eaf5f0e823c04051d7cf32147858a4b752833debc",
+          "77b2fc5d861bee81e10455243551b48d288fba9a8904e37c413104c60318a5a9"
+        ],
+        [
+          "96edc7fdd3193d16f148b10fe3ee724a0dcc3d658fabb0351835ab93485a476b",
+          "272663f5e11fa99e17f2a987466aca6e1d56d7ec18c7ad0641a0d11278335d66",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "036723106414c2760949ce6d9a8febe206f33a9cd6d2521c2e63f895fd9fcd12",
+          "b32e9bbac9e42c211ef3ab2012a55a44c7751360807856c459a2ac4d308227d4",
+          "5a3660830a7a64e0428a7fa0ff6ff4d27eb73b02271ff5ac50f6743d66324d8e"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "272663f5e11fa99e17f2a987466aca6e1d56d7ec18c7ad0641a0d11278335d66",
+          "fcc7bc327f13e4cc4b78ee66aeb4e1d634286eb77ddd79f4d653bed6e9f7e798",
+          "e06a52f598c698b01ed89efdcb7ae28b288f4e29c0d16ac0ac9736af71b55e6f",
+          "a73c5c540dae1f47e3982f9f9b46b0ef1b6344197f9c780ac4508b78a87dc533",
+          "0d88e719aa430b9cb140add204b94bab00e0dac6b317e12202e92bc876a4968f"
+        ],
+        [
+          "5e9466b352fe9b52d718846c82934ca1b2842c2ed7136e6374ce4c206c3a6810",
+          "272663f5e11fa99e17f2a987466aca6e1d56d7ec18c7ad0641a0d11278335d66",
+          "ac4e0a29ba87c8f5097172657c45ea3ca237d2a148abfe8d4818d88ad6c31a6e",
+          "036723106414c2760949ce6d9a8febe206f33a9cd6d2521c2e63f895fd9fcd12",
+          "2f4cc656d9a37d6bafb7c1db75624e490e85e22ee751290ea279d12b8b2531ee",
+          "408312949839143e10fd03f90aafab3e1f112f4547222b6852bd07b73525eee9"
+        ],
+        [
+          "634749044d84d6f83fa4efb500d4902d381b818dd3b6bc4f9a7276b9924d825f",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "3caa59c46cd43bcd14b7bf67fa264848011bcb5e8e7a55b02bca2761ab62bfe3",
+          "7d92a2cb6da269c8e36d6ba3b012581669bdfdcab378818c198c025d43ee011d",
+          "6ceaa4e51b18ad75d60e36448aee710fe585c1a5eb1bce2f33d7552d8f2644c1"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        229.41969606811978,
+        236.03501066469312,
+        261.71082484073645,
+        257.4827140372359,
+        251.06171992936746,
+        265.68818344414274
+      ],
+      "resident_tok_s": 306.6905855963896
+    },
+    "cpu-512-off-b": {
+      "label": "cpu-512-off-b",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "0"
+      },
+      "clients": 6,
+      "output": 512,
+      "workload": "code",
+      "median_tok_s": 298.83435045501585,
+      "whole_wave": 285.21147068922755,
+      "per_wave": [
+        298.1350497148403,
+        301.81691868415993,
+        302.49134022558843,
+        298.79218041169946,
+        298.8765204983323,
+        297.4879188951222
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        386,
+        240,
+        235364
+      ],
+      "raw_sha256": "de9672c9b6d12df8ad4c719670be593359b7f94c0a18a8bff37f7a120f5c239d",
+      "warm_cpu_jobs": 0,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ],
+        [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26",
+          "b6d6fa67a9ebb3d017b5ecaa9d495aa49ba5bc9f1c8ec15357448703b33e2e8f",
+          "05d8c8203a1944559a780c9b82583dc23a712d03fc05368605fd2c7186425ed3",
+          "4e1b86482e3c32c9ae2fa7f8df262716462ae1057f7f45c2496d4335a0798b35",
+          "0231a994402a14f709722914c2dc098fb16662505be5bb61a78f373cf520b8bf",
+          "ea7d37d97b3ca42eac7f8bd795513db5770501689f08f7164e601c1c39238795"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        280.1420361779323,
+        285.1434599336486,
+        285.27948144480644,
+        285.68497101404716,
+        285.99706941306255,
+        283.6490333301617
+      ],
+      "resident_tok_s": 344.11537301352917
+    },
+    "cpu-768-off-a": {
+      "label": "cpu-768-off-a",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "0"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 320.9126864420533,
+      "whole_wave": 309.5635321779415,
+      "per_wave": [
+        317.4736473763157,
+        321.6009589467929,
+        323.68273898813095,
+        320.22441393731367,
+        324.9575676559057,
+        319.84631906193124
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        386,
+        472,
+        235254
+      ],
+      "raw_sha256": "1c1df0340f7ccb0a73287c4b419910e1ebd5d603078067648356a4a8459b1656",
+      "warm_cpu_jobs": 0,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        307.51988148365945,
+        309.1467351399281,
+        308.92299423396935,
+        310.49018483763496,
+        311.47588915599755,
+        309.9803292159549
+      ],
+      "resident_tok_s": 349.99790100643287
+    },
+    "cpu-768-on": {
+      "label": "cpu-768-on",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "1"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 289.35946505405036,
+      "whole_wave": 278.87452285379675,
+      "per_wave": [
+        262.8206779195674,
+        282.2561877643466,
+        278.2074045059427,
+        296.4627423437541,
+        301.26485665130764,
+        308.63907624394125
+      ],
+      "matches": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_jobs": [
+        1112,
+        943,
+        951,
+        840,
+        805,
+        765
+      ],
+      "per_wave_cpu_rows": [
+        1163,
+        975,
+        992,
+        882,
+        840,
+        800
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        78,
+        148,
+        235678
+      ],
+      "raw_sha256": "4260771f85c4a612b778c9f49c0cf254239aa617adcba5cc11eeb5be8d172c23",
+      "warm_cpu_jobs": 1390,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "ce50b1b264f81ae0c7ed6672662ad01f52c9c061135fe69f7774c28a187ea4a0",
+          "a11f79462ffc5abb0210b566416e05a2d3ab30dba7dac608f18f47e17faade6d",
+          "e0d46a4a89d778ac59e1408926f4d29f7639778e245827ef27bcc9784b91d284",
+          "2f6e0679f55ff54a24346d5322a3c68a52bd099ee88e342e0306947a3322c9cf",
+          "c41acd29c8bc4c4a7ef0b213254756469f878b106913340aee2d7739ed7037b2",
+          "2846144e1367aeaef048d0cb22e4c7ef3e2a5f022f879cabc4fca1b8e925e395"
+        ],
+        [
+          "c61edf6aeb87a27a2f0932bfabed3ab7852c510c5fff325b728ec86fdbe51c3b",
+          "d80b1460694b14b48bdca424d3047b6080f0a49eda3fa75907e33597f9e58e0f",
+          "1e946227e81ea698d0c289fc51c29208e2f99bb7b55d9604b08506f49d28cdcd",
+          "90e25c09e6eae38fa8e43c625a342daf45f429e8007166f328212c19f5b2598c",
+          "bb1700f707f36335f4c80ae9d633600a9b7a686c141b2907efe5faa25b08cb28",
+          "5b53c6e0bd53cf71438be0f00dac04d4036c1d03ef104ea366a3f6b7cd6d1034"
+        ],
+        [
+          "18fe24a62e4472e98917d5e9ec8c718195a52bcb20d66b1d404dd91b4c0eb712",
+          "d80b1460694b14b48bdca424d3047b6080f0a49eda3fa75907e33597f9e58e0f",
+          "65990f7c58f4f1f6f4a2ae2aafb554c88da31e6beef5bf7ca94b28aafdb5b3ef",
+          "2f6e0679f55ff54a24346d5322a3c68a52bd099ee88e342e0306947a3322c9cf",
+          "9b5d0d8509690b8328f2baf3cde927726d1579577d4367567428388cca49854b",
+          "629fff95bccaa2e8e4ae947c663af96f1ac51747fb3a5de9f1788dcda3511fee"
+        ],
+        [
+          "7f1263b51bc61c8a80f172a86253dfeb381180468f8d3696f70ab63552afd1cb",
+          "d80b1460694b14b48bdca424d3047b6080f0a49eda3fa75907e33597f9e58e0f",
+          "3a29bff69b404db1a5607cce2174d6bc1cdbc8759c4d5f6a3c9b1eab20ad396f",
+          "2f6e0679f55ff54a24346d5322a3c68a52bd099ee88e342e0306947a3322c9cf",
+          "d0c7094efb60a7999e8d0a05975fbf6c0d33740371e206f919561c3a4fcda4b9",
+          "5a816bb478e6584f4ac81a103074b271d0b3430defffb406f89f91d25b4cd39e"
+        ],
+        [
+          "65371f4f8dab5f4d1fe72da28fe067e56fa527e42ee0fef51eaddd5c5739a98c",
+          "d80b1460694b14b48bdca424d3047b6080f0a49eda3fa75907e33597f9e58e0f",
+          "e8bba40e2818b1d2b89cca13df7c60b6b292408b91598670cd8a1faacfdcfcb5",
+          "2f6e0679f55ff54a24346d5322a3c68a52bd099ee88e342e0306947a3322c9cf",
+          "d87014700589878981223d3bb07da34d3a2f6629c7a93e4d05d3ab17227e0097",
+          "97cdafa96a48ef0615be8bc90ff1ee2f4486821068e0b753e0f3731ba9fd2a08"
+        ],
+        [
+          "ccec676a8ea6d666aa2eb61f26c3e3b348173f33240182561f1c031d70a39d6d",
+          "d80b1460694b14b48bdca424d3047b6080f0a49eda3fa75907e33597f9e58e0f",
+          "c74f24ec3cf7deb6b45b4775d6e7c5aec0c621ea8d953e940bdc59c82ce84789",
+          "69912315e6bcbe9ba23a9d1a8287de07e595365c255b53e54b694b166c82f2b1",
+          "656c6b566790c7fe2594e1c6547bd8ebbb5805390207772fb367f4f4590c5c89",
+          "f79eb2d4d93b6bfb4fb1b1820e27f633e557637338c68b97f75ef9d910e4b418"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        249.53367629336546,
+        272.3152229350512,
+        267.677171410559,
+        285.4338227725422,
+        291.1750792520988,
+        298.93363444185485
+      ],
+      "resident_tok_s": 312.3893014767613
+    },
+    "cpu-768-off-b": {
+      "label": "cpu-768-off-b",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "0"
+      },
+      "clients": 6,
+      "output": 768,
+      "workload": "code",
+      "median_tok_s": 324.92065916636307,
+      "whole_wave": 312.11566329932486,
+      "per_wave": [
+        323.9856644006963,
+        325.07906427919823,
+        324.76225405352795,
+        326.492290078683,
+        323.7862331349902,
+        325.4416282426936
+      ],
+      "matches": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "per_wave_cpu_jobs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704,
+        2424704
+      ],
+      "free_mib_min": [
+        100,
+        244,
+        234711
+      ],
+      "raw_sha256": "7f45f091aa62966717f850cdbc2bcb6ae789372cdd36335cc627f409d499da13",
+      "warm_cpu_jobs": 0,
+      "receipt_or_code_checks": 36,
+      "output_digests": [
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ],
+        [
+          "094d2e364e345a4bfa7e2e67f6d81a736ff74e41a742d184cfbc4b1643e12dc6",
+          "61e416617a28f8de535fdb43de758e1f57b0054626f88079069225b1d324bd35",
+          "cea4677c4cd1d286b660273b0274c49a39cab3fbccdd2af2ab06c9fe177d98d2",
+          "a2c6a255443fe75a061500ff190f03f630b9730ea77818457d091051015d7c3b",
+          "8b1d0962ffc31b40e84fa985fc13fc3a2df760cf61f28de6caa52736c921efde",
+          "ed78f0d380f8c3e1df6413a1bd27f391b5ed5d1bbfab1efde94c049aa3662a5e"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        309.9999979152178,
+        312.16504391853834,
+        311.312395905787,
+        313.4495709188588,
+        312.0662826801113,
+        312.97216748872717
+      ],
+      "resident_tok_s": 354.0366144173064
+    },
+    "cpu-receipt": {
+      "label": "cpu-receipt",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "1"
+      },
+      "clients": 6,
+      "output": 128,
+      "workload": "receipt",
+      "median_tok_s": 384.79326244717373,
+      "whole_wave": 295.5134592927045,
+      "per_wave": [
+        384.5158184638911,
+        385.07070643045637
+      ],
+      "matches": null,
+      "per_wave_cpu_jobs": [
+        0,
+        0
+      ],
+      "per_wave_cpu_rows": [
+        0,
+        0
+      ],
+      "prefix_reuse": [
+        2423808,
+        2423808
+      ],
+      "free_mib_min": [
+        40390,
+        37652,
+        235724
+      ],
+      "raw_sha256": "c88b4ea74672963fb63710c1a22c4cc596b003f81e591569af62c169f54c2fc7",
+      "warm_cpu_jobs": 0,
+      "receipt_or_code_checks": 12,
+      "output_digests": [
+        [
+          "1aaacc0f495b7bacd470a94050c7c2e1c6e772d5911ecf0d31e1f77336c5bc7d",
+          "8f09b580f9443edc7232c1b3e97ef280444f3cf819135f35b877e6bc1a40e14a",
+          "5d7f16620ebf7dacc2a9d1c05d6c3602ab5c91723f5d65e7e3353a32c85a41d9",
+          "88a83d2ad69935fec3711cf07368f6e64f4df2e1b027964ab1aa8e1448b9a650",
+          "5ce94bd7273c9a6de1df1e2ba8d670d5aa99c2f0a48e0bbc78d6880b1e27b5e0",
+          "a104425f7e33d5b71d4b6e13d6e98b2be48bbac586f0671af5d1d7622aa1053c"
+        ],
+        [
+          "1aaacc0f495b7bacd470a94050c7c2e1c6e772d5911ecf0d31e1f77336c5bc7d",
+          "8f09b580f9443edc7232c1b3e97ef280444f3cf819135f35b877e6bc1a40e14a",
+          "5d7f16620ebf7dacc2a9d1c05d6c3602ab5c91723f5d65e7e3353a32c85a41d9",
+          "88a83d2ad69935fec3711cf07368f6e64f4df2e1b027964ab1aa8e1448b9a650",
+          "5ce94bd7273c9a6de1df1e2ba8d670d5aa99c2f0a48e0bbc78d6880b1e27b5e0",
+          "a104425f7e33d5b71d4b6e13d6e98b2be48bbac586f0671af5d1d7622aa1053c"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        297.5096829960256,
+        293.51723558938346
+      ],
+      "resident_tok_s": 524.8387320248846
+    },
+    "cpu-receipt-stress": {
+      "label": "cpu-receipt-stress",
+      "image": "sha256:962c31ec4ae8f0079834faaa85953b59857ee40e11e4114040c9509cd34e017b",
+      "env": {
+        "DS4_CPU_EXPERTS": "1",
+        "DS4_MOE_CACHE_GIB": "4"
+      },
+      "clients": 6,
+      "output": 128,
+      "workload": "receipt",
+      "median_tok_s": 34.71005411630249,
+      "whole_wave": 32.54776330231603,
+      "per_wave": [
+        34.55687214763834,
+        34.863236084966644
+      ],
+      "matches": null,
+      "per_wave_cpu_jobs": [
+        3148,
+        3090
+      ],
+      "per_wave_cpu_rows": [
+        4005,
+        3935
+      ],
+      "prefix_reuse": [
+        2423808,
+        2423808
+      ],
+      "free_mib_min": [
+        84968,
+        84606,
+        235628
+      ],
+      "raw_sha256": "19b6cd9ac1e6f9384a23a162da95f1cf729f409871b4495460a59a7c6b54efff",
+      "warm_cpu_jobs": 3193,
+      "receipt_or_code_checks": 12,
+      "output_digests": [
+        [
+          "1aaacc0f495b7bacd470a94050c7c2e1c6e772d5911ecf0d31e1f77336c5bc7d",
+          "8f09b580f9443edc7232c1b3e97ef280444f3cf819135f35b877e6bc1a40e14a",
+          "5d7f16620ebf7dacc2a9d1c05d6c3602ab5c91723f5d65e7e3353a32c85a41d9",
+          "88a83d2ad69935fec3711cf07368f6e64f4df2e1b027964ab1aa8e1448b9a650",
+          "5ce94bd7273c9a6de1df1e2ba8d670d5aa99c2f0a48e0bbc78d6880b1e27b5e0",
+          "a104425f7e33d5b71d4b6e13d6e98b2be48bbac586f0671af5d1d7622aa1053c"
+        ],
+        [
+          "1aaacc0f495b7bacd470a94050c7c2e1c6e772d5911ecf0d31e1f77336c5bc7d",
+          "8f09b580f9443edc7232c1b3e97ef280444f3cf819135f35b877e6bc1a40e14a",
+          "5d7f16620ebf7dacc2a9d1c05d6c3602ab5c91723f5d65e7e3353a32c85a41d9",
+          "88a83d2ad69935fec3711cf07368f6e64f4df2e1b027964ab1aa8e1448b9a650",
+          "5ce94bd7273c9a6de1df1e2ba8d670d5aa99c2f0a48e0bbc78d6880b1e27b5e0",
+          "a104425f7e33d5b71d4b6e13d6e98b2be48bbac586f0671af5d1d7622aa1053c"
+        ]
+      ],
+      "per_wave_whole_tok_s": [
+        32.454593997121805,
+        32.640932607510244
+      ],
+      "resident_tok_s": 44.535461106671946
+    }
+  }
+}

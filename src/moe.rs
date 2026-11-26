@@ -13,6 +13,11 @@ use crate::{
     weights::Weights,
 };
 
+#[path = "cpu_experts.rs"]
+mod cpu_experts;
+pub(crate) use cpu_experts::counters as cpu_counters;
+use cpu_experts::CpuExperts;
+
 const HIDDEN: usize = 5120;
 const INTER: usize = 2304;
 const EXPERTS: usize = 384;
@@ -114,6 +119,7 @@ fn cuda(code: i32) -> Result<()> {
 
 #[derive(Default)]
 pub struct MoeCache {
+    cpu: Option<CpuExperts>,
     devices: HashMap<i32, DeviceCache>,
     metrics: Metrics,
 }
@@ -127,6 +133,12 @@ struct Metrics {
 }
 
 impl MoeCache {
+    pub(crate) fn open(root: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            cpu: CpuExperts::open(root)?,
+            ..Self::default()
+        })
+    }
     fn device(&mut self, device: i32) -> Result<&mut DeviceCache> {
         Ok(match self.devices.entry(device) {
             std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
@@ -254,6 +266,7 @@ struct DeviceCache {
     overlap_router: bool,
     parallel_prefill_router: bool,
     cached_capacity: bool,
+    last_capacity: usize,
     packed_upload: bool,
     inline_metadata: bool,
     fused: bool,
@@ -290,6 +303,7 @@ impl DeviceCache {
             uploads: 0,
             parallel_prefill_router: switch("DS4_PARALLEL_PREFILL_ROUTER", false)?,
             overlap_router: switch("DS4_MOE_OVERLAP_ROUTER", true)?,
+            last_capacity: usize::MAX,
             cached_capacity: switch("DS4_MOE_CACHED_CAPACITY", true)?,
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
             inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
@@ -329,6 +343,7 @@ impl DeviceCache {
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
         let capacity = Self::available_slots(self.slots.len(), free, self.limit);
+        self.last_capacity = capacity;
         while self.slots.len() > capacity {
             let slot = self.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
@@ -763,6 +778,65 @@ fn forward<const E: usize, const K: usize>(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
     );
+    let use_cpu = rt.verification
+        && !rt.target_prefill
+        && matches!(layer, Layer::Backbone(_))
+        && rt.moe_cache.cpu.is_some();
+    if use_cpu {
+        let mut cpu = rt.moe_cache.cpu.take().unwrap();
+        let result = cpu.dispatch(
+            rt,
+            layer,
+            &routes,
+            x,
+            &mut weighted,
+            parallel,
+            |rt, gpu, weighted| {
+                run_routed_gpu::<K>(
+                    rt, layer, gpu, &routes, x, weighted, parallel, stage_copy, peer_work,
+                )
+            },
+        );
+        rt.moe_cache.cpu = Some(cpu);
+        result?;
+    } else {
+        run_routed_gpu::<K>(
+            rt,
+            layer,
+            &routes,
+            &routes,
+            x,
+            &mut weighted,
+            parallel,
+            stage_copy,
+            peer_work,
+        )?;
+    }
+    cuda(unsafe {
+        ds_moe_finish(
+            weighted.as_ptr(),
+            shared_out.as_mut_ptr(),
+            shared_out.len(),
+            K as i32,
+        )
+    })?;
+    Ok(shared_out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_routed_gpu<const K: usize>(
+    rt: &mut Runtime,
+    layer: Layer,
+    routes: &[Route],
+    all_routes: &[Route],
+    x: &Dev,
+    weighted: &mut Dev,
+    parallel: bool,
+    stage_copy: bool,
+    peer_work: Option<PeerWork>,
+) -> Result<()> {
+    let peer_id = rt.peer_device();
+    let batch = x.len() / HIDDEN;
     let peer_rows;
     let primary_rows;
     let (local, remote): (&[Route], &[Route]) = if parallel {
@@ -772,7 +846,7 @@ fn forward<const E: usize, const K: usize>(
             .partition::<Vec<Route>, _>(|r| r.expert % 2 == 0);
         (&primary_rows, &peer_rows)
     } else {
-        (&routes, &[])
+        (routes, &[])
     };
     let mut compact = if stage_copy && !remote.is_empty() {
         Some(rt.buffer(remote.len() * HIDDEN)?)
@@ -820,7 +894,7 @@ fn forward<const E: usize, const K: usize>(
         weights: &rt.weights,
         layer,
         x,
-        weighted: &mut weighted,
+        weighted,
         top_k: K,
     };
     let (mut begin, mut ni, mut pi) = (0, 0, 0);
@@ -879,14 +953,6 @@ fn forward<const E: usize, const K: usize>(
             })?;
         }
     }
-    cuda(unsafe {
-        ds_moe_finish(
-            weighted.as_ptr(),
-            shared_out.as_mut_ptr(),
-            shared_out.len(),
-            K as i32,
-        )
-    })?;
     if report {
         let mut uploads = rt.moe_cache.device(primary.device)?.uploads - primary.uploads_before;
         let mut queries = primary.queried;
@@ -898,8 +964,8 @@ fn forward<const E: usize, const K: usize>(
         if matches!(layer, Layer::Backbone(0) | Layer::Draft(0)) {
             *m = Metrics::default();
         }
-        m.routes += routes.len();
-        m.unique += routes.chunk_by(|a, b| a.expert == b.expert).count();
+        m.routes += all_routes.len();
+        m.unique += all_routes.chunk_by(|a, b| a.expert == b.expert).count();
         m.uploads += uploads;
         m.capacity_queries += queries;
         if matches!(layer, Layer::Backbone(39) | Layer::Draft(2)) {
@@ -912,7 +978,7 @@ fn forward<const E: usize, const K: usize>(
                       m.routes, m.unique, m.uploads, m.uploads * SLOT_BYTES, m.capacity_queries);
         }
     }
-    Ok(shared_out)
+    Ok(())
 }
 
 #[cfg(test)]
