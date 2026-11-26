@@ -1,0 +1,209 @@
+{
+  "model": "DeepSeek V4.1 Flash EXL3 3-bit, code DSpark checkpoint",
+  "hardware": "2x NVIDIA RTX PRO 6000 Blackwell Workstation",
+  "prompt": "<｜begin▁of▁sentence｜><｜User｜>Write a complete, playable Tetris game in Python using pygame. Output only the code.<｜Assistant｜></think>",
+  "prompt_tokens": 23,
+  "temperature": 0,
+  "chunk_size": 64,
+  "client_streams": 1,
+  "calibration": {
+    "visible_tokens": 512,
+    "rounds": 90,
+    "total_proposals": 629,
+    "total_accepted": 421,
+    "observable_labels": 479,
+    "method": "One full, ungated DSpark trace. Align each proposal with the target until and including the first mismatch. Later scores in the round have no target label. Lower endpoints are inclusive. A score of one goes in the final bin.",
+    "conditional_matches_by_score": [
+      {
+        "score_interval": [
+          0.0,
+          0.1
+        ],
+        "observations": 0,
+        "target_matched": 0
+      },
+      {
+        "score_interval": [
+          0.1,
+          0.2
+        ],
+        "observations": 3,
+        "target_matched": 2
+      },
+      {
+        "score_interval": [
+          0.2,
+          0.3
+        ],
+        "observations": 3,
+        "target_matched": 1
+      },
+      {
+        "score_interval": [
+          0.3,
+          0.4
+        ],
+        "observations": 11,
+        "target_matched": 6
+      },
+      {
+        "score_interval": [
+          0.4,
+          0.5
+        ],
+        "observations": 21,
+        "target_matched": 12
+      },
+      {
+        "score_interval": [
+          0.5,
+          0.6
+        ],
+        "observations": 46,
+        "target_matched": 30
+      },
+      {
+        "score_interval": [
+          0.6,
+          0.7
+        ],
+        "observations": 48,
+        "target_matched": 36
+      },
+      {
+        "score_interval": [
+          0.7,
+          0.8
+        ],
+        "observations": 47,
+        "target_matched": 42
+      },
+      {
+        "score_interval": [
+          0.8,
+          0.9
+        ],
+        "observations": 53,
+        "target_matched": 46
+      },
+      {
+        "score_interval": [
+          0.9,
+          1.0
+        ],
+        "observations": 247,
+        "target_matched": 246
+      }
+    ],
+    "retrospective": {
+      "method": "Trim each recorded round before its first score below the threshold. Rows after the cap disappear in this replay, and a real run can start new rounds at different positions.",
+      "per_threshold": [
+        {
+          "threshold": 0.3,
+          "discarded_verification_rows": 33,
+          "discarded_accepted_tokens": 4
+        },
+        {
+          "threshold": 0.4,
+          "discarded_verification_rows": 88,
+          "discarded_accepted_tokens": 13
+        },
+        {
+          "threshold": 0.5,
+          "discarded_verification_rows": 158,
+          "discarded_accepted_tokens": 39
+        },
+        {
+          "threshold": 0.6,
+          "discarded_verification_rows": 251,
+          "discarded_accepted_tokens": 87
+        }
+      ]
+    }
+  },
+  "end_to_end": {
+    "visible_tokens": 768,
+    "warmup_per_arm": 1,
+    "measured_samples_per_arm": 2,
+    "command_arguments": [
+      "--chunk-size",
+      "64",
+      "bench",
+      "--samples",
+      "2",
+      "--max-tokens",
+      "768",
+      "<｜begin▁of▁sentence｜><｜User｜>Write a complete, playable Tetris game in Python using pygame. Output only the code.<｜Assistant｜></think>"
+    ],
+    "environment": {
+      "DS4_FAST_ATTN": "1",
+      "DS4_GPU_INDEX": "1",
+      "DS4_MOE_FUSED": "1",
+      "DS4_PACKED_DENSE": "1",
+      "DS4_FAST_RMS": "1",
+      "DS4_PROMPT_LOOKUP": "1",
+      "DS4_LOOKUP_K": "128",
+      "DS4_DRAFTER": "code",
+      "DS4_SPEC_K": "7",
+      "DS4_MOE_CACHE_GIB": "92",
+      "DS4_EXPERT_PARALLEL": "0",
+      "RAYON_NUM_THREADS": "12"
+    },
+    "method": "Warm decode throughput measures visible tokens after the first emission divided by elapsed time from first to last emission. Each arm includes a discarded warm run. All recorded continuation hashes match.",
+    "runs": [
+      {
+        "arm": "base",
+        "threshold": 0,
+        "decode_tok_s": [
+          258.8037445234715,
+          261.4745418930998
+        ],
+        "median_decode_tok_s": 260.13914320828565,
+        "continuation_sha256": "f91700cbee911a3f850f925205c6e2b68d4f5424b840d6bbb6e632903d9b1b7c",
+        "learned_attempts": 133,
+        "proposals_verified": 929,
+        "target_matches": 634
+      },
+      {
+        "arm": "conf30",
+        "threshold": 0.3,
+        "decode_tok_s": [
+          262.5323669206797,
+          262.8209498208567
+        ],
+        "median_decode_tok_s": 262.6766583707682,
+        "continuation_sha256": "f91700cbee911a3f850f925205c6e2b68d4f5424b840d6bbb6e632903d9b1b7c",
+        "learned_attempts": 133,
+        "proposals_verified": 894,
+        "target_matches": 634
+      },
+      {
+        "arm": "conf40",
+        "threshold": 0.4,
+        "decode_tok_s": [
+          269.8134954842789,
+          269.2610314594619
+        ],
+        "median_decode_tok_s": 269.5372634718704,
+        "continuation_sha256": "f91700cbee911a3f850f925205c6e2b68d4f5424b840d6bbb6e632903d9b1b7c",
+        "learned_attempts": 133,
+        "proposals_verified": 824,
+        "target_matches": 634
+      },
+      {
+        "arm": "base2",
+        "threshold": 0,
+        "decode_tok_s": [
+          259.80044102842186,
+          259.47631030949356
+        ],
+        "median_decode_tok_s": 259.6383756689577,
+        "continuation_sha256": "f91700cbee911a3f850f925205c6e2b68d4f5424b840d6bbb6e632903d9b1b7c",
+        "learned_attempts": 133,
+        "proposals_verified": 929,
+        "target_matches": 634
+      }
+    ]
+  },
+  "interpretation": "The confidence head identified low-acceptance proposals on this greedy game-code prompt. The .40 arm reduced verified rows while preserving the greedy text. This single workload and two timed samples per arm are insufficient to choose a global threshold."
+}
