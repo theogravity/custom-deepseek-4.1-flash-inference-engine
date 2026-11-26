@@ -69,3 +69,7 @@ The local checkpoint tag `checkpoint-2026-11-26-before-expert-cache` marks the s
 ## Shared target rows on warm prefix restore
 
 Selected shared packed rows with LFU for the 375 W service. At six independent 404k contexts the 512-token coding median rose from 278.2–278.8 to 296.6 aggregate tok/s. At 768 output tokens it reached 313.2, with all six measured waves above 300. Six full-window receipt clients rose from 202.7–204.4 to 287.7. The unchanged published 25.6k edit script reached 464 tok/s across six. Eight full-window clients matched the checkpoint through both RAM and forced disk rotation. [Experiment, per-client timing and deployment](SHARED-PREFIX-EXPERIMENT.md)
+
+## vLLM CPU experts and native speculative verification
+
+On the same six 25,625-token edits, vLLM delivered 537–561 aggregate tok/s with CPU experts and 485 with GPU experts alone. The native shared-prefix LFU controls delivered 462–463. Native expert uploads fell to two and then zero across two warm measured waves. Lowering the native learned draft maximum to five lost 8.5–8.7% against both seven-proposal controls with identical continuations. Both the seven-proposal default and the four-warp expert kernel remain selected. [Controlled comparison and native CUDA trace](EDIT-SCALING-EXPERIMENT.md)

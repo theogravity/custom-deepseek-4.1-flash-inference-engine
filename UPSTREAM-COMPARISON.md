@@ -2,6 +2,10 @@
 
 The two engines use the same workstation class and EXL3 model pack. The first table uses the upstream Python client unmodified, against port 8001. The benchmark first submits a 25,625-token Python module, then rewrites a different 41-function span per client. Each stream generates 1,500 tokens at temperature zero with default thinking. The published aggregate divides the total generated tokens by the longest individual post-first-token interval. [Upstream code](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/bench/decode_bench2.py) · [Published benchmark](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/docs/BENCHMARKS.md)
 
+## Six-client code edits on the same host
+
+At 25,625 input tokens per request, the shared-prefix LFU engine delivered 462–463 aggregate tok/s. The local vLLM recipe delivered 485 with CPU experts disabled and 537–561 with them enabled. Each figure is a six-wave median at 375 W per GPU. [On/off/on experiment, output checks and GPU profile](EDIT-SCALING-EXPERIMENT.md)
+
 ## 375 W long-context release
 
 The selected attention scorer and 6 GiB prefix RAM tier measured **278 / 422 / 460 aggregate tok/s** at C1/C4/C6 on the unchanged published 25,625-token edit script's second pass. The tagged 375 W checkpoint previously measured 275 / 414 / 448. The published comparison points are 282 / 518 / 557; the largest remaining gaps on this edit are at four and six clients. These single script passes use the upstream timing convention. The 404k coding and full-window retrieval results use repeated waves and explicit cache checks. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Upstream replay](results/long-context-published-375w.txt)
