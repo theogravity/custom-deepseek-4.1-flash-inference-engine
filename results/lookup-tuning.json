@@ -1,0 +1,305 @@
+{
+  "initial_scheduler_source": "b9c9660",
+  "control": "fixed up to 128 prompt-lookup proposals with a 7-position learned fallback",
+  "16": "fixed 16 source positions",
+  "32": "fixed 32 source positions",
+  "adaptive": "per-request acceptance feedback",
+  "learned": "DSpark code only; source lookup disabled",
+  "rows": [
+    {
+      "arm": "base",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 164.34062124534344,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 9.609771263,
+          "decode_tok_s": 37.91908785778117
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.09090194,
+          "decode_tok_s": 164.34062124534344
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093550614,
+          "decode_tok_s": 165.52199579563248
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.091584873,
+          "decode_tok_s": 164.2351004919692
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=38 proposed=253 accepted=245",
+        "speculative source=lookup rounds=17 proposed=1954 accepted=211"
+      ]
+    },
+    {
+      "arm": "16",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 302.7039523399297,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 4.731406661,
+          "decode_tok_s": 101.61246294030668
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095142401,
+          "decode_tok_s": 304.51023414471837
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093844275,
+          "decode_tok_s": 302.7039523399297
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095240842,
+          "decode_tok_s": 302.070800738719
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=38 proposed=253 accepted=245",
+        "speculative source=lookup rounds=25 proposed=400 accepted=203"
+      ]
+    },
+    {
+      "arm": "32",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 290.2349756334902,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 4.781383549,
+          "decode_tok_s": 95.58118425079057
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093900275,
+          "decode_tok_s": 291.2331790455181
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095240352,
+          "decode_tok_s": 289.84160965433523
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095319192,
+          "decode_tok_s": 290.2349756334902
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=38 proposed=253 accepted=245",
+        "speculative source=lookup rounds=17 proposed=544 accepted=211"
+      ]
+    },
+    {
+      "arm": "adaptive",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 243.9577012483583,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 4.786991999,
+          "decode_tok_s": 90.47073568182678
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093963355,
+          "decode_tok_s": 243.9577012483583
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.094703599,
+          "decode_tok_s": 245.09743966226242
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093091751,
+          "decode_tok_s": 243.30475904313428
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=38 proposed=253 accepted=245",
+        "speculative source=lookup rounds=42 proposed=547 accepted=186"
+      ]
+    },
+    {
+      "arm": "learned",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 331.22344002040336,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 4.751423186,
+          "decode_tok_s": 108.44933225655669
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.096742689,
+          "decode_tok_s": 331.7050169899569
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095748104,
+          "decode_tok_s": 331.22344002040336
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.095540523,
+          "decode_tok_s": 330.33724327627004
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=66 proposed=450 accepted=444"
+      ]
+    },
+    {
+      "arm": "base2",
+      "prompt_tokens": 25598,
+      "prompt_sha256": "8a0984026c7ca6ab4c3a64e91cc5bb5a1543e62835d1a823f7c4c140907d2cb4",
+      "output_sha256": "867a630546f022f11d59017d75e0076f8c760d0be90ffd9c57c828084fd54203",
+      "median": 165.29015815528393,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 512,
+          "ttft_s": 4.679338843,
+          "decode_tok_s": 71.56371564428606
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.091435393,
+          "decode_tok_s": 165.0018231345277
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.093625984,
+          "decode_tok_s": 165.29015815528393
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 512,
+          "ttft_s": 0.09302159,
+          "decode_tok_s": 165.67649386019465
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=38 proposed=253 accepted=245",
+        "speculative source=lookup rounds=17 proposed=1954 accepted=211"
+      ]
+    },
+    {
+      "arm": "go-base",
+      "prompt_tokens": 1734,
+      "prompt_sha256": "3c34f56d6d1fff771c3fe10d50f56830c78b7a7d05cdc735595f7bf06793b37f",
+      "output_sha256": "a6cea5b1eb646b9f93637852de086627f9874bf8466c2424deecd76162649fa9",
+      "median": 853.6571734225917,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 1700,
+          "ttft_s": 1.6470231979999999,
+          "decode_tok_s": 101.0239150294075
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.019836122,
+          "decode_tok_s": 859.0957490053239
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.019716432,
+          "decode_tok_s": 853.6571734225917
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.020422016,
+          "decode_tok_s": 841.7934333092467
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=6 proposed=33 accepted=27",
+        "speculative source=lookup rounds=15 proposed=1848 accepted=1652"
+      ]
+    },
+    {
+      "arm": "go-adaptive",
+      "prompt_tokens": 1734,
+      "prompt_sha256": "3c34f56d6d1fff771c3fe10d50f56830c78b7a7d05cdc735595f7bf06793b37f",
+      "output_sha256": "a6cea5b1eb646b9f93637852de086627f9874bf8466c2424deecd76162649fa9",
+      "median": 851.269887993175,
+      "samples": [
+        {
+          "warmup": true,
+          "visible_tokens": 1700,
+          "ttft_s": 1.427192443,
+          "decode_tok_s": 156.30342280681523
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.019587751,
+          "decode_tok_s": 851.269887993175
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.019968034,
+          "decode_tok_s": 844.8643106345221
+        },
+        {
+          "warmup": false,
+          "visible_tokens": 1700,
+          "ttft_s": 0.019847512,
+          "decode_tok_s": 851.9044820847378
+        }
+      ],
+      "target_verification": [
+        "speculative source=learned rounds=6 proposed=33 accepted=27",
+        "speculative source=lookup rounds=18 proposed=1798 accepted=1649"
+      ]
+    }
+  ]
+}

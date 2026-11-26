@@ -1,4 +1,5 @@
-running 48 tests
+
+running 49 tests
 test api::tests::stalled_sse_client_releases_inference_thread ... ok
 test attention::snapshot::tests::snapshot_round_trip_checks_position_sizes_and_order ... ok
 test attention::tests::cuda_checkpoint_compressor_matches_across_split_pairs ... ok
@@ -28,6 +29,7 @@ test draft_attention::tests::draft_prefix_round_trips_packed_words_across_window
 test draft_attention::tests::draft_snapshot_checks_position_and_window_layout ... ok
 test engram::tests::cuda_engram_matches_signed_nibbles_scales_and_scalar_update ... ok
 test model::prompt_lookup::tests::longest_source_suffix_wins_and_never_crosses_prompt_end ... ok
+test model::prompt_lookup::tests::lookup_width_tracks_the_contiguous_source_match ... ok
 test model::residual::tests::resident_branches_match_scalar_mixing_and_final_readout ... ok
 test model::tests::learned_attempt_with_zero_confident_rows_counts_as_a_draft_round ... ok
 test model::tests::prefix_boundaries_and_draft_observations_cover_each_live_window ... ok
@@ -48,4 +50,5 @@ test runtime::tests::markov_chain_and_greedy_reductions ... ok
 test runtime::tests::packed_dense_matches_mxfp8_and_is_batch_invariant ... ok
 test runtime::tests::packed_head_uses_independent_bf16_to_e4m3_group_scales ... ok
 
-test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.41s
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.44s
+

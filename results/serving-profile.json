@@ -1,9 +1,9 @@
 {
-  "source_commit": "5e31a73ab0ac5599b3d14a5abd6446a6945f1269",
+  "source_commit": "149d7bc57dbd26188d934c7efcabcfeb3f1b37f6",
   "checkpoint": "diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
   "weights_tokenizer_and_code_overlay_revision": "451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae",
-  "image_id": "sha256:128711a0b5c12336202ac5cba20ea1f19b610384de3ccce261ba689077108565",
-  "binary_sha256": "37cbc04083d0336e371357e7e5f28fa6a19090fab1fcc7535d496fe0635f237a",
+  "image_id": "sha256:04da57a7c1178790c2b8fe360d51d6b4e66516f56341d82e7d10dce1eb88d31c",
+  "binary_sha256": "f20486735a96195632227941acd288f66ac50798ab810d0f734bb8367accd59b",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "nvcc": "13.5.37",
   "arch": "sm_120f",
@@ -42,10 +42,11 @@
     "DS4_CONFIDENCE_THRESHOLD": "0.4",
     "DS4_EXPERT_STAGED": "1",
     "RAYON_NUM_THREADS": "12",
-    "DS4_EXPERT_PARALLEL_DRAFT": "0"
+    "DS4_EXPERT_PARALLEL_DRAFT": "0",
+    "DS4_ADAPTIVE_LOOKUP": "1"
   },
   "tests": {
-    "passed": 48,
+    "passed": 49,
     "ignored": 0,
     "failed": 0,
     "format": true,
