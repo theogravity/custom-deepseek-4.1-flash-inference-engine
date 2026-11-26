@@ -223,6 +223,8 @@ __global__ void attend(const float *queries, const __nv_bfloat16 *prior,
     out[qoff + tid + block] = __bfloat162float(__float2bfloat16(b / divisor));
 }
 
+#include "attention_fast.cuh"
+
 // One warp scores one compressed index position against all 32 query heads.
 __global__ void score_keys(const uint8_t *keys, const float *queries, const float *weights,
                            const int *ids, int width, float *scores) {
@@ -327,6 +329,32 @@ extern "C" int ds4_attn_sparse(int dev, void *scratch, const float *queries, con
     attend<<<dim3(heads,batch),block>>>(queries, reinterpret_cast<const __nv_bfloat16 *>(prior),
         reinterpret_cast<const __nv_bfloat16 *>(current), pos, tile, span, decode != 0,
         selected, ids, width, sinks, out);
+    return (int)cudaGetLastError();
+}
+
+extern "C" int ds4_attn_sparse_fast(int dev, void *scratch, const float *queries, const uint16_t *prior,
+        const uint16_t *current, int pos, int tile, int span, int decode, const void *cache,
+        const int *ids, int width, const float *sinks, int batch, float *out) {
+    TRY(cudaSetDevice(dev));
+    auto *buf = static_cast<Buffer *>(scratch);
+    int tiles = (span + width + 63) / 64, cols = tiles * 64;
+    Layout l;
+    size_t nh = size_t(batch)*heads;
+    auto ko = l.slice<__nv_bfloat16>(size_t(batch)*cols*dim);
+    auto so = l.slice<float>(nh*cols), po = l.slice<__nv_bfloat16>(nh*cols);
+    auto mo = l.slice<float>(nh*tiles), no = l.slice<float>(nh);
+    TRY(buf->grow(l.used));
+    auto *keys = at<__nv_bfloat16>(buf,ko), *probs = at<__nv_bfloat16>(buf,po);
+    auto *scores = at<float>(buf,so), *scales = at<float>(buf,mo), *norm = at<float>(buf,no);
+    const auto *kv = width ? static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr) : nullptr;
+    fast_keys<<<dim3(cols,batch),block>>>(reinterpret_cast<const __nv_bfloat16 *>(prior),
+        reinterpret_cast<const __nv_bfloat16 *>(current),kv,ids,width,pos,tile,span,decode,keys);
+    TRY(cudaGetLastError());
+    fast_qk<<<dim3(tiles,heads/16,batch),block>>>(queries,keys,cols,scores);
+    TRY(cudaGetLastError());
+    fast_softmax<<<dim3(heads,batch),block>>>(scores,ids,width,pos,tile,span,decode,cols,sinks,probs,scales,norm);
+    TRY(cudaGetLastError());
+    fast_pv<<<dim3(dim/64,heads/16,batch),block>>>(keys,probs,scales,norm,cols,out);
     return (int)cudaGetLastError();
 }
 

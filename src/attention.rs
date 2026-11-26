@@ -85,6 +85,23 @@ unsafe extern "C" {
         batch: i32,
         out: *mut f32,
     ) -> i32;
+    fn ds4_attn_sparse_fast(
+        device: i32,
+        scratch: *mut c_void,
+        q: *const f32,
+        prior: *const u16,
+        current: *const u16,
+        pos: i32,
+        tile: i32,
+        span: i32,
+        decode: i32,
+        kv: *const c_void,
+        selected: *const i32,
+        width: i32,
+        sink: *const f32,
+        batch: i32,
+        out: *mut f32,
+    ) -> i32;
     fn ds4_attn_scores(
         device: i32,
         scratch: *mut c_void,
@@ -896,6 +913,11 @@ fn select(
     Ok(())
 }
 
+pub(crate) fn fast_attention() -> bool {
+    static FAST: OnceLock<bool> = OnceLock::new();
+    *FAST.get_or_init(|| std::env::var_os("DS4_FAST_ATTN").is_some_and(|v| v == "1"))
+}
+
 /// Process one contiguous prompt chunk or one decode token in token-major order.
 /// A new request owns a fresh state. Layers are invoked in model order.
 pub fn forward_dev(
@@ -1040,12 +1062,31 @@ pub fn forward_dev(
     let ring = window.on(rt.device)?;
     let mut o = rt.buffer(q.len())?;
     // Bound temporary expanded compressed values to 16 MiB per call.
-    let step = (16 * 1024 * 1024 / (width.max(1) * DIM * 2)).max(1);
-    for t in (0..batch).step_by(step) {
-        let n = step.min(batch - t);
+    let fast = fast_attention();
+    let mut t = 0;
+    while t < batch {
+        // Short contexts fit the original single CTA per head. Choose by
+        // absolute position so a verification block uses the same kernel as
+        // decoding each of its tokens separately.
+        let use_tensor = fast && pos + t >= 64;
+        let sparse = if use_tensor {
+            ds4_attn_sparse_fast
+        } else {
+            ds4_attn_sparse
+        };
+        let bytes_per_token = if use_tensor {
+            let cols = (span + width).next_multiple_of(64);
+            cols * (DIM * 2 + HEADS * 6) + HEADS * (cols / 64 + 1) * 4
+        } else {
+            width.max(1) * DIM * 2
+        };
+        let mut n = (16 * 1024 * 1024 / bytes_per_token).max(1).min(batch - t);
+        if fast && !use_tensor {
+            n = n.min(64 - (pos + t));
+        }
         cuda_ok(
             unsafe {
-                ds4_attn_sparse(
+                sparse(
                     rt.device,
                     work,
                     q.as_ptr().add(t * HEADS * DIM),
@@ -1065,6 +1106,7 @@ pub fn forward_dev(
             },
             "sparse attention",
         )?;
+        t += n;
     }
     drop(q);
     let kept = batch.min(2 * WINDOW);
@@ -1429,6 +1471,135 @@ mod tests {
                 let mut actual = vec![0.; x.len()];
                 read(&values, &mut actual)?;
                 assert_eq!(actual, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "set DS4_TEST_DEVICE to a visible CUDA sm_120 inference GPU ordinal"]
+    fn cuda_tensor_core_sparse_matches_scalar_and_rowwise_verification() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaDeviceSynchronize() -> i32;
+        }
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let sample = |i: usize| {
+            let mut z = (i as u32).wrapping_mul(0x9e3779b9);
+            z ^= z >> 15;
+            z = z.wrapping_mul(0x735a2d97);
+            b16(((z >> 16) as f32 - 32768.) / 24491.)
+        };
+        for (pos, n, width, span, decode) in [
+            (0, 5, 0, 5, 0),
+            (11, 3, 5, 128, 1),
+            (260, 8, 128, 128, 0),
+            (902, 8, 512, 128, 1),
+            (902, 1, 512, 128, 1),
+        ] {
+            let prior: Vec<_> = (0..2 * WINDOW * DIM)
+                .map(|i| bf16::from_f32(sample(i + 707)).to_bits())
+                .collect();
+            let current: Vec<_> = (0..n * DIM)
+                .map(|i| bf16::from_f32(sample(i + 307)).to_bits())
+                .collect();
+            let queries: Vec<_> = (0..n * HEADS * DIM).map(|i| sample(i + 993)).collect();
+            let sinks: Vec<_> = (0..HEADS).map(|i| sample(i + 107) * 3.).collect();
+            let ids: Vec<_> = (0..n * width)
+                .map(|i| {
+                    let j = i % width;
+                    if j % 19 == i / width {
+                        -1
+                    } else {
+                        ((37 * j + i / width) % (width + 1)) as i32
+                    }
+                })
+                .collect();
+            let mut source = Rows::default();
+            pack_values(
+                &(0..(width + 1) * DIM)
+                    .map(|i| sample(i + 223))
+                    .collect::<Vec<_>>(),
+                &mut source.packed,
+            );
+            let cache = source.on(device)?;
+            let prior = upload(device, &prior)?;
+            let current = upload(device, &current)?;
+            let q = upload(device, &queries)?;
+            let sinks = upload(device, &sinks)?;
+            let ids = upload(device, &ids)?;
+            let work = GpuBuffer::new(device)?;
+            let out = upload(device, &vec![0f32; queries.len()])?;
+            let run = |fast: bool, t: usize, rows: usize| -> Result<()> {
+                let sparse = if fast {
+                    ds4_attn_sparse_fast
+                } else {
+                    ds4_attn_sparse
+                };
+                cuda_ok(
+                    unsafe {
+                        sparse(
+                            device,
+                            work.ptr.as_ptr(),
+                            q.data::<f32>().add(t * HEADS * DIM),
+                            prior.data(),
+                            current.data(),
+                            pos,
+                            t as i32,
+                            span,
+                            decode,
+                            cache,
+                            ids.data::<i32>().wrapping_add(t * width),
+                            width as i32,
+                            sinks.data(),
+                            rows as i32,
+                            out.data::<f32>().add(t * HEADS * DIM),
+                        )
+                    },
+                    "sparse parity fixture",
+                )
+            };
+            let mut expected = vec![0f32; queries.len()];
+            let mut actual = expected.clone();
+            run(false, 0, n)?;
+            read(&out, &mut expected)?;
+            run(true, 0, n)?;
+            read(&out, &mut actual)?;
+            let mut sq_err = 0f64;
+            let mut sq_ref = 0f64;
+            let mut max_err = 0f32;
+            for (x, y) in actual.iter().zip(&expected) {
+                assert!(x.is_finite());
+                sq_err += f64::from(x - y).powi(2);
+                sq_ref += f64::from(*y).powi(2);
+                max_err = max_err.max((x - y).abs());
+            }
+            let relative = (sq_err / sq_ref).sqrt();
+            assert!(
+                relative < 0.006 && max_err < 0.015,
+                "width {width}: relative {relative}, max {max_err}"
+            );
+            for t in 0..n {
+                run(true, t, 1)?;
+            }
+            let mut split = vec![0f32; queries.len()];
+            read(&out, &mut split)?;
+            assert_eq!(
+                split, actual,
+                "verification rows changed with batch size at {pos}"
+            );
+            if std::env::var_os("DS4_BENCH_ATTN").is_some() {
+                for fast in [false, true] {
+                    let timed = std::time::Instant::now();
+                    for _ in 0..60 {
+                        run(fast, 0, n)?;
+                    }
+                    cuda_ok(
+                        unsafe { cudaDeviceSynchronize() },
+                        "timing attention fixture",
+                    )?;
+                    eprintln!("batch={n} width={width} fast={fast} us={:.2} relative_error={relative:.6} max_error={max_err:.6}",
+                        timed.elapsed().as_secs_f64()*1e6/60.);
+                }
             }
         }
         Ok(())
