@@ -1,0 +1,9 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:c2-verified-20261126
+    environment:
+      DS4_EXPERT_EVICTION: lfu
+      DS4_BATCH_TOPK: "1"
+      DS4_C1_OUTPUT_CONSENSUS: "${DS4_C1_OUTPUT_CONSENSUS:-1}"
+      DS4_EXTEND_REPETITION: "${DS4_EXTEND_REPETITION:-1}"
+      DS4_HEAD_ROW_TILES: "${DS4_HEAD_ROW_TILES:-1}"

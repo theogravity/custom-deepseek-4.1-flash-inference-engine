@@ -1,0 +1,91 @@
+{
+  "image": "sha256:93111840dc0ec13143df64fd14c711976e00a9cef4cf892672a5362182f26366",
+  "tag": "ds4-flash-rs:c2-verified-20261126",
+  "flags": {
+    "DS4_EXTEND_REPETITION": "1",
+    "DS4_HEAD_ROW_TILES": "1",
+    "DS4_C1_OUTPUT_CONSENSUS": "1",
+    "DS4_EXPERT_EVICTION": "lfu",
+    "DS4_BATCH_TOPK": "1",
+    "DS4_PROMPT_LOOKUP": "1",
+    "DS4_OUTPUT_LOOKUP": "single",
+    "DS4_ADAPTIVE_LOOKUP": "1",
+    "DS4_LOOKUP_K": "128"
+  },
+  "smoke": "11 + 13 = 24",
+  "limits": {
+    "max_seqs": 6,
+    "max_live_seqs": 32,
+    "ram_limit_bytes": 51539607552,
+    "disk_limit_bytes": 137438953472
+  },
+  "c1_serving": {
+    "image": "sha256:93111840dc0ec13143df64fd14c711976e00a9cef4cf892672a5362182f26366",
+    "env": {
+      "DS4_EXTEND_REPETITION": "1",
+      "DS4_HEAD_ROW_TILES": "1",
+      "DS4_C1_OUTPUT_CONSENSUS": "1",
+      "DS4_EXPERT_EVICTION": "lfu",
+      "DS4_BATCH_TOPK": "1",
+      "DS4_PROMPT_LOOKUP": "1",
+      "DS4_OUTPUT_LOOKUP": "single",
+      "DS4_ADAPTIVE_LOOKUP": "1",
+      "DS4_LOOKUP_K": "128"
+    },
+    "edit": {
+      "rates": [
+        387.1355799642884,
+        386.9643080727258,
+        386.5166633529523,
+        385.01690976677963,
+        386.09598967392617,
+        388.09770170281877
+      ],
+      "median": 386.7404857128391,
+      "whole": 380.44366410836676,
+      "hashes": [
+        [
+          "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+          "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+          "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+        ]
+      ],
+      "raw_sha256": "a777daf4897b7dbcc2e6f2d7fdff8b7cd2bdc56f81f24b45ad90db8a07c3609b",
+      "spec_including_warmup": {
+        "learned": [
+          1043,
+          4557,
+          2954
+        ],
+        "lookup": [
+          112,
+          7105,
+          6384
+        ]
+      }
+    },
+    "long": {
+      "rates": [
+        251.96135110245308,
+        252.9306989751381,
+        252.43875661134507,
+        252.7962167993419,
+        253.67356479284422,
+        252.8132300520043
+      ],
+      "median": 252.8047234256731,
+      "whole": 197.43817606017717,
+      "hashes": [
+        "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+      ],
+      "raw_sha256": "2bddb28ccad5cc0258efb51085993ad4f57a700fb08fc8cae1d57ee9c56af88c",
+      "spec_including_warmup": {
+        "learned": [
+          602,
+          3794,
+          2968
+        ]
+      }
+    }
+  }
+}

@@ -81,3 +81,7 @@ At six 404k coding sessions, CPU experts delivered 266 and 289 aggregate tok/s a
 ## Single-client decode at 375 W, 2026-11-26
 
 Wide attention ranking and warp-shared expert weights produced sub-percent single-client differences. Verified output repetition raised the 25,625-token edit from 293–294 to 366.5 tok/s and 404,151-token coding from 236–237 to 256.9 tok/s. Both gains repeated across fresh server starts. The selected profile retains the six-resident scheduler and RAM/disk KV rotation. [All three experiments, holdouts, checks and Git checkpoints](C1-DECODE-EXPERIMENTS.md)
+
+## Second decode round at 375 W, 2026-11-26
+
+Longer repetition proposals and vocabulary-head row tiling reached 386.7 tok/s on the deployed single-client edit. The Markov shortlist made the draft scan faster but reduced accepted tokens per verification round. Six concurrent 404k coding sessions reached 282.7 tok/s aggregate with the wider head. [Measured controls, qualifications and three checkpoints](DECODE-ROUND2.md)
