@@ -45,7 +45,11 @@ def request(args, prompt, limit, key, *, bypass_proxy_cache=False):
             usage = event.get("usage") or usage
             for choice in event.get("choices", []):
                 finish = choice.get("finish_reason") or finish
-                content = choice.get("delta", {}).get("content")
+                delta = choice.get("delta", {})
+                if any(delta.get(key) for key in ("reasoning", "reasoning_content", "reasoning_details",
+                                                    "tool_calls", "function_call", "refusal", "audio")):
+                    raise ValueError("throughput benchmark received a non-text output block")
+                content = delta.get("content")
                 if content:
                     last = time.perf_counter()
                     first = last if first is None else first
@@ -53,6 +57,9 @@ def request(args, prompt, limit, key, *, bypass_proxy_cache=False):
     end = time.perf_counter()
     if not done or not usage or first is None or last <= first or finish not in ("length", "stop"):
         raise ValueError(f"incomplete stream, finish reason {finish!r}")
+    details = usage.get("completion_tokens_details") or {}
+    if details.get("reasoning_tokens") or details.get("audio_tokens"):
+        raise ValueError("throughput benchmark includes hidden or audio tokens")
     # Requests have no string stops. On a natural stop the target's sampled
     # EOS counts in API usage but has no visible text, so remove that token.
     n = usage["completion_tokens"] - int(finish == "stop")
