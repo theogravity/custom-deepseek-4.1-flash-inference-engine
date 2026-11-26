@@ -1,9 +1,9 @@
 {
-  "source_commit": "9822a3758246329045c7b595430260087b185532",
+  "source_commit": "3be99133e6bdab0f524a0a57607ece4d5eccf8de",
   "checkpoint": "diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
   "weights_tokenizer_and_code_overlay_revision": "451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae",
-  "image_id": "sha256:61ecd92a1e520c4160c09c20424517ef809e5f87777ded8b52bd3d0dc212ed3c",
-  "binary_sha256": "18897f0f22653d84d438b8a34a20c601fb83f530980d4b2b8d4540e8138733b5",
+  "image_id": "sha256:2fcc5b96881df5715b708384e04200d8bc47ddb43cc8eecb472400571d1e76d4",
+  "binary_sha256": "5ee4102a77bd23e87ac7830c86d7bef034c4095510a7dc900aa348a07faf35c6",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "nvcc": "13.5.37",
   "arch": "sm_120f",
@@ -51,14 +51,18 @@
     "DS4_SWAP_DISK_MIB": "131072",
     "DS4_SWAP_QUANTUM_STEPS": "32",
     "DS4_SWAP_RAM_MIB": "49152",
+    "DS4_TIMING_RESTORES": "0",
     "RAYON_NUM_THREADS": "12"
   },
   "tests": {
-    "passed": 73,
+    "passed": 79,
     "ignored": 0,
     "failed": 0,
     "format": true,
-    "clippy_warnings": 0
+    "clippy_warnings": 0,
+    "python_unittests": 11
   },
-  "benchmark_hardware": "benchmark-gpu-settings.json"
+  "benchmark_hardware": "benchmark-gpu-settings.json",
+  "proxy_image_id": "sha256:10df763bde2487e1442a984da964c4f34096e55fd1e509a77f630639c6fbf48e",
+  "proxy_stack_commit": "d8ac00751a3e54f8d8b80f6912047485502d5048"
 }

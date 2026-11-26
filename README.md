@@ -43,6 +43,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_MAX_LIVE_SEQS` | 32 | Maximum admitted requests sharing the GPU slots, configurable up to 64 |
 | `DS4_SWAP_QUANTUM_STEPS` | 32 | Number of prefill or decode steps a runnable request receives before it can yield a GPU slot |
 | `DS4_SWAP_RAM_MIB`, `DS4_SWAP_DISK_MIB` | 49152, 131072 | On-demand host RAM and NVMe budgets for suspended live requests |
+| `DS4_TIMING_RESTORES` | 0 | Set to 1 at launch to log one JSON event per completed target KV restore, including timings for each GPU and cache tier |
 | `DS4_BATCH_DRAFT` | 1 | Evaluate the learned drafter for multiple ready requests together |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
@@ -76,6 +77,22 @@ The backing store places each image in RAM if space is available, then uses an a
 The live tiers use the original LMCache budgets of **48 GiB RAM and 128 GiB disk**. With the separate prefix tier budgets, the combined payload limits are 50 GiB RAM and 192 GiB disk. A full 524,288-position suspended target image is about 900 MiB, plus drafter state. GPU staging, live token histories and the operating system's reclaimable file cache use additional host memory. If both live tiers fill, resident requests can finish and release their slots. The `swap` object in `/metrics` reports charged/peak bytes, reads, writes and failures for the two tiers; `rotations` and `resumes` count successful slot changes.
 
 The server exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both chat APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The Rust profile serves text. The original recipe also supports vision.
+
+### Requests at the context limit
+
+The server tokenizes the fully rendered request, including role markers, tool definitions and reasoning instructions. The **524,288 positions** include the prompt and generated tokens. Context validation runs before model admission and before a streaming response starts.
+
+| Request | Result |
+|---|---|
+| 524,287 input, 1 requested output | HTTP 200, one output token fits |
+| 524,287 input, 2 requested output | HTTP 200, output capped at one token |
+| 524,288 or more input | HTTP 400 with the rendered length and the maximum usable generation prompt of 524,287 |
+| Explicit output budget greater than 524,288 | HTTP 400 with the requested budget and available room |
+| Native `POST /v1/messages/count_tokens` with 524,289 input | HTTP 200 with the full count, zero inference admissions |
+
+For a valid prompt, the native service caps an otherwise valid output budget at the remaining room, preserving the original serving recipe's behavior. When it caps the budget, it sends `x-ds4-effective-max-tokens` and either `x-ds4-requested-max-tokens` or `x-ds4-default-max-tokens`. LiteLLM delivered the capped output and usage but omitted those custom response headers in the tested routes.
+
+OpenAI chat and LiteLLM Responses report `error.code=context_length_exceeded`. Anthropic Messages reports `invalid_request_error` and includes the measured length in the message. Stock LiteLLM v1.109.0 converted the symbolic OpenAI code to `"400"`. The local proxy image preserves the code so Codex recognizes the error. On the workstation, all 12 rejected cases returned HTTP 400 before streaming and produced zero native admissions, batch steps, prefix reuse or swaps. All 10 valid cases returned one generated token. [Direct and proxy boundary checks](results/context-limits-live.jsonl) · [Installed Codex classification](results/codex-context-classification.json) · [Release tests](results/test-context-release.txt)
 
 ## Reproduce the measurements
 
@@ -136,11 +153,17 @@ Six independent coding requests each generated 256 tokens. Across the six warm w
 
 Six requests with a restored common document and distinct late receipts each consumed **524,160 input + 128 output = 524,288 tokens**. Every wave had 18 successful six-request target passes. Each request returned its own correct receipts. The six warm waves had a median aggregate decode rate of **361.1 tok/s**, a median individual stream rate of **60.9 tok/s**, and a median end-to-end wall time of **5.36 s** for the wave, including cache restore. The first wave in the freshly started process took 13.53 s. The aggregate rate including restore was 143.4 tok/s across warm waves. [Full-window streams and timings](results/six-full-restored.jsonl)
 
+In the deployed offload and context-validation build, the first full-window stream started returning text after a median **1.11 s**, down from 3.22 s in the earlier run. The other five began later as their prefixes restored. This wider delivery interval brought the first-text-to-last-text aggregate to **177.0 tok/s**. Median per-stream delivery was **61.2 tok/s**, the wave took **5.43 s** including restore, and every output matched the earlier build. Six short coding clients delivered **394.4 tok/s** aggregate on this release. [Final full-window run](results/final-six-full-shared.jsonl) · [Final coding run](results/final-six-coding.jsonl) · [Actual coding-client checks](results/context-clients.jsonl)
+
 With six unrelated 404,000-token inputs, the engine ingested all **2,424,000 input tokens from scratch**. All six agents retrieved their early and late receipts, emitted 128 verified tokens apiece and overlapped during decode. Total wall time was **3,714.6 s** (61 min 55 s), about **653 input tok/s** including the final answers. Each worker log reported zero reused prompt tokens. [Cold independent wave](results/six-independent-404k.jsonl) · [Per-request cache counters](results/six-independent-404k-backend.txt)
 
 After a process restart, each agent continued its own 404,000-token transcript with its actual prior response. The engine restored **403,968 positions per request** from disk, then evaluated a combined 721,152 new prompt positions. Each of the six generated 128 tokens at the exact 524,288-token limit and returned a previously undisclosed receipt from its original prompt plus a new receipt from its own extension. The wave took **1,588.1 s** (26 min 28 s); an identical repeat took **9.37 s** after restoring 524,096 positions per agent. Both waves executed six-request target passes. In the repeat, one stream started 5.18 s ahead of the others, so its delivery interval included their restores. Aggregate delivery from the first visible text to the last measured 100.0 tok/s; five of the six streams individually delivered 52–54 tok/s. [Independent full-window continuations](results/six-independent-full.jsonl) · [Restored positions](results/six-independent-full-backend.txt) · [Three LiteLLM waves, all 18 outputs identical to direct](results/six-independent-full-proxy.jsonl)
 
 An eight-client cold test at the default 32-step quantum kept six requests on the GPUs and rotated two through host RAM. Eight 12,000-token prompts generated 512 tokens each. The worker performed 50 saves and 50 restores. All eight streams matched their serial controls byte for byte and overlapped for 3.80 s. The complete wave took 160.6 s, including cold model and prompt work. [Eight independent clients](results/eight-independent-12k-rotation.jsonl) · [GPU and checkpoint tests](results/test-rotation-release.txt)
+
+With the default offload settings, eight clients each used 523,776 input and 512 output tokens on a shared document. All eight matched their serial replays over 19 RAM saves and restores. The wave took 97.18 s, with 10.22 s of overlap across all eight client delivery intervals. [Eight full windows on the default profile](results/eight-full-default-rotation.jsonl)
+
+Through LiteLLM, 32 clients each submitted 12,000 input tokens and generated 512. The engine kept six resident and parked up to 26. In both waves, each of the 32 clients returned its expected receipt sequence and matched its serial digest. The initial wave took 150.11 s. The last client began receiving output 35.14 s after the earliest stream delivered its last visible text, so that wave missed the all-stream overlap check. On the warm repeat, all 32 delivery intervals overlapped for 3.02 s, and the wave finished in 27.90 s after 33 RAM saves and restores. Neither wave reported cache failures or retained live state after completion. [32-client waves and individual timings](results/thirtytwo-12k-rotation.jsonl)
 
 The packed FP32 GPU index scorer and shape-dependent radix sort produced identical receipt outputs across all 42 responses in each configuration. Warm aggregate full-window decode increased from 242.6 tok/s with scalar scoring to 288.9 with packed scoring and 361.1 after changing the sort dispatch. All 59 release tests passed on the two inference GPUs, including rollback, mixed-request failure isolation, token and block selection, cache reuse and per-session memory sizing. [Scalar control](results/six-full-scalar.jsonl) · [Packed scoring control](results/six-full-packed-index.jsonl) · [GPU index timings](results/packed-index-timing.txt) · [Release tests](results/test-six-release.txt)
 

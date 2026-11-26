@@ -1,0 +1,53 @@
+{
+  "client": "codex-cli 0.172.0",
+  "client_sha256": "ad83b94c093f0cdd8176a6bc8005a461bdf23a759863e157d40f562b8a9d664d",
+  "router": "litellm/litellm:v1.109.0",
+  "test": "Captured HTTP Responses error replay with Docker --network none; local placeholder credential. Frozen upstream fake model has 256 positions.",
+  "samples": [
+    {
+      "case": "proxy_actual",
+      "status": 400,
+      "body_code": "400",
+      "app_server": "other",
+      "app_server_error_and_turn_completed_agree": true,
+      "requests_per_client": 1,
+      "cli_specialized_message": false
+    },
+    {
+      "case": "proxy_changed_code",
+      "status": 400,
+      "body_code": "context_length_exceeded",
+      "app_server": "contextWindowExceeded",
+      "app_server_error_and_turn_completed_agree": true,
+      "requests_per_client": 1,
+      "cli_specialized_message": true
+    },
+    {
+      "case": "canonical",
+      "status": 400,
+      "body_code": "context_length_exceeded",
+      "app_server": "contextWindowExceeded",
+      "app_server_error_and_turn_completed_agree": true,
+      "requests_per_client": 1,
+      "cli_specialized_message": true
+    },
+    {
+      "case": "sse",
+      "status": 200,
+      "body_code": "context_length_exceeded",
+      "app_server": "contextWindowExceeded",
+      "app_server_error_and_turn_completed_agree": true,
+      "requests_per_client": 1,
+      "cli_specialized_message": true
+    },
+    {
+      "case": "actual_derived",
+      "status": 400,
+      "body_code": "context_length_exceeded",
+      "app_server": "contextWindowExceeded",
+      "app_server_error_and_turn_completed_agree": true,
+      "requests_per_client": 1,
+      "cli_specialized_message": true
+    }
+  ]
+}
