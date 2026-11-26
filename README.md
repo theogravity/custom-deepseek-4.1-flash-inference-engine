@@ -104,6 +104,8 @@ docker compose --env-file ../models/.env up -d --wait
 
 ## Measurements on this workstation
 
+All workstation benchmarks in this repository used both RTX PRO 6000 Blackwell cards with a **375 W limit per card**, **+450 MHz P0 core offset**, **+4,000 MHz P0 VRAM offset**, **0% voltage boost**, and **PowerMizer Auto**. GPU and VRAM clock locking were disabled. The workstation owner confirmed the historical configuration. The saved LACT settings and a live power-limit readback agree on both cards. The screenshot’s 3,015 MHz core, 15,365 MHz VRAM, 320.1 W and temperature values were instantaneous readings. [GPU settings and saved voltage/frequency points](results/benchmark-gpu-settings.json) · [Owner’s screenshot](results/rtx-pro-6000-lact.png)
+
 The serving binary and tested model revision are recorded in the [serving profile](results/serving-profile.json). The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, packed MXFP8 weights with BF16 tensor-core multiplication and FP32 accumulation, and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
 
 | Single-stream workload | Route | Warm median output tok/s | Measurement |
