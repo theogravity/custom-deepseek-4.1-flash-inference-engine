@@ -314,6 +314,11 @@ def stream(args, key, prompt, expected, barrier, idx):
     return row
 
 
+def api_keys(proxy):
+    native = os.environ.get("DSV41_API_KEY") or os.environ["LITELLM_MASTER_KEY"]
+    return native, (os.environ.get("LITELLM_MASTER_KEY") or native) if proxy else native
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default="http://127.0.0.1:8001", help="native server root (default http://127.0.0.1:8001)")
@@ -341,8 +346,7 @@ def main():
         ap.error("freeze a single round of histories")
     if args.litellm and args.baseline:
         ap.error("--litellm requires native concurrency metrics")
-    key = os.environ.get("DSV41_API_KEY") or os.environ["LITELLM_MASTER_KEY"]
-    completion_key = (os.environ.get("LITELLM_MASTER_KEY") or key) if args.litellm else key
+    key, completion_key = api_keys(args.litellm)
     tok = load_tokenizer(args.tokenizer) if args.save_histories or args.continue_histories else None
     frozen = json.loads(args.continue_histories.read_text()) if args.continue_histories else None
     if args.seed is None:
