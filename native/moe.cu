@@ -302,8 +302,10 @@ extern "C" int ds_moe_finish(const float *routed, float *shared_out, size_t coun
 // group also uses the default stream, including uploads into reused slots.
 extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *jobs, int n_jobs,
                               const RoutedRow *routes, int rows, const float *x, float *weighted,
-                              int mcg) {
-    int splits = n_jobs < 32 ? 8 : 2;
+                              int mcg, int verify) {
+    // Verifying several positions must use the same K-reduction boundaries as
+    // serial decoding, even if the block touches 32 or more distinct experts.
+    int splits = verify || n_jobs < 32 ? 8 : 2;
     size_t partial_size = size_t(rows) * H * splits * sizeof(float);
     size_t inter_size = size_t(rows) * I * sizeof(float);
     size_t rotated_size = size_t(rows) * H * sizeof(half);
@@ -353,7 +355,7 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
     CHECK(cudaMalloc(&io.ptr, 2 * count * sizeof(float)));
     CHECK(cudaMemcpy(io.ptr, x, count * sizeof(float), cudaMemcpyHostToDevice));
     int code = ds_moe_run_dev(scratch, scratch_bytes, jobs, n_jobs, routes.data(), rows,
-                              io.ptr, io.ptr + count, 0);
+                              io.ptr, io.ptr + count, 0, 0);
     if (code)
         return code;
     return int(cudaMemcpy(y, io.ptr + count, count * sizeof(float), cudaMemcpyDeviceToHost));

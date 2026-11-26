@@ -55,6 +55,7 @@ unsafe extern "C" {
         x: *const f32,
         weighted: *mut f32,
         mcg: i32,
+        verify: i32,
     ) -> i32;
     #[cfg(test)]
     fn ds_moe_run(
@@ -320,21 +321,25 @@ fn shared(rt: &mut Runtime, base: &str, x: &Dev, batch: usize) -> Result<Dev> {
 }
 
 fn run_group<const K: usize>(
-    device: &mut DeviceCache,
-    weights: &Weights,
+    rt: &mut Runtime,
     layer: Layer,
     routes: &[Route],
     x: &Dev,
     weighted: &mut Dev,
     capacity: usize,
 ) -> Result<()> {
+    let device = rt
+        .moe_cache
+        .devices
+        .get_mut(&rt.device)
+        .context("missing expert cache")?;
     let mut jobs = Vec::new();
     let mut rows = Vec::with_capacity(routes.len());
     let mut begin = 0;
     while begin < routes.len() {
         let expert = routes[begin].expert;
         let count = routes[begin..].partition_point(|r| r.expert == expert);
-        let slot = device.acquire(weights, (layer, expert), capacity)?;
+        let slot = device.acquire(&rt.weights, (layer, expert), capacity)?;
         for start in (begin..begin + count).step_by(16) {
             jobs.push(Job {
                 expert: slot,
@@ -364,6 +369,7 @@ fn run_group<const K: usize>(
             x.as_ptr(),
             weighted.as_mut_ptr(),
             i32::from(matches!(layer, Layer::Draft(_))),
+            i32::from(rt.verification && matches!(layer, Layer::Backbone(_))),
         )
     };
     device.scratch = scratch as usize;
@@ -420,15 +426,7 @@ fn forward<const E: usize, const K: usize>(
             }
             end += 1;
         }
-        run_group::<K>(
-            device,
-            &rt.weights,
-            layer,
-            &routes[begin..end],
-            x,
-            &mut weighted,
-            capacity,
-        )?;
+        run_group::<K>(rt, layer, &routes[begin..end], x, &mut weighted, capacity)?;
         begin = end;
     }
     cuda(unsafe {
