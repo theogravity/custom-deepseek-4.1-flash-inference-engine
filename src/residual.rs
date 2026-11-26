@@ -363,9 +363,10 @@ mod tests {
                 assert_eq!(rt.to_host(&stream)?, h);
                 pre = mixes.into_iter().map(|m| m.pre).collect();
             }
-            let t = batch - 1;
+            let rows = batch.min(2);
+            let t = batch - rows;
             let expected = collapse(&h[t * 4 * DIM..], &pre[t..], &norm);
-            let mut projected = rt.buffer(DIM)?;
+            let mut projected = rt.buffer(rows * DIM)?;
             checked(
                 unsafe {
                     ds_hc_final(
@@ -375,12 +376,33 @@ mod tests {
                         dev_norm.as_ptr(),
                         projected.as_mut_ptr(),
                         t.try_into()?,
-                        1,
+                        rows.try_into()?,
                     )
                 },
                 "final test readout",
             )?;
             assert_eq!(rt.to_host(&projected)?, expected);
+            let mut features = rt.buffer(batch * 3 * DIM)?;
+            let mut expected = vec![0.; features.len()];
+            for slot in 0..3 {
+                let streams: Vec<_> = (0..batch * 4 * DIM)
+                    .map(|i| {
+                        bf((i / (4 * DIM)) as f32 * 11.
+                            + slot as f32 * 4.
+                            + ((i / DIM) % 4) as f32 / 8.
+                            + (i % DIM % 7) as f32 / 8.)
+                    })
+                    .collect();
+                for t in 0..batch {
+                    for d in 0..DIM {
+                        let sum: f32 = (0..4).map(|c| streams[(t * 4 + c) * DIM + d]).sum();
+                        expected[(t * 3 + slot) * DIM + d] = bf(sum * 0.25);
+                    }
+                }
+                let h = rt.to_device(&streams)?;
+                capture(&rt, &h, &mut features, slot, batch)?;
+            }
+            assert_eq!(rt.to_host(&features)?, expected);
         }
         Ok(())
     }
