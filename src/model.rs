@@ -148,7 +148,7 @@ impl Drop for DraftStats {
 pub struct Model {
     prefix: PrefixCache,
     spec_k: usize,
-    lookup_k: usize,
+    lookup: prompt_lookup::Config,
     rt: Runtime,
     engram: Engram,
     max_ctx: usize,
@@ -178,7 +178,7 @@ impl Model {
         Ok(Self {
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
-            lookup_k: prompt_lookup::configured_width()?,
+            lookup: prompt_lookup::configured()?,
             rt: Runtime::open(pack, devices)?,
             engram: Engram::new(tok)?,
             max_ctx,
@@ -315,7 +315,7 @@ impl Model {
             }
         }
         let mut draft_stats = DraftStats::default();
-        let lookup = prompt_lookup::PromptLookup::new(input, self.lookup_k > 0);
+        let mut lookup = prompt_lookup::PromptLookup::new(input, self.lookup);
         cache.begin_prefill(input.len());
         let reused = pos;
         let started = std::time::Instant::now();
@@ -373,7 +373,7 @@ impl Model {
             // Seed the complete visible history before generating its first proposal.
             ids.push(token);
             let remaining = limit - emitted - 1;
-            let mut proposed = lookup.propose(&ids, self.lookup_k.min(remaining));
+            let mut proposed = lookup.propose(&ids, remaining);
             let mut source = if proposed.is_empty() {
                 ProposalSource::Target
             } else {
@@ -404,6 +404,9 @@ impl Model {
             let committed = accepted + 1; // the previously emitted input anchor is always committed
             if batch > 1 {
                 cache.finish_verify(committed)?;
+            }
+            if source == ProposalSource::Lookup {
+                lookup.observe(proposed.len(), accepted);
             }
             draft_stats.record(source, proposed.len(), accepted);
             if let Some(draft) = draft.as_mut() {
