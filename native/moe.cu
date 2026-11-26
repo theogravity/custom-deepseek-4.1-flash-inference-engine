@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <new>
 #include <vector>
 
 struct Job {
@@ -430,10 +431,10 @@ extern "C" int ds_moe_finish(const float *routed, float *shared_out, size_t coun
 // group also uses the default stream, including uploads into reused slots.
 extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *jobs, int n_jobs,
                               const RoutedRow *routes, int rows, const float *x, float *weighted,
-                              int mcg, int verify, int inline_metadata, int fused) {
+                              int mcg, int splits, int inline_metadata, int fused) {
     // Verifying several positions must use the same K-reduction boundaries as
     // serial decoding, even if the block touches 32 or more distinct experts.
-    int splits = verify || n_jobs < 32 ? 8 : 2;
+    if (splits != 2 && splits != 8) return int(cudaErrorInvalidValue);
     size_t partial_size = size_t(rows) * H * splits * sizeof(float);
     size_t inter_size = size_t(rows) * I * sizeof(float);
     size_t rotated_size = size_t(rows) * H * sizeof(half);
@@ -495,8 +496,68 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
     CHECK(cudaMalloc(&io.ptr, 2 * count * sizeof(float)));
     CHECK(cudaMemcpy(io.ptr, x, count * sizeof(float), cudaMemcpyHostToDevice));
     int code = ds_moe_run_dev(scratch, scratch_bytes, jobs, n_jobs, routes.data(), rows,
-                              io.ptr, io.ptr + count, 0, 0, 1, 0);
+                              io.ptr, io.ptr + count, 0, n_jobs < 32 ? 8 : 2, 1, 0);
     if (code)
         return code;
     return int(cudaMemcpy(y, io.ptr + count, count * sizeof(float), cudaMemcpyDeviceToHost));
+}
+
+// The primary stream owns the activation pool. Record readiness before the
+// shared branch so the second card can begin immediately once routes arrive.
+struct PeerEvents {
+    int primary, peer;
+    cudaEvent_t ready = nullptr, done = nullptr;
+};
+
+extern "C" void ds_moe_peer_free(PeerEvents *p) {
+    if (!p) return;
+    int old;
+    if (cudaGetDevice(&old) == cudaSuccess) {
+        cudaSetDevice(p->primary);
+        if (p->ready) cudaEventDestroy(p->ready);
+        cudaSetDevice(p->peer);
+        if (p->done) cudaEventDestroy(p->done);
+        cudaSetDevice(old);
+    }
+    delete p;
+}
+
+extern "C" int ds_moe_peer_begin(PeerEvents **link, int primary, int peer) {
+    struct Restore { int dev; ~Restore() { cudaSetDevice(dev); } } restore{primary};
+    if (!*link) {
+        *link = new (std::nothrow) PeerEvents{primary, peer};
+        if (!*link) return int(cudaErrorMemoryAllocation);
+    }
+    auto *p = *link;
+    if (!p->done) {
+        int supported = 0;
+        CHECK(cudaDeviceCanAccessPeer(&supported, peer, primary));
+        if (!supported) return int(cudaErrorPeerAccessUnsupported);
+        CHECK(cudaSetDevice(peer));
+        auto enabled = cudaDeviceEnablePeerAccess(primary, 0);
+        if (enabled == cudaErrorPeerAccessAlreadyEnabled) cudaGetLastError();
+        else CHECK(enabled);
+        CHECK(cudaEventCreateWithFlags(&p->done, cudaEventDisableTiming));
+    }
+    CHECK(cudaSetDevice(primary));
+    if (!p->ready) CHECK(cudaEventCreateWithFlags(&p->ready, cudaEventDisableTiming));
+    CHECK(cudaEventRecord(p->ready));
+    CHECK(cudaSetDevice(peer));
+    CHECK(cudaStreamWaitEvent(nullptr, p->ready, 0));
+    return 0;
+}
+
+// The primary consumes the peer's disjoint output slots and can then reuse
+// both tensors. Even an unsuccessful event submission must retire peer work
+// before Rust drops the owning buffers or retries on this inference worker.
+extern "C" int ds_moe_peer_end(PeerEvents *p) {
+    auto status = cudaSetDevice(p->peer);
+    if (status == cudaSuccess) status = cudaEventRecord(p->done);
+    if (status == cudaSuccess) status = cudaSetDevice(p->primary);
+    if (status == cudaSuccess) status = cudaStreamWaitEvent(nullptr, p->done, 0);
+    if (status != cudaSuccess) {
+        if (cudaSetDevice(p->peer) == cudaSuccess) cudaStreamSynchronize(nullptr);
+        cudaSetDevice(p->primary);
+    }
+    return int(status);
 }

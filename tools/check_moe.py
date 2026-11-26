@@ -197,7 +197,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
                 inp = upload(stack, inputs)
                 for fused in (0, 1):
                     check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), (Job * len(jobs))(*jobs),
-                                             len(jobs), rows, n, inp, weighted, mcg, 0, 1, fused))
+                                             len(jobs), rows, n, inp, weighted, mcg, 8, 1, fused))
                     download(weighted, output)
                     if fused == 0:
                         unfused_output = output.copy()
@@ -232,16 +232,31 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
                 rows = (RoutedRow * n)(*(RoutedRow(slabs[i % 2], i % 2, i, .5) for i in range(n)))
                 jobs = (Job * n)(*(Job(slabs[i % 2], i, 1) for i in range(n)))
                 check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), jobs, n,
-                                         rows, n, inp, dst, 0, 1, 1, 1))
+                                         rows, n, inp, dst, 0, 8, 1, 1))
                 download(dst, output)
                 for i in range(2):
                     row = RoutedRow(slabs[i], i, 0, .5)
                     job = Job(slabs[i], 0, 1)
                     decode = np.empty_like(inputs[:1])
                     check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), C.byref(job), 1,
-                                             C.byref(row), 1, inp, dst, 0, 0, 0, 0))
+                                             C.byref(row), 1, inp, dst, 0, 8, 0, 0))
                     download(dst, decode)
                     np.testing.assert_array_equal(output[i::2], np.broadcast_to(decode, output[i::2].shape))
+                # Compare a two-split logical prefill group with the same jobs
+                # issued in two smaller physical groups. The 18-job subsets
+                # must retain the full 36-job group's prescribed reduction.
+                check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), jobs, n,
+                                         rows, n, inp, dst, 0, 2, 1, 0))
+                download(dst, output)
+                for parity in range(2):
+                    n_sub = n // 2
+                    subset_rows = (RoutedRow * n_sub)(*(rows[i] for i in range(parity, n, 2)))
+                    subset_jobs = (Job * n_sub)(*(Job(slabs[parity], i, 1) for i in range(n_sub)))
+                    check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), subset_jobs, n_sub,
+                                             subset_rows, n_sub, inp, dst, 0, 2, 1, 1))
+                partitioned = np.empty_like(output)
+                download(dst, partitioned)
+                np.testing.assert_array_equal(partitioned.view("u4"), output.view("u4"))
     finally:
         for p in [scratch, *slabs]:
             lib.ds_moe_free(device, p)

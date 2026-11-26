@@ -53,6 +53,10 @@ unsafe extern "C" {
     fn ds_moe_router_free(device: i32, host: *mut f32, ready: *mut c_void);
 
     fn ds_moe_free(device: i32, slot: *mut c_void);
+    fn cudaSetDevice(device: i32) -> i32;
+    fn ds_moe_peer_begin(link: *mut *mut c_void, primary: i32, peer: i32) -> i32;
+    fn ds_moe_peer_end(link: *mut c_void) -> i32;
+    fn ds_moe_peer_free(link: *mut c_void);
     fn ds_moe_shared_swiglu(gate: *mut f32, up: *const f32, count: usize) -> i32;
     fn ds_moe_finish(routed: *const f32, shared_out: *mut f32, count: usize, top_k: i32) -> i32;
     fn ds_moe_run_dev(
@@ -65,7 +69,7 @@ unsafe extern "C" {
         x: *const f32,
         weighted: *mut f32,
         mcg: i32,
-        verify: i32,
+        splits: i32,
         inline_metadata: i32,
         fused: i32,
     ) -> i32;
@@ -187,6 +191,29 @@ impl RouterRead {
     }
 }
 
+// Keeps the peer's default stream ordered with the primary activation pool.
+// Finish the join on every error path, before the borrowed GPU tensors drop.
+struct PeerWork(*mut c_void);
+impl PeerWork {
+    fn begin(cache: &mut DeviceCache, peer: i32) -> Result<Self> {
+        cuda(unsafe { ds_moe_peer_begin(&mut cache.peer_link, cache.device, peer) })
+            .context("enabling CUDA peer access for expert parallelism")?;
+        Ok(Self(cache.peer_link))
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let link = std::mem::replace(&mut self.0, ptr::null_mut());
+        cuda(unsafe { ds_moe_peer_end(link) })
+    }
+}
+impl Drop for PeerWork {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { ds_moe_peer_end(self.0) };
+        }
+    }
+}
+
 struct DeviceCache {
     device: i32,
     limit: usize,
@@ -202,6 +229,8 @@ struct DeviceCache {
     packed_upload: bool,
     inline_metadata: bool,
     fused: bool,
+    parallel: bool,
+    peer_link: *mut c_void,
     metrics: bool,
 }
 
@@ -228,6 +257,8 @@ impl DeviceCache {
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
             inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
             fused: switch("DS4_MOE_FUSED", false)?,
+            parallel: switch("DS4_EXPERT_PARALLEL", false)?,
+            peer_link: ptr::null_mut(),
             metrics: switch("DS4_MOE_STATS", false)?,
         })
     }
@@ -313,6 +344,7 @@ impl DeviceCache {
 
 impl Drop for DeviceCache {
     fn drop(&mut self) {
+        unsafe { ds_moe_peer_free(self.peer_link) };
         unsafe { ds_moe_router_free(self.device, self.router.host, self.router.ready) };
         for &(slot, _) in self.slots.values() {
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
@@ -429,62 +461,139 @@ fn shared(rt: &mut Runtime, base: &str, x: &Dev, batch: usize) -> Result<Dev> {
     rt.linear_dev(&format!("{base}.shared_experts.w2.weight"), &gate, batch, 1)
 }
 
-fn run_group<const K: usize>(
-    rt: &mut Runtime,
+struct Dispatch<'a> {
+    weights: &'a Weights,
     layer: Layer,
-    routes: &[Route],
-    x: &Dev,
-    weighted: &mut Dev,
-    capacity: usize,
-) -> Result<()> {
-    let device = rt
-        .moe_cache
-        .devices
-        .get_mut(&rt.device)
-        .context("missing expert cache")?;
-    let mut jobs = Vec::new();
-    let mut rows = Vec::with_capacity(routes.len());
-    let mut begin = 0;
-    while begin < routes.len() {
-        let expert = routes[begin].expert;
-        let count = routes[begin..].partition_point(|r| r.expert == expert);
-        let slot = device.acquire(&rt.weights, (layer, expert), capacity)?;
-        for start in (begin..begin + count).step_by(16) {
-            jobs.push(Job {
-                expert: slot,
-                begin: start as i32,
-                count: (begin + count - start).min(16) as i32,
-            });
+    x: &'a Dev,
+    weighted: &'a mut Dev,
+    top_k: usize,
+}
+
+impl Dispatch<'_> {
+    fn run_group(
+        &mut self,
+        device: &mut DeviceCache,
+        routes: &[Route],
+        capacity: usize,
+        splits: i32,
+    ) -> Result<()> {
+        let mut jobs = Vec::new();
+        let mut rows = Vec::with_capacity(routes.len());
+        let mut begin = 0;
+        while begin < routes.len() {
+            let expert = routes[begin].expert;
+            let count = routes[begin..].partition_point(|r| r.expert == expert);
+            let slot = device.acquire(self.weights, (self.layer, expert), capacity)?;
+            for start in (begin..begin + count).step_by(16) {
+                jobs.push(Job {
+                    expert: slot,
+                    begin: start as i32,
+                    count: (begin + count - start).min(16) as i32,
+                });
+            }
+            for route in &routes[begin..begin + count] {
+                rows.push(RoutedRow {
+                    expert: slot,
+                    token: route.token.try_into()?,
+                    output: (route.token * self.top_k + route.rank).try_into()?,
+                    weight: half::f16::from_f32(route.weight).to_f32(),
+                });
+            }
+            begin += count;
         }
-        for route in &routes[begin..begin + count] {
-            rows.push(RoutedRow {
-                expert: slot,
-                token: route.token.try_into()?,
-                output: (route.token * K + route.rank).try_into()?,
-                weight: half::f16::from_f32(route.weight).to_f32(),
-            });
-        }
-        begin += count;
+        let mut scratch = device.scratch as *mut c_void;
+        let status = unsafe {
+            ds_moe_run_dev(
+                &mut scratch,
+                &mut device.scratch_bytes,
+                jobs.as_ptr(),
+                jobs.len() as i32,
+                rows.as_ptr(),
+                rows.len() as i32,
+                self.x.as_ptr(),
+                self.weighted.as_mut_ptr(),
+                i32::from(matches!(self.layer, Layer::Draft(_))),
+                splits,
+                device.inline_metadata.into(),
+                device.fused.into(),
+            )
+        };
+        device.scratch = scratch as usize;
+        cuda(status)
     }
-    let mut scratch = device.scratch as *mut c_void;
-    let status = unsafe {
-        ds_moe_run_dev(
-            &mut scratch,
-            &mut device.scratch_bytes,
-            jobs.as_ptr(),
-            jobs.len() as i32,
-            rows.as_ptr(),
-            rows.len() as i32,
-            x.as_ptr(),
-            weighted.as_mut_ptr(),
-            i32::from(matches!(layer, Layer::Draft(_))),
-            i32::from(rt.verification && matches!(layer, Layer::Backbone(_))),
-            device.inline_metadata.into(),
-            device.fused.into(),
-        )
-    };
-    device.scratch = scratch as usize;
-    cuda(status)
+}
+
+// Each group respects the slot capacity and contains at most 16 rows per MMA
+// job. Compute its split-K once before distributing jobs across the cards.
+fn group_shape(routes: &[Route], max_experts: usize) -> (usize, usize) {
+    routes[..routes.len().min(MAX_GROUP_ROWS)]
+        .chunk_by(|a, b| a.expert == b.expert)
+        .take(max_experts)
+        .fold((0, 0), |(rows, jobs), group| {
+            (rows + group.len(), jobs + group.len().div_ceil(16))
+        })
+}
+
+fn split_count(jobs: usize, verification: bool) -> i32 {
+    if verification || jobs < 32 {
+        8
+    } else {
+        2
+    }
+}
+
+struct Placement {
+    device: i32,
+    capacity: usize,
+    queried: usize,
+    uploads_before: usize,
+}
+
+impl Placement {
+    fn prepare(
+        cache: &mut DeviceCache,
+        layer: Layer,
+        owned: &[Route],
+        select: bool,
+    ) -> Result<Self> {
+        if select {
+            cuda(unsafe { cudaSetDevice(cache.device) })?;
+        }
+        let query = !owned.is_empty() && !cache.can_reuse_capacity(layer, owned);
+        Ok(Self {
+            device: cache.device,
+            capacity: if query {
+                cache.capacity()?
+            } else {
+                cache.slots.len().max(1)
+            },
+            queried: usize::from(query),
+            uploads_before: cache.uploads,
+        })
+    }
+
+    fn run(
+        &self,
+        cache: &mut MoeCache,
+        dispatch: &mut Dispatch<'_>,
+        mut rows: &[Route],
+        splits: i32,
+        select: bool,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        if select {
+            cuda(unsafe { cudaSetDevice(self.device) })?;
+        }
+        let device = cache.device(self.device)?;
+        while !rows.is_empty() {
+            let (n, _) = group_shape(rows, self.capacity);
+            dispatch.run_group(device, &rows[..n], self.capacity, splits)?;
+            rows = &rows[n..];
+        }
+        Ok(())
+    }
 }
 
 pub fn forward_dev(rt: &mut Runtime, layer: usize, x: &Dev, batch: usize) -> Result<Dev> {
@@ -507,6 +616,17 @@ fn forward<const E: usize, const K: usize>(
         "invalid FFN input shape"
     );
     let base = layer.base();
+    // Reserve the output before recording readiness: a pooled allocation may
+    // still have ordered uses from the previous layer on the primary stream.
+    let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
+    let peer_id = rt.peer_device();
+    let cache = rt.moe_cache.device(rt.device)?;
+    let parallel = cache.parallel;
+    let peer_work = if parallel {
+        Some(PeerWork::begin(cache, peer_id)?)
+    } else {
+        None
+    };
     let logits = rt.linear_dev(&format!("{base}.gate.weight"), x, batch, 1)?;
     let bias = rt.weights.vector(&format!("{base}.gate.bias"))?;
     // Only router logits visit the CPU, which computes the checkpoint's top-k
@@ -528,32 +648,74 @@ fn forward<const E: usize, const K: usize>(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
     );
-    let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
-    let device = rt.moe_cache.device(rt.device)?;
-    let reuse = device.can_reuse_capacity(layer, &routes);
-    let capacity = if reuse {
-        device.slots.len()
+    let peer_rows;
+    let primary_rows;
+    let (local, remote): (&[Route], &[Route]) = if parallel {
+        (primary_rows, peer_rows) = routes
+            .iter()
+            .copied()
+            .partition::<Vec<Route>, _>(|r| r.expert % 2 == 0);
+        (&primary_rows, &peer_rows)
     } else {
-        device.capacity()?
+        (&routes, &[])
     };
-    let uploads_before = device.uploads;
+    let device = rt.moe_cache.device(rt.device)?;
+    let primary = Placement::prepare(device, layer, local, false)?;
     let report = device.metrics;
-    let max_experts = capacity.min(MAX_GROUP_EXPERTS);
-    let mut begin = 0;
+    // A user's slot limit also sets the logical group boundary. Splitting a
+    // physical partition further for VRAM pressure does not change split-K.
+    let max_experts = MAX_GROUP_EXPERTS.min(device.limit);
+    let peer = if parallel {
+        Some(Placement::prepare(
+            rt.moe_cache.device(peer_id)?,
+            layer,
+            remote,
+            true,
+        )?)
+    } else {
+        None
+    };
+    let mut dispatch = Dispatch {
+        weights: &rt.weights,
+        layer,
+        x,
+        weighted: &mut weighted,
+        top_k: K,
+    };
+    let (mut begin, mut ni, mut pi) = (0, 0, 0);
     while begin < routes.len() {
-        let mut end = begin;
-        let mut distinct = 0;
-        while end < routes.len() && end - begin < MAX_GROUP_ROWS {
-            if end == begin || routes[end].expert != routes[end - 1].expert {
-                if distinct == max_experts {
-                    break;
-                }
-                distinct += 1;
-            }
-            end += 1;
-        }
-        run_group::<K>(rt, layer, &routes[begin..end], x, &mut weighted, capacity)?;
-        begin = end;
+        let (count, jobs) = group_shape(&routes[begin..], max_experts);
+        let splits = split_count(jobs, rt.verification && matches!(layer, Layer::Backbone(_)));
+        let nr = if let Some(peer) = &peer {
+            let n = routes[begin..begin + count]
+                .iter()
+                .filter(|r| r.expert % 2 != 0)
+                .count();
+            peer.run(
+                &mut rt.moe_cache,
+                &mut dispatch,
+                &remote[pi..pi + n],
+                splits,
+                true,
+            )?;
+            pi += n;
+            n
+        } else {
+            0
+        };
+        let n = count - nr;
+        primary.run(
+            &mut rt.moe_cache,
+            &mut dispatch,
+            &local[ni..ni + n],
+            splits,
+            parallel,
+        )?;
+        ni += n;
+        begin += count;
+    }
+    if let Some(work) = peer_work {
+        work.finish()?;
     }
     cuda(unsafe {
         ds_moe_finish(
@@ -564,7 +726,12 @@ fn forward<const E: usize, const K: usize>(
         )
     })?;
     if report {
-        let uploads = rt.moe_cache.device(rt.device)?.uploads - uploads_before;
+        let mut uploads = rt.moe_cache.device(primary.device)?.uploads - primary.uploads_before;
+        let mut queries = primary.queried;
+        if let Some(peer) = peer {
+            uploads += rt.moe_cache.device(peer.device)?.uploads - peer.uploads_before;
+            queries += peer.queried;
+        }
         let m = &mut rt.moe_cache.metrics;
         if matches!(layer, Layer::Backbone(0) | Layer::Draft(0)) {
             *m = Metrics::default();
@@ -572,7 +739,7 @@ fn forward<const E: usize, const K: usize>(
         m.routes += routes.len();
         m.unique += routes.chunk_by(|a, b| a.expert == b.expert).count();
         m.uploads += uploads;
-        m.capacity_queries += usize::from(!reuse);
+        m.capacity_queries += queries;
         if matches!(layer, Layer::Backbone(39) | Layer::Draft(2)) {
             let kind = match layer {
                 Layer::Backbone(_) if rt.verification => "verify",
@@ -599,6 +766,30 @@ mod tests {
         );
         assert_eq!(DeviceCache::available_slots(5, 8192 << 20, 10), 10);
         assert_eq!(DeviceCache::available_slots(0, 0, 10), 1);
+    }
+
+    #[test]
+    fn logical_job_count_survives_smaller_physical_cache_groups() {
+        let routes: Vec<_> = (0..40)
+            .map(|expert| Route {
+                expert,
+                token: expert,
+                rank: 0,
+                weight: 1.,
+            })
+            .collect();
+        let (rows, jobs) = group_shape(&routes, MAX_GROUP_EXPERTS);
+        assert_eq!((rows, jobs), (40, 40));
+        let owned: Vec<_> = routes
+            .iter()
+            .copied()
+            .filter(|r| r.expert % 2 == 1)
+            .collect();
+        assert_eq!(group_shape(&owned, 8), (8, 8));
+        // The physical subset would independently choose eight splits; all
+        // subsets must receive the logical group's two splits.
+        assert_eq!(split_count(jobs, false), 2);
+        assert_eq!(split_count(jobs, true), 8);
     }
 
     #[test]
@@ -690,6 +881,64 @@ mod tests {
         assert_eq!(second, run(&mut cache, 1)?);
         assert_eq!(cache.slots[&(Backbone(0), 1)].0, first_slot);
         assert_eq!(cache.slots.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs in CUDA_VISIBLE_DEVICES"]
+    fn peer_experts_match_single_device_in_both_directions() -> Result<()> {
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "select both inference GPUs"
+        );
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        let batch = 3;
+        let input: Vec<_> = (0..batch * HIDDEN)
+            .map(|i| (i as f32 * 0.057).cos())
+            .collect();
+        for layer in [Layer::Backbone(0), Layer::Draft(2)] {
+            rt.layer(if matches!(layer, Layer::Backbone(_)) {
+                0
+            } else {
+                39
+            })?;
+            let x = rt.to_device(&input)?;
+            rt.verification = matches!(layer, Layer::Backbone(_));
+            let mut baseline = None;
+            for parallel in [false, true] {
+                rt.moe_cache = MoeCache::default();
+                let cache = rt.moe_cache.device(rt.device)?;
+                cache.parallel = parallel;
+                cache.fused = true;
+                cache.limit = 2; // force slot reuse while remote kernels hold the old data
+                let peer = rt.peer_device();
+                rt.moe_cache.device(peer)?.limit = 2;
+                for _ in 0..2 {
+                    let y = match layer {
+                        Layer::Backbone(n) => forward_dev(&mut rt, n, &x, batch)?,
+                        Layer::Draft(n) => draft_forward(&mut rt, n, &x, batch)?,
+                    };
+                    let actual: Vec<_> = rt.to_host(&y)?.into_iter().map(f32::to_bits).collect();
+                    if let Some(expected) = &baseline {
+                        assert_eq!(&actual, expected);
+                    } else {
+                        baseline = Some(actual);
+                    }
+                }
+                if parallel {
+                    for (device, cache) in &rt.moe_cache.devices {
+                        assert!(!cache.slots.is_empty());
+                        assert!(cache
+                            .slots
+                            .keys()
+                            .all(|&(_, e)| (e % 2 == 0) == (*device == rt.device)));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
