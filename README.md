@@ -6,16 +6,17 @@ The native benchmarks cover code generation at 404k context and six independent 
 
 ## Run on this workstation
 
-The release build needs Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only.
+The measured shared-prefix and LFU image is installed locally on this workstation. Start it from the engine repository.
 
 ```sh
 cd ~/llm/ds4-flash-rs
-cargo build --release --locked
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose --env-file ../models/.env up --build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f compose.shared-prefix-lfu.yml up --no-build -d --wait
 ```
 
-This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. The executable checks both model names. LiteLLM continues to serve clients on port 4000.
+For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build instructions and measurements](SHARED-PREFIX-EXPERIMENT.md#full-window-rotation-and-reproduction)
+
+This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. LiteLLM continues to serve clients on port 4000. The prior LFU and base LRU images have separate launch commands. [Checkpoint profiles](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation)
 
 Launch a coding client from its project directory using one of these commands.
 

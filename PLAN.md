@@ -65,3 +65,7 @@ Six 512-token coding clients delivered 260–264 aggregate tok/s on the 375 W ch
 ## Frequency-based expert eviction at 375 W
 
 The local checkpoint tag `checkpoint-2026-11-26-before-expert-cache` marks the start of this experiment. At the same slot budget, LFU reduced median six-client expert uploads from 2,676 to 1,191 per warm 404k coding wave. The live candidate delivered 278.1 tok/s at 512 output tokens per client and 300.0 and 297.0 tok/s in two independently controlled 768-token runs. The normal service uses the LRU checkpoint. [Full-window gates, rates, replay evidence and opt-in launch](EXPERT-CACHE-EXPERIMENT.md)
+
+## Shared target rows on warm prefix restore
+
+Selected shared packed rows with LFU for the 375 W service. At six independent 404k contexts the 512-token coding median rose from 278.2–278.8 to 296.6 aggregate tok/s. At 768 output tokens it reached 313.2, with all six measured waves above 300. Six full-window receipt clients rose from 202.7–204.4 to 287.7. The unchanged published 25.6k edit script reached 464 tok/s across six. Eight full-window clients matched the checkpoint through both RAM and forced disk rotation. [Experiment, per-client timing and deployment](SHARED-PREFIX-EXPERIMENT.md)

@@ -1,0 +1,5 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:shared-prefix-3d8c541
+    environment:
+      DS4_EXPERT_EVICTION: lfu
