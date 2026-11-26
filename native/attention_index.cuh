@@ -56,9 +56,12 @@ __global__ void chronological_ids(const unsigned long long *rank, int width, int
         out[size_t(blockIdx.x)*Limit+threadIdx.x*items+j]=int(keys[j]);
 }
 
-// Segmented radix sort handles many small query rows. With just a few long
-// rows, give the entire grid to each sort instead of one segmented operation.
-inline bool wide_index_sort(int stride,int rows) { return rows<=4 && stride>=8192; }
+// On sm_120, segmented sort wins for batches of short rows. Separate device
+// sorts recover their launch cost when a row has about 8192 keys per batch row
+// (32k x 4, 64k x 8, 128k x 16). Small decode batches need only 8192 keys.
+inline bool wide_index_sort(int stride, int rows) {
+    return stride >= 8192 && (rows <= 2 || stride >= int64_t(rows) * 8192);
+}
 inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long long *input,
         unsigned long long *output,int stride,int rows,const int *offsets) {
     if (!wide_index_sort(stride,rows)) return cub::DeviceSegmentedRadixSort::SortKeysDescending(
