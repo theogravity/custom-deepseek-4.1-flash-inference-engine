@@ -297,7 +297,12 @@ impl Runtime {
         })?;
         Ok(out)
     }
-    fn raw_bf16(&mut self, name: &str, rows: usize, cols: usize) -> Result<*const c_void> {
+    pub(crate) fn raw_bf16(
+        &mut self,
+        name: &str,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*const c_void> {
         if !self.matrices.contains_key(name) {
             let w = self.weights.tensor(name)?;
             ensure!(
@@ -337,7 +342,7 @@ impl Runtime {
         );
         Ok(m.ptr.cast_const())
     }
-    fn token_ids(&self, ids: &Dev) -> Result<Vec<u32>> {
+    pub(crate) fn token_ids(&self, ids: &Dev) -> Result<Vec<u32>> {
         self.to_host(ids)?
             .into_iter()
             .map(|x| {
@@ -386,7 +391,7 @@ impl Runtime {
         ensure!(e == 0, "CUDA greedy selection failed ({e})");
         self.token_ids(&ids)
     }
-    pub fn markov(&mut self, logits: &Dev, seed: u32, rows: usize) -> Result<Vec<u32>> {
+    pub fn markov(&mut self, logits: &Dev, seed: u32, rows: usize) -> Result<Dev> {
         const VOCAB: usize = 129280;
         ensure!(
             seed < VOCAB as u32
@@ -413,7 +418,7 @@ impl Runtime {
             )
         };
         ensure!(e == 0, "CUDA Markov selection failed ({e})");
-        self.token_ids(&ids)
+        Ok(ids)
     }
     pub fn vector_ptr(&mut self, name: &str, len: usize) -> Result<*const f32> {
         if !self.vectors.contains_key(name) {

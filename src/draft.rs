@@ -8,13 +8,18 @@ use crate::{
 };
 use anyhow::{ensure, Result};
 
+#[path = "confidence.rs"]
+mod confidence;
+
 pub struct DraftState {
     attention: DraftAttention,
+    trace: Option<Vec<f32>>,
 }
 impl DraftState {
     pub fn new() -> Self {
         Self {
             attention: DraftAttention::default(),
+            trace: None,
         }
     }
     pub fn ready(&self, pos: usize) -> bool {
@@ -26,6 +31,7 @@ impl DraftState {
     pub fn restore(rt: &mut Runtime, pos: usize, bytes: &[u8]) -> Result<Self> {
         Ok(Self {
             attention: DraftAttention::restore(rt, pos, bytes)?,
+            trace: None,
         })
     }
     pub fn observe(
@@ -36,6 +42,11 @@ impl DraftState {
         committed_rows: usize,
     ) -> Result<()> {
         self.attention.observe(rt, features, pos, committed_rows)
+    }
+    pub fn report_confidence(&mut self, kept: usize, accepted: usize) {
+        if let Some(scores) = self.trace.take() {
+            eprintln!("draft-confidence kept={kept} accepted={accepted} scores={scores:?}");
+        }
     }
     pub fn propose(
         &mut self,
@@ -63,6 +74,13 @@ impl DraftState {
         }
         let x = residual::readout(rt, &h, &mut mix, "mtp.2.norm.weight", 0, width)?;
         let logits = rt.linear_dev("head.weight", &x, width, 1)?;
-        rt.markov(&logits, seed, width)
+        let ids = rt.markov(&logits, seed, width)?;
+        if let Some(gate) = confidence::Gate::configured()? {
+            let (proposals, trace) = gate.evaluate(rt, &h, &mix, seed, &ids)?;
+            self.trace = trace;
+            Ok(proposals)
+        } else {
+            rt.token_ids(&ids)
+        }
     }
 }

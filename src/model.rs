@@ -96,6 +96,13 @@ fn verify_proposals(
     Ok((proposals.len(), draw(proposals.len())?))
 }
 
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum ProposalSource {
+    Target,
+    Learned,
+    Lookup,
+}
+
 #[derive(Default)]
 struct DraftStats {
     learned: Counts,
@@ -107,6 +114,19 @@ struct Counts {
     rounds: usize,
     proposed: usize,
     accepted: usize,
+}
+
+impl DraftStats {
+    fn record(&mut self, source: ProposalSource, proposed: usize, accepted: usize) {
+        let counts = match source {
+            ProposalSource::Target => return,
+            ProposalSource::Learned => &mut self.learned,
+            ProposalSource::Lookup => &mut self.lookup,
+        };
+        counts.rounds += 1;
+        counts.proposed += proposed;
+        counts.accepted += accepted;
+    }
 }
 
 impl Drop for DraftStats {
@@ -354,10 +374,15 @@ impl Model {
             ids.push(token);
             let remaining = limit - emitted - 1;
             let mut proposed = lookup.propose(&ids, self.lookup_k.min(remaining));
-            let from_lookup = !proposed.is_empty();
+            let mut source = if proposed.is_empty() {
+                ProposalSource::Target
+            } else {
+                ProposalSource::Lookup
+            };
             let width = self.spec_k.min(remaining);
-            if !from_lookup && width > 0 {
+            if source == ProposalSource::Target && width > 0 {
                 if let Some(draft) = draft.as_mut().filter(|d| d.ready(pos)) {
+                    source = ProposalSource::Learned;
                     proposed = draft.propose(&mut self.rt, pos, token, width)?;
                     ensure!(
                         proposed.len() <= width && proposed.iter().all(|&t| t < 129280),
@@ -380,16 +405,12 @@ impl Model {
             let committed = accepted + 1; // the previously emitted input anchor is always committed
             if batch > 1 {
                 cache.finish_verify(committed)?;
-                let stats = if from_lookup {
-                    &mut draft_stats.lookup
-                } else {
-                    &mut draft_stats.learned
-                };
-                stats.rounds += 1;
-                stats.proposed += proposed.len();
-                stats.accepted += accepted;
             }
+            draft_stats.record(source, proposed.len(), accepted);
             if let Some(draft) = draft.as_mut() {
+                if source == ProposalSource::Learned {
+                    draft.report_confidence(proposed.len(), accepted);
+                }
                 draft.observe(
                     &mut self.rt,
                     target
@@ -442,6 +463,23 @@ mod tests {
                 assert!(observed[h.saturating_sub(128)..h].iter().all(|&v| v));
             }
         }
+    }
+
+    #[test]
+    fn learned_attempt_with_zero_confident_rows_counts_as_a_draft_round() {
+        let mut stats = DraftStats::default();
+        stats.record(ProposalSource::Learned, 0, 0);
+        stats.record(ProposalSource::Learned, 5, 3);
+        stats.record(ProposalSource::Lookup, 8, 4);
+        stats.record(ProposalSource::Target, 0, 0);
+        assert_eq!(
+            (stats.learned.rounds, stats.learned.proposed, stats.learned.accepted),
+            (2, 5, 3)
+        );
+        assert_eq!(
+            (stats.lookup.rounds, stats.lookup.proposed, stats.lookup.accepted),
+            (1, 8, 4)
+        );
     }
 
     #[test]
