@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <new>
 #include <vector>
 
@@ -88,7 +89,7 @@ __device__ __forceinline__ void mma(const unsigned (&a)[4], unsigned b0, unsigne
 // Four warps cover 64 output columns. Each job covers up to 16 inputs routed
 // to one expert, sharing the decoded weights. Split K keeps a one-token job
 // large enough to distribute across the SMs. Partials are reduced in order.
-template <int projection, bool mcg, bool paired = false, bool packed_decode = false>
+template <int projection, bool mcg, bool paired = false, bool packed_decode = false, bool share_words = false>
 __global__ void project(const Job *jobs, const half *x, float *partial, int rows, int splits) {
     constexpr int K = projection == Down ? I : H;
     constexpr int N = projection == Down ? H : I;
@@ -120,7 +121,17 @@ __global__ void project(const Job *jobs, const half *x, float *partial, int rows
     int ke = (split + 1) * KT / splits;
     for (int kt = kb; kt < ke; ++kt) {
         const uint32_t *tile = tiles + (kt * (N / 16) + nt) * 24;
-        uint64_t windows = ((uint64_t(tile[first]) << 32) | tile[last]) >> shift;
+        uint64_t windows;
+        if constexpr (share_words) {
+            unsigned low = tile[last];
+            // Each four lanes end in words [3g, 3g+1, 3g+2, 3g+2].
+            // The preceding word is available one lane back, or two for lane 3.
+            int source_lane = (lane + 31 - int((lane & 3) == 3)) & 31;
+            unsigned high = __shfl_sync(0xffffffffu, low, source_lane);
+            windows = ((uint64_t(high) << 32) | low) >> shift;
+        } else {
+            windows = ((uint64_t(tile[first]) << 32) | tile[last]) >> shift;
+        }
         unsigned b[4];
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
@@ -354,16 +365,16 @@ void launch_ffn(Job *device_jobs, RoutedRow *device_rows, int n_jobs, int rows, 
     launch_projection<Down, mcg>(device_jobs, device_rows, n_jobs, rows, splits, gate, rotated,
                             partial, weighted);
 }
-template <bool mcg, bool packed_decode>
+template <bool mcg, bool packed_decode, bool share_words = false>
 void launch_fused(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows, int splits,
                   const float *x, half *rotated, float *partial, float *weighted) {
     // The partial allocation is sized for H down columns, sufficient for
     // 2*I gate/up columns. The contiguous gate/up/rotated buffers hold 2*H halves.
     static_assert(2 * I <= H && 2 * I * sizeof(float) >= H * sizeof(half));
     rotate_input<Gate, true><<<dim3((H+511)/512,rows,2),128>>>(routes, x, rotated);
-    project<Gate, mcg, true, packed_decode><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
+    project<Gate, mcg, true, packed_decode, share_words><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
     prepare_down<<<dim3((I+511)/512,rows),128>>>(routes, partial, rotated, rows, splits);
-    project<Down, mcg, false, packed_decode><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
+    project<Down, mcg, false, packed_decode, share_words><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
     rotate_output<Down><<<dim3((H+511)/512,rows),128>>>(routes, partial, weighted, rows, splits);
 }
 
@@ -504,6 +515,12 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
         // Mode 1 is the original fused reference, 2 packs codebook arithmetic by pairs.
         auto launch = mcg ? (fused == 2 ? launch_fused<true,true> : launch_fused<true,false>)
                           : (fused == 2 ? launch_fused<false,true> : launch_fused<false,false>);
+        static const bool share_words = [] {
+            const char *v = std::getenv("DS4_EXPERT_WORD_SHUFFLE");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        if (share_words && !mcg && fused == 2 && splits == 8 && n_jobs <= 16)
+            launch = launch_fused<false,true,true>;
         launch(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
     } else if (mcg)
         launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
