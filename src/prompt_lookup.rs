@@ -1,6 +1,7 @@
 //! Per-request source lookup. Positions refer to the first token after a four-gram.
 use anyhow::{bail, ensure, Context, Result};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
+use tokenizers::Tokenizer;
 
 #[derive(Clone, Copy, Default)]
 enum OutputLookup {
@@ -10,14 +11,15 @@ enum OutputLookup {
     Always,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(super) struct Config {
     max_width: usize,
     adaptive: bool,
     prior_output: OutputLookup,
+    consensus: Option<Arc<DecimalTokens>>,
 }
 
-pub(super) fn configured() -> Result<Config> {
+pub(super) fn configured(tokenizer: &Tokenizer) -> Result<Config> {
     match std::env::var("DS4_PROMPT_LOOKUP").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("0") => return Ok(Config::default()),
         Ok("1") => (),
@@ -43,7 +45,13 @@ pub(super) fn configured() -> Result<Config> {
         Ok("1") => OutputLookup::Always,
         _ => bail!("DS4_OUTPUT_LOOKUP must be 0, single or 1"),
     };
+    let consensus = match std::env::var("DS4_C1_OUTPUT_CONSENSUS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => None,
+        Ok("1") => Some(Arc::new(DecimalTokens::new(|s| tokenizer.token_to_id(s)))),
+        _ => bail!("DS4_C1_OUTPUT_CONSENSUS must be 0 or 1"),
+    };
     Ok(Config {
+        consensus,
         prior_output,
         max_width: width,
         adaptive,
@@ -66,7 +74,7 @@ impl PromptLookup {
             latest: HashMap::new(),
             previous: vec![],
         };
-        if config.max_width > 0 {
+        if lookup.config.max_width > 0 {
             for end in 4..prompt.len() {
                 let key = prompt[end - 4..end].try_into().unwrap();
                 lookup
@@ -124,7 +132,19 @@ impl PromptLookup {
             OutputLookup::Always => true,
         };
         if length == 0 && use_output {
-            return prior_output_proposal(&ids[self.prompt_len..], width).to_vec();
+            let output = &ids[self.prompt_len..];
+            let recent = &output[output.len().saturating_sub(2048)..];
+            let (prior, matched) = prior_output_proposal(recent, width);
+            if let (true, Some(decimals)) = (single_client, &self.config.consensus) {
+                let proposed = repeating_output(recent, width, decimals);
+                if !proposed.is_empty() && (matched < 16 || proposed.len() >= prior.len()) {
+                    return proposed;
+                }
+                if learned_ready && matched < 16 {
+                    return vec![];
+                }
+            }
+            return prior.to_vec();
         }
         prompt[source..source + length].to_vec()
     }
@@ -132,11 +152,10 @@ impl PromptLookup {
 // Repeated code edits often share generated signatures or documentation that
 // never occurred in the supplied file. Read only the committed output already
 // present at this scheduler boundary. The target verifies these tokens as usual.
-fn prior_output_proposal(output: &[u32], width: usize) -> &[u32] {
+fn prior_output_proposal(recent: &[u32], width: usize) -> (&[u32], usize) {
     const MATCH: usize = 8;
-    let recent = &output[output.len().saturating_sub(2048)..];
     if recent.len() <= MATCH || width == 0 {
-        return &[];
+        return (&[], 0);
     }
     let suffix = &recent[recent.len() - MATCH..];
     let mut best = (0, 0);
@@ -167,7 +186,85 @@ fn prior_output_proposal(output: &[u32], width: usize) -> &[u32] {
         16..32 => 24,
         _ => 48,
     };
-    &recent[source..source + best.1.min(cap)]
+    (&recent[source..source + best.1.min(cap)], best.0)
+}
+
+// Token IDs are not ordered by numeric value. Only canonical single-token
+// decimal strings participate in extrapolation; all other tokens match exactly.
+#[derive(Default)]
+struct DecimalTokens {
+    values: HashMap<u32, i32>,
+    ids: Vec<Option<u32>>,
+}
+
+impl DecimalTokens {
+    fn new(id_for: impl Fn(&str) -> Option<u32>) -> Self {
+        let ids: Vec<_> = (0..1000)
+            .map(|n| id_for(&n.to_string()).filter(|&id| id < 129280))
+            .collect();
+        let values = ids
+            .iter()
+            .enumerate()
+            .filter_map(|(n, id)| id.map(|i| (i, n as i32)))
+            .collect();
+        Self { values, ids }
+    }
+    fn predict(&self, older: u32, newer: u32) -> Option<u32> {
+        if older == newer {
+            return Some(newer);
+        }
+        let next = 2 * self.values.get(&newer)? - self.values.get(&older)?;
+        self.ids.get(usize::try_from(next).ok()?).copied().flatten()
+    }
+}
+
+// Compare the current suffix against the corresponding positions in two
+// completed repetitions. Cap the lookahead at one period so every source
+// position is already committed. A changing numeric field needs a third
+// previous value confirming its step before it can enter a proposal.
+fn repeating_output(recent: &[u32], width: usize, decimals: &DecimalTokens) -> Vec<u32> {
+    const LIMIT: usize = 48;
+    let n = recent.len();
+    let mut best = Vec::new();
+    let mut rank = (0, 0);
+    for period in 8..=256.min(n.saturating_sub(4) / 2) {
+        let suffix = (1..=period.min(32).min(n - 2 * period))
+            .take_while(|&offset| {
+                let i = n - offset;
+                decimals.predict(recent[i - 2 * period], recent[i - period]) == Some(recent[i])
+            })
+            .count();
+        if suffix < 4 {
+            continue;
+        }
+        let cap = if suffix < 8 { 12 } else { LIMIT };
+        let mut tokens = [0; LIMIT];
+        let mut length = 0;
+        for (offset, slot) in tokens[..width.min(cap).min(period)].iter_mut().enumerate() {
+            let i = n + offset;
+            let (older, newer) = (recent[i - 2 * period], recent[i - period]);
+            if older != newer
+                && i.checked_sub(3 * period)
+                    .and_then(|j| decimals.predict(recent[j], older))
+                    != Some(newer)
+            {
+                break;
+            }
+            let Some(token) = decimals.predict(older, newer) else {
+                break;
+            };
+            *slot = token;
+            length += 1;
+        }
+        // A six-token agreement competes with a learned draft of up to seven.
+        let score = (suffix.min(12), length);
+        if length >= 6 && score > rank {
+            rank = score;
+            best.clear();
+            best.extend_from_slice(&tokens[..length]);
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -182,6 +279,7 @@ mod tests {
             max_width: 128,
             adaptive,
             prior_output: OutputLookup::Disabled,
+            consensus: None,
         }
     }
 
@@ -189,10 +287,10 @@ mod tests {
     fn generated_lookup_requires_a_previous_matching_suffix_and_reads_only_committed_ids() {
         let passage: Vec<u32> = (1..=32).collect();
         let output = [passage.as_slice(), &[81, 82, 83, 84, 85], &passage].concat();
-        assert_eq!(prior_output_proposal(&output, 5), [81, 82, 83, 84, 85]);
-        assert!(prior_output_proposal(&passage, 16).is_empty());
-        assert!(prior_output_proposal(&[12; 7], 16).is_empty());
-        assert!(prior_output_proposal(&output, 0).is_empty());
+        assert_eq!(prior_output_proposal(&output, 5).0, [81, 82, 83, 84, 85]);
+        assert!(prior_output_proposal(&passage, 16).0.is_empty());
+        assert!(prior_output_proposal(&[12; 7], 16).0.is_empty());
+        assert!(prior_output_proposal(&output, 0).0.is_empty());
         let mut cfg = config(true);
         cfg.prior_output = OutputLookup::Always;
         let prompt = [999; 32];
@@ -221,6 +319,85 @@ mod tests {
         );
         assert_eq!(lookup.propose(&ids, 4, true, true), [81, 82, 83, 84]);
         assert!(lookup.propose(&ids, 4, true, false).is_empty());
+    }
+
+    #[test]
+    fn consensus_drafts_from_short_suffixes_with_two_agreeing_continuations() {
+        let block = |marker| vec![20, 21, 22, 23, 24, 25, marker, marker, 7, 8, 9, 10];
+        let output = [block(70), block(71), block(72)].concat();
+        let decimals = DecimalTokens::default();
+        assert_eq!(
+            repeating_output(&output, 48, &decimals),
+            [20, 21, 22, 23, 24, 25]
+        );
+        assert!(repeating_output(&output, 5, &decimals).is_empty());
+        assert!(repeating_output(&block(70), 48, &decimals).is_empty());
+        let prompt = [9090; 8];
+        let lookup = PromptLookup::new(
+            &prompt,
+            Config {
+                prior_output: OutputLookup::SingleClient,
+                consensus: Some(Arc::new(DecimalTokens::default())),
+                ..config(true)
+            },
+        );
+        let ids = [prompt.as_slice(), &output].concat();
+        assert!(prior_output_proposal(&output, 48).0.is_empty());
+        assert_eq!(
+            lookup.propose(&ids, 48, true, true),
+            [20, 21, 22, 23, 24, 25]
+        );
+        assert!(lookup.propose(&ids, 48, true, false).is_empty());
+        assert!(lookup.propose(&ids, 5, true, true).is_empty());
+        let mut disagreement = output;
+        disagreement[12 + 2] = 800;
+        assert!(repeating_output(&disagreement, 48, &decimals).is_empty());
+    }
+
+    #[test]
+    fn consensus_can_extend_a_verified_decimal_progression() {
+        let decimals = DecimalTokens::new(|s| s.parse::<u32>().ok().map(|n| 2200 - n));
+        let id = |n| 2200 - n;
+        let block = |n: u32| {
+            let mut b: Vec<u32> = (100..120).collect();
+            b[10] = id(n);
+            b
+        };
+        let mut history = [block(9), block(12), block(15)].concat();
+        history.extend_from_slice(&block(18)[..8]);
+        let draft = repeating_output(&history, 12, &decimals);
+        assert_eq!(draft, block(18)[8..]);
+        history[10] = id(8);
+        assert!(repeating_output(&history, 12, &decimals).is_empty());
+        assert_eq!(decimals.predict(id(12), id(9)), Some(id(6)));
+        assert_eq!(decimals.predict(id(20), id(8)), None);
+        let invalid = DecimalTokens::new(|s| match s {
+            "8" => Some(910),
+            "9" => Some(911),
+            "10" => Some(129280),
+            _ => None,
+        });
+        assert_eq!(invalid.predict(910, 911), None);
+        assert_eq!(decimals.predict(id(998), id(999)), None);
+    }
+
+    #[test]
+    fn consensus_respects_client_count_and_preserves_strong_single_matches() {
+        let prompt = [9090; 12];
+        let mut cfg = config(true);
+        cfg.prior_output = OutputLookup::Always;
+        cfg.consensus = Some(Arc::new(DecimalTokens::default()));
+        let lookup = PromptLookup::new(&prompt, cfg);
+        for size in [8, 16] {
+            let pattern: Vec<u32> = (40..40 + size).collect();
+            let ids = [prompt.as_slice(), &pattern, &[1, 2, 3, 4, 5, 6], &pattern].concat();
+            assert_eq!(lookup.propose(&ids, 6, true, false), [1, 2, 3, 4, 5, 6]);
+            assert_eq!(
+                lookup.propose(&ids, 6, true, true).len(),
+                if size == 8 { 0 } else { 6 }
+            );
+            assert_eq!(lookup.propose(&ids, 6, false, true), [1, 2, 3, 4, 5, 6]);
+        }
     }
 
     #[test]
@@ -270,6 +447,7 @@ mod tests {
                 max_width: 9,
                 adaptive: true,
                 prior_output: OutputLookup::Disabled,
+                consensus: None,
             },
         );
         assert_eq!(

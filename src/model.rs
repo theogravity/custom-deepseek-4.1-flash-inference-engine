@@ -288,7 +288,7 @@ impl Model {
         Ok(Self {
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
-            lookup: prompt_lookup::configured()?,
+            lookup: prompt_lookup::configured(tok)?,
             batch_drafter: match std::env::var("DS4_BATCH_DRAFT").as_deref() {
                 Ok("0") => false,
                 Ok("1") | Err(std::env::VarError::NotPresent) => true,
@@ -412,7 +412,7 @@ impl Model {
             }
         }
         let next_point = points.partition_point(|&at| at <= pos);
-        let lookup = prompt_lookup::PromptLookup::new(&ids, self.lookup);
+        let lookup = prompt_lookup::PromptLookup::new(&ids, self.lookup.clone());
         cache.begin_prefill_with_limit(prompt_len, prompt_len + limit);
         if let Some(profile) = timing {
             cache.profile_restore(profile.probe(pos));
