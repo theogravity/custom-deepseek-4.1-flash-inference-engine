@@ -1,9 +1,9 @@
 {
-  "source_commit": "722cf72af18b3874723cc66511629d27dc3750fa",
+  "source_commit": "9822a3758246329045c7b595430260087b185532",
   "checkpoint": "diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
   "weights_tokenizer_and_code_overlay_revision": "451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae",
-  "image_id": "sha256:489dce6c496d04af01403d4e7356b27f8a17edc0fc876119514de5d82ab1067e",
-  "binary_sha256": "8a34cfb83c64a2917ce0155171bbd198f800b3e6748f8c739ac50b3ea7914859",
+  "image_id": "sha256:61ecd92a1e520c4160c09c20424517ef809e5f87777ded8b52bd3d0dc212ed3c",
+  "binary_sha256": "18897f0f22653d84d438b8a34a20c601fb83f530980d4b2b8d4540e8138733b5",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "nvcc": "13.5.37",
   "arch": "sm_120f",
@@ -36,6 +36,7 @@
     "DS4_GPU_COMPRESS": "1",
     "DS4_GPU_INDEX": "1",
     "DS4_LOOKUP_K": "128",
+    "DS4_MAX_LIVE_SEQS": "32",
     "DS4_MAX_SEQS": "6",
     "DS4_MOE_CACHE_GIB": "92",
     "DS4_MOE_FUSED": "1",
@@ -46,13 +47,18 @@
     "DS4_PREFIX_DISK_MIB": "65536",
     "DS4_PREFIX_RAM_MIB": "2048",
     "DS4_PROMPT_LOOKUP": "1",
+    "DS4_SWAP_DIR": "/prefix/live",
+    "DS4_SWAP_DISK_MIB": "131072",
+    "DS4_SWAP_QUANTUM_STEPS": "32",
+    "DS4_SWAP_RAM_MIB": "49152",
     "RAYON_NUM_THREADS": "12"
   },
   "tests": {
-    "passed": 59,
+    "passed": 73,
     "ignored": 0,
     "failed": 0,
     "format": true,
     "clippy_warnings": 0
-  }
+  },
+  "benchmark_hardware": "benchmark-gpu-settings.json"
 }
