@@ -1,9 +1,9 @@
 {
-  "source_commit": "3be99133e6bdab0f524a0a57607ece4d5eccf8de",
+  "source_commit": "86ad7e683a010e8b1b7cf77185222abefc720748",
   "checkpoint": "diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
   "weights_tokenizer_and_code_overlay_revision": "451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae",
-  "image_id": "sha256:2fcc5b96881df5715b708384e04200d8bc47ddb43cc8eecb472400571d1e76d4",
-  "binary_sha256": "5ee4102a77bd23e87ac7830c86d7bef034c4095510a7dc900aa348a07faf35c6",
+  "image_id": "sha256:30133989d3bf9cc83ed276c56e3e04a7eb8ed7f4ab55a4949e99b4f76d69ebef",
+  "binary_sha256": "a2e08f90aa3b2cf9cd556c66f95635bc714d77cdc6e9e4dc0fc8b968c231d36f",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "nvcc": "13.5.37",
   "arch": "sm_120f",
@@ -41,8 +41,12 @@
     "DS4_MOE_CACHE_GIB": "92",
     "DS4_MOE_FUSED": "1",
     "DS4_MOE_PACKED_DECODE": "1",
+    "DS4_OUTPUT_LOOKUP": "single",
+    "DS4_OVERLAP_PREFILL_ENGRAM": "0",
     "DS4_PACKED_DENSE": "1",
     "DS4_PACKED_INDEX": "1",
+    "DS4_PARALLEL_PREFILL_ROUTER": "1",
+    "DS4_PREFILL_MX_TILES": "4",
     "DS4_PREFIX_DIR": "/prefix",
     "DS4_PREFIX_DISK_MIB": "65536",
     "DS4_PREFIX_RAM_MIB": "2048",
@@ -52,17 +56,20 @@
     "DS4_SWAP_QUANTUM_STEPS": "32",
     "DS4_SWAP_RAM_MIB": "49152",
     "DS4_TIMING_RESTORES": "0",
+    "DS4_VERIFY_MX_TILES": "4",
     "RAYON_NUM_THREADS": "12"
   },
   "tests": {
-    "passed": 79,
+    "passed": 84,
     "ignored": 0,
     "failed": 0,
     "format": true,
     "clippy_warnings": 0,
     "python_unittests": 11
   },
-  "benchmark_hardware": "benchmark-gpu-settings.json",
+  "benchmark_hardware": "benchmark-gpu-settings-600w.json",
   "proxy_image_id": "sha256:10df763bde2487e1442a984da964c4f34096e55fd1e509a77f630639c6fbf48e",
-  "proxy_stack_commit": "d8ac00751a3e54f8d8b80f6912047485502d5048"
+  "proxy_stack_commit": "d8ac00751a3e54f8d8b80f6912047485502d5048",
+  "compose_commit": "ca66e2e4c10a9b7b812d5da1a40425d7fde05be1",
+  "cpu_power": "benchmark-cpu-power.json"
 }

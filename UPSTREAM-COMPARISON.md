@@ -2,6 +2,26 @@
 
 The two engines use the same workstation class and EXL3 model pack. The first table uses the upstream Python client unmodified, against port 8001. The benchmark first submits a 25,625-token Python module, then rewrites a different 41-function span per client. Each stream generates 1,500 tokens at temperature zero with default thinking. The published aggregate divides the total generated tokens by the longest individual post-first-token interval. [Upstream code](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/bench/decode_bench2.py) · [Published benchmark](https://github.com/theogravity/deepseek-flash-v4.1-dual-rtx-6000/blob/f020f98034679d9ec2d132e55603ba6a35a51a5a/docs/BENCHMARKS.md)
 
+## Matched GPU power test on the tuned release
+
+The same server process ran at 600 W, then 375 W, then 600 W again on both inference cards. The table gives the second pass of the unchanged upstream code-edit script at each setting. All entries are output tok/s, aggregate across active clients. The measured CPU socket cap stayed at 225 W. [Runs, hardware readbacks and output hashes](results/power-ab-tuned.json)
+
+| Clients | 600 W before | 375 W | 600 W after |
+|---:|---:|---:|---:|
+| 1 | 277 | 275 | 278 |
+| 4 | 417 | 414 | 419 |
+| 6 | 453 | 448 | 454 |
+
+Averaging the two 600 W code-edit passes gives a 0.9% improvement at C1, 1.0% at C4, and 1.2% at C6 relative to the 375 W pass. At full context the two 600 W receipt medians varied by 11.8 tok/s, and neither exceeded the 375 W observation. These three power legs give a workload-specific comparison.
+
+On the warm receipt test, each cap leg used three measured native requests per input length after one warm-up. Each request generated 128 verified output tokens. The two 600 W columns bracket the 375 W run.
+
+| Input tokens | 600 W before | 375 W | 600 W after |
+|---:|---:|---:|---:|
+| 4,096 | 503.5 | 501.0 | 505.3 |
+| 65,536 | 446.5 | 445.1 | 447.2 |
+| 524,160 | 314.4 | 314.8 | 302.6 |
+
 ## Published code-edit workload
 
 | Concurrent clients | Published recipe | Native control 375 W | Native control 600 W | Optimized native 600 W | Gap to published |
@@ -11,6 +31,8 @@ The two engines use the same workstation class and EXL3 model pack. The first ta
 | 6 | 557 | 446 | 452 | 459 | −17.6% |
 
 Values are aggregate output tok/s. On the 600 W optimized build, the 1,500-token function-50 edit repeated six times measured 277.7 tok/s median. The visible and reasoning outputs matched the control for all eight requests across three function ranges. The scheduler reserves generated-output lookup for a lone decoder. Enabling it under all loads measured 278/388/406 tok/s on the same C1/C4/C6 script. [Optimized upstream run](results/published-decode-final-600w.txt) · [Repeated edit and hashes](results/published-code-final-600w.jsonl) · [Always-on lookup](results/published-decode-always-lookup-600w.txt)
+
+On five warm repeats of the function-50 edit, the selected seven-token DSpark plus lookup policy measured 277.7 tok/s, the same code-tuned DSpark checkpoint limited to five proposals measured 262.1, and seven-token DSpark with all lookup disabled measured 267.9. Each variant reproduced the control's visible and reasoning text on all eight requests. [Drafter ablation](results/drafter-edit-tuning-600w.json)
 
 These are second-pass figures from one complete script invocation per profile. Raising the power limit coincided with a 0.7–1.7% higher warm rate on the native control. Expert-cache warm-up differed between service starts. The November 15 report records 600 W, +350 MHz core and +4,000 MHz VRAM from one card’s screenshot and assumes its peer used the same settings. Both native profiles used +450 MHz core and +4,000 MHz VRAM. [375 W run](results/published-decode-375w.txt) · [600 W run](results/published-decode-600w.txt) · [Driver and LACT readback](results/benchmark-gpu-settings-600w.json)
 
@@ -43,6 +65,8 @@ The native probe uses the upstream random-word generator and first-code instruct
 The six-client native receipt run uses distinct transcripts of exactly 404,000 input tokens and generates 128 tokens per client. This compares wall time at the same load scale with different prompts and output lengths. The published setup processes 8,192-token chunks and uses a bulk expert kernel. The native control processes 64-token chunks. The native 60k request that overlapped the power change was excluded. [375 W single-client capture](results/published-prefill-375w.jsonl) · [600 W single-client capture](results/published-prefill-600w.jsonl) · [Six independent requests](results/six-independent-404k.jsonl)
 
 On the same two fresh ~15.8k-token prompts repeated after the expert cache warmed, the 600 W control processed 1,040 input tok/s (median of two). Four-tile packed projections and parallel router selection increased that to 1,176 tok/s at the same 64-token chunk size, up 13.0%. A 128-token test reached 1,319 tok/s on those seeds. All three variants ingested every input token and returned the same visible and reasoning text. These two-seed steady-state tests use different cache and seed conditions from the reference’s first-token table. [Matched prefill timings and hashes](results/cold-prefill-tuning-600w.jsonl)
+
+An experimental 512-row prefill twice triggered a GPU copy-engine memory fault with staged expert transfers. The release uses direct peer access for target prefill batches above 128 rows. All six requests in the reproducer then passed across each of two fresh service processes, with matching receipts and reasoning digests. The four repeated ~16k inputs reached 478 input tok/s median in that mode. Production retains 64-row chunks. The failing DMA operation remains unidentified. [Wide prefill tests](results/wide-prefill-600w.json) · [Release test suite](results/test-600w-release.txt)
 
 At C1 the optimized build generated new code at **314.8 tok/s median** through LiteLLM (18 measured requests across three prompts). On two six-client full-window receipt waves through LiteLLM, each client supplied 524,160 input tokens and generated 128. End-to-end wall times, including prefix restoration, were 10.02 s and 8.71 s. All six output digests matched their earlier per-client results. [New code](results/c1-code-600w.jsonl) · [Full-window waves](results/six-full-600w.jsonl)
 

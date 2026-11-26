@@ -51,3 +51,5 @@ Six independent agents reached 524,288 positions each and retrieved receipts fro
 The release validates context limits before GPU admission, preserves valid partial output budgets, and returns protocol-specific HTTP 400 errors. The patched proxy retains the symbolic context error needed by Codex. The live boundary test passed all 22 cases. An isolated replay using the installed Codex verified its machine-readable classification. [Boundary tests](results/context-limits-live.jsonl) · [Codex behavior](results/codex-context-classification.json)
 
 With warm prefixes, 224 single-client requests compared the native and LiteLLM routes over the same eight context lengths and two wire protocols. The largest difference between route median output rates was 0.43%. Rates exceeded 300 tok/s through the 65,536-token case on this receipt-generation workload and dropped to about 238 tok/s at 524,160. [C1 comparison](C1-BENCHMARK.md)
+
+Future performance runs use the native OpenAI Chat endpoint on port 8001. The completed transport comparison remains available in [the C1 results](C1-BENCHMARK.md).
