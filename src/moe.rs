@@ -7,12 +7,17 @@ use std::{
     ptr,
 };
 
-use crate::{runtime::Runtime, weights::Weights};
+use crate::{
+    runtime::{Dev, Runtime},
+    weights::Weights,
+};
 
 const HIDDEN: usize = 5120;
 const INTER: usize = 2304;
 const EXPERTS: usize = 384;
 const TOP_K: usize = 6;
+const DRAFT_EXPERTS: usize = 128;
+const DRAFT_TOP_K: usize = 3;
 const SLOT_BYTES: usize = 3 * (HIDDEN * INTER * 3 / 8 + 2 * (HIDDEN + INTER));
 const MAX_GROUP_ROWS: usize = 256;
 const MAX_GROUP_EXPERTS: usize = 64;
@@ -24,12 +29,34 @@ struct Job {
     count: i32,
 }
 
+#[repr(C)]
+struct RoutedRow {
+    expert: usize,
+    token: i32,
+    output: i32,
+    weight: f32,
+}
+
 unsafe extern "C" {
     fn ds_moe_error(error: i32) -> *const c_char;
     fn ds_moe_free_bytes(bytes: *mut usize) -> i32;
     fn ds_moe_alloc(slot: *mut *mut c_void) -> i32;
     fn ds_moe_upload(slot: *mut c_void, parts: *const *const c_void) -> i32;
     fn ds_moe_free(device: i32, slot: *mut c_void);
+    fn ds_moe_shared_swiglu(gate: *mut f32, up: *const f32, count: usize) -> i32;
+    fn ds_moe_finish(routed: *const f32, shared_out: *mut f32, count: usize, top_k: i32) -> i32;
+    fn ds_moe_run_dev(
+        scratch: *mut *mut c_void,
+        scratch_bytes: *mut usize,
+        jobs: *const Job,
+        n_jobs: i32,
+        routes: *const RoutedRow,
+        rows: i32,
+        x: *const f32,
+        weighted: *mut f32,
+        mcg: i32,
+    ) -> i32;
+    #[cfg(test)]
     fn ds_moe_run(
         scratch: *mut *mut c_void,
         scratch_bytes: *mut usize,
@@ -57,7 +84,7 @@ pub struct MoeCache {
 
 impl MoeCache {
     /// Make room before an uncached dense projection uploads its resident
-    /// weight and conversion buffers. Called between synchronous kernels.
+    /// weight and conversion buffers. Freeing a slot waits for pending uses.
     pub fn reserve(&mut self, device: i32, bytes: usize) -> Result<()> {
         let Some(cache) = self.devices.get_mut(&device) else {
             return Ok(());
@@ -74,7 +101,22 @@ impl MoeCache {
     }
 }
 
-type Key = (usize, usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Layer {
+    Backbone(usize),
+    Draft(usize),
+}
+
+impl Layer {
+    fn base(self) -> String {
+        match self {
+            Self::Backbone(n) => format!("layers.{n}.ffn"),
+            Self::Draft(n) => format!("mtp.{n}.ffn"),
+        }
+    }
+}
+
+type Key = (Layer, usize);
 struct DeviceCache {
     device: i32,
     limit: usize,
@@ -171,6 +213,11 @@ impl Drop for DeviceCache {
 
 fn checkpoint_parts(weights: &Weights, (layer, expert): Key) -> Result<[*const c_void; 9]> {
     let mut parts = [ptr::null(); 9];
+    let base = layer.base();
+    let (codebook, multiplier) = match layer {
+        Layer::Backbone(_) => ("mul1", 0x83dc_d12du32),
+        Layer::Draft(_) => ("mcg", 0xcbac_1fedu32),
+    };
     for (p, (name, k, n)) in [
         ("w1", HIDDEN, INTER),
         ("w3", HIDDEN, INTER),
@@ -179,11 +226,11 @@ fn checkpoint_parts(weights: &Weights, (layer, expert): Key) -> Result<[*const c
     .into_iter()
     .enumerate()
     {
-        let key = format!("layers.{layer}.ffn.experts.{expert}.{name}");
-        let mul = weights.tensor(&format!("{key}.mul1"))?;
+        let key = format!("{base}.experts.{expert}.{name}");
+        let mul = weights.tensor(&format!("{key}.{codebook}"))?;
         ensure!(
-            mul.dtype == "I32" && mul.data == 0x83dc_d12du32.to_le_bytes(),
-            "{key}: expected MUL1"
+            mul.dtype == "I32" && mul.data == multiplier.to_le_bytes(),
+            "{key}: expected {codebook} multiplier"
         );
         let expected_tiles = [k / 16, n / 16, 48];
         for (suffix, dtype, shape, slot, bytes) in [
@@ -212,22 +259,27 @@ fn checkpoint_parts(weights: &Weights, (layer, expert): Key) -> Result<[*const c
 struct Route {
     expert: usize,
     token: usize,
+    rank: usize,
     weight: f32,
 }
 
-fn routes(logits: &[f32], bias: &[f32], batch: usize) -> Result<Vec<Route>> {
+fn routes<const E: usize, const K: usize>(
+    logits: &[f32],
+    bias: &[f32],
+    batch: usize,
+) -> Result<Vec<Route>> {
     ensure!(
-        logits.len() == batch * EXPERTS && bias.len() == EXPERTS,
+        logits.len() == batch * E && bias.len() == E,
         "router shape mismatch"
     );
-    let mut output = Vec::with_capacity(batch * TOP_K);
-    for (token, scores) in logits.as_chunks::<EXPERTS>().0.iter().enumerate() {
-        let mut top = [(f32::NEG_INFINITY, 0.0, 0); TOP_K];
+    let mut output = Vec::with_capacity(batch * K);
+    for (token, scores) in logits.as_chunks::<E>().0.iter().enumerate() {
+        let mut top = [(f32::NEG_INFINITY, 0.0, 0); K];
         for (expert, &logit) in scores.iter().enumerate() {
             let score = (logit.max(0.0) + (-logit.abs()).exp().ln_1p()).sqrt();
             let corrected = score + bias[expert];
-            if corrected > top[TOP_K - 1].0 {
-                let mut i = TOP_K - 1;
+            if corrected > top[K - 1].0 {
+                let mut i = K - 1;
                 while i != 0 && corrected > top[i - 1].0 {
                     top[i] = top[i - 1];
                     i -= 1;
@@ -240,40 +292,44 @@ fn routes(logits: &[f32], bias: &[f32], batch: usize) -> Result<Vec<Route>> {
             output.push(Route {
                 expert,
                 token,
+                rank: 0,
                 weight: 1.5 * score / norm,
             });
         }
     }
     output.sort_unstable_by_key(|r| (r.expert, r.token));
+    // Match the original expert-major sequential accumulation, including when
+    // a token's routes span multiple groups or its expert slot is evicted.
+    let mut counts = vec![0; batch];
+    for route in &mut output {
+        route.rank = counts[route.token];
+        counts[route.token] += 1;
+    }
     Ok(output)
 }
 
-fn shared(rt: &mut Runtime, base: &str, x: &[f32], batch: usize) -> Result<Vec<f32>> {
-    let mut gate = rt.linear(&format!("{base}.shared_experts.w1.weight"), x, batch)?;
-    let up = rt.linear(&format!("{base}.shared_experts.w3.weight"), x, batch)?;
+fn shared(rt: &mut Runtime, base: &str, x: &Dev, batch: usize) -> Result<Dev> {
+    let mut gate = rt.linear_dev(&format!("{base}.shared_experts.w1.weight"), x, batch, 1)?;
+    let up = rt.linear_dev(&format!("{base}.shared_experts.w3.weight"), x, batch, 1)?;
     ensure!(
         gate.len() == batch * INTER && gate.len() == up.len(),
         "shared expert shape mismatch"
     );
-    for (g, u) in gate.iter_mut().zip(up) {
-        let clipped = g.min(10.0);
-        *g = (clipped / (1.0 + (-clipped).exp())) * u.clamp(-10.0, 10.0);
-    }
-    rt.linear(&format!("{base}.shared_experts.w2.weight"), &gate, batch)
+    cuda(unsafe { ds_moe_shared_swiglu(gate.as_mut_ptr(), up.as_ptr(), gate.len()) })?;
+    rt.linear_dev(&format!("{base}.shared_experts.w2.weight"), &gate, batch, 1)
 }
 
-fn run_group(
+fn run_group<const K: usize>(
     device: &mut DeviceCache,
     weights: &Weights,
-    layer: usize,
+    layer: Layer,
     routes: &[Route],
-    x: &[f32],
-    out: &mut [f32],
+    x: &Dev,
+    weighted: &mut Dev,
     capacity: usize,
 ) -> Result<()> {
     let mut jobs = Vec::new();
-    let mut experts = Vec::with_capacity(routes.len());
-    let mut input = Vec::with_capacity(routes.len() * HIDDEN);
+    let mut rows = Vec::with_capacity(routes.len());
     let mut begin = 0;
     while begin < routes.len() {
         let expert = routes[begin].expert;
@@ -287,53 +343,64 @@ fn run_group(
             });
         }
         for route in &routes[begin..begin + count] {
-            experts.push(slot);
-            let index = route.token * HIDDEN;
-            input.extend_from_slice(&x[index..index + HIDDEN]);
+            rows.push(RoutedRow {
+                expert: slot,
+                token: route.token.try_into()?,
+                output: (route.token * K + route.rank).try_into()?,
+                weight: half::f16::from_f32(route.weight).to_f32(),
+            });
         }
         begin += count;
     }
-    let mut projected = vec![0.0; input.len()];
     let mut scratch = device.scratch as *mut c_void;
     let status = unsafe {
-        ds_moe_run(
+        ds_moe_run_dev(
             &mut scratch,
             &mut device.scratch_bytes,
             jobs.as_ptr(),
             jobs.len() as i32,
-            experts.as_ptr(),
-            input.as_ptr(),
-            projected.as_mut_ptr(),
-            routes.len() as i32,
+            rows.as_ptr(),
+            rows.len() as i32,
+            x.as_ptr(),
+            weighted.as_mut_ptr(),
+            i32::from(matches!(layer, Layer::Draft(_))),
         )
     };
     device.scratch = scratch as usize;
-    cuda(status)?;
-    for (route, row) in routes.iter().zip(projected.as_chunks::<HIDDEN>().0) {
-        let offset = route.token * HIDDEN;
-        let weight = half::f16::from_f32(route.weight).to_f32();
-        for (dst, &v) in out[offset..offset + HIDDEN].iter_mut().zip(row) {
-            *dst += weight * v;
-        }
-    }
-    Ok(())
+    cuda(status)
 }
 
-pub fn forward(rt: &mut Runtime, layer: usize, x: &[f32], batch: usize) -> Result<Vec<f32>> {
+pub fn forward_dev(rt: &mut Runtime, layer: usize, x: &Dev, batch: usize) -> Result<Dev> {
+    forward::<EXPERTS, TOP_K>(rt, Layer::Backbone(layer), x, batch)
+}
+
+pub fn draft_forward(rt: &mut Runtime, stage: usize, x: &Dev, batch: usize) -> Result<Dev> {
+    ensure!(stage < 3, "invalid DSpark stage");
+    forward::<DRAFT_EXPERTS, DRAFT_TOP_K>(rt, Layer::Draft(stage), x, batch)
+}
+
+fn forward<const E: usize, const K: usize>(
+    rt: &mut Runtime,
+    layer: Layer,
+    x: &Dev,
+    batch: usize,
+) -> Result<Dev> {
     ensure!(
         batch > 0 && batch.checked_mul(HIDDEN) == Some(x.len()),
         "invalid FFN input shape"
     );
-    let base = format!("layers.{layer}.ffn");
-    let logits = rt.linear(&format!("{base}.gate.weight"), x, batch)?;
+    let base = layer.base();
+    let logits = rt.linear_dev(&format!("{base}.gate.weight"), x, batch, 1)?;
     let bias = rt.weights.vector(&format!("{base}.gate.bias"))?;
-    let routes = routes(&logits, &bias, batch)?;
-    let shared_out = shared(rt, &base, x, batch)?;
+    // Only router logits visit the CPU, which computes the checkpoint's top-k
+    // and chooses mmap-backed expert weights for the GPU slot cache.
+    let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch)?;
+    let mut shared_out = shared(rt, &base, x, batch)?;
     ensure!(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
     );
-    let mut out = vec![0.0; x.len()];
+    let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
     let device = match rt.moe_cache.devices.entry(rt.device) {
         std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
         std::collections::hash_map::Entry::Vacant(v) => v.insert(DeviceCache::new(rt.device)?),
@@ -353,26 +420,32 @@ pub fn forward(rt: &mut Runtime, layer: usize, x: &[f32], batch: usize) -> Resul
             }
             end += 1;
         }
-        run_group(
+        run_group::<K>(
             device,
             &rt.weights,
             layer,
             &routes[begin..end],
             x,
-            &mut out,
+            &mut weighted,
             capacity,
         )?;
         begin = end;
     }
-    for (value, shared_value) in out.iter_mut().zip(shared_out) {
-        *value = crate::model::bf(*value + shared_value);
-    }
-    Ok(out)
+    cuda(unsafe {
+        ds_moe_finish(
+            weighted.as_ptr(),
+            shared_out.as_mut_ptr(),
+            shared_out.len(),
+            K as i32,
+        )
+    })?;
+    Ok(shared_out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Layer::Backbone;
     #[test]
     fn cache_capacity_reclaims_headroom_and_honors_the_user_limit() {
         assert_eq!(DeviceCache::available_slots(5, 512 << 20, 10), 5);
@@ -390,14 +463,14 @@ mod tests {
         // Null entries need no CUDA allocation. Exercise the same ordering
         // that protects experts collected for a pending group kernel.
         for i in 0..3 {
-            cache.slots.insert((2, i), (0, i as u64));
-            cache.lru.insert((i as u64, (2, i)));
+            cache.slots.insert((Backbone(2), i), (0, i as u64));
+            cache.lru.insert((i as u64, (Backbone(2), i)));
         }
-        assert_eq!(cache.touch((2, 0), 3), Some(0));
+        assert_eq!(cache.touch((Backbone(2), 0), 3), Some(0));
         cache.evict_oldest().unwrap();
-        assert!(!cache.slots.contains_key(&(2, 1)));
-        assert!(cache.slots.contains_key(&(2, 0)));
-        assert!(cache.slots.contains_key(&(2, 2)));
+        assert!(!cache.slots.contains_key(&(Backbone(2), 1)));
+        assert!(cache.slots.contains_key(&(Backbone(2), 0)));
+        assert!(cache.slots.contains_key(&(Backbone(2), 2)));
     }
 
     #[test]
@@ -418,28 +491,67 @@ mod tests {
         let x = (0..HIDDEN)
             .map(|i| (i as f32 * 0.3).sin())
             .collect::<Vec<_>>();
-        let route = |expert| Route {
-            expert,
-            token: 0,
-            weight: 1.0,
-        };
         let run = |cache: &mut DeviceCache, expert| -> Result<Vec<f32>> {
+            let slot = cache.acquire(&weights, (Backbone(0), expert), 2)?;
             let mut y = vec![0.; HIDDEN];
-            run_group(cache, &weights, 0, &[route(expert)], &x, &mut y, 2)?;
+            let job = Job {
+                expert: slot,
+                begin: 0,
+                count: 1,
+            };
+            let mut scratch = cache.scratch as *mut c_void;
+            let status = unsafe {
+                ds_moe_run(
+                    &mut scratch,
+                    &mut cache.scratch_bytes,
+                    &job,
+                    1,
+                    &slot,
+                    x.as_ptr(),
+                    y.as_mut_ptr(),
+                    1,
+                )
+            };
+            cache.scratch = scratch as usize;
+            cuda(status)?;
             Ok(y)
         };
         let first = run(&mut cache, 0)?;
         let second = run(&mut cache, 1)?;
-        let first_slot = cache.slots[&(0, 0)].0;
-        let second_slot = cache.slots[&(0, 1)].0;
+        let first_slot = cache.slots[&(Backbone(0), 0)].0;
+        let second_slot = cache.slots[&(Backbone(0), 1)].0;
         assert_eq!(first, run(&mut cache, 0)?);
         let _ = run(&mut cache, 2)?;
-        assert!(!cache.slots.contains_key(&(0, 1)));
-        assert_eq!(cache.slots[&(0, 2)].0, second_slot);
+        assert!(!cache.slots.contains_key(&(Backbone(0), 1)));
+        assert_eq!(cache.slots[&(Backbone(0), 2)].0, second_slot);
         assert_eq!(second, run(&mut cache, 1)?);
-        assert_eq!(cache.slots[&(0, 1)].0, first_slot);
+        assert_eq!(cache.slots[&(Backbone(0), 1)].0, first_slot);
         assert_eq!(cache.slots.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn draft_routes_keep_expert_major_sums_for_each_token() {
+        let mut logits = vec![0.; 2 * DRAFT_EXPERTS];
+        for (token, picked) in [[24, 78, 40], [78, 11, 91]].iter().enumerate() {
+            for (rank, &expert) in picked.iter().enumerate() {
+                logits[token * DRAFT_EXPERTS + expert] = 10. - rank as f32;
+            }
+        }
+        let routes =
+            routes::<DRAFT_EXPERTS, DRAFT_TOP_K>(&logits, &[0.; DRAFT_EXPERTS], 2).unwrap();
+        let rows: Vec<_> = routes.iter().map(|r| (r.expert, r.token, r.rank)).collect();
+        assert_eq!(
+            rows,
+            [
+                (11, 1, 0),
+                (24, 0, 0),
+                (40, 0, 1),
+                (78, 0, 2),
+                (78, 1, 1),
+                (91, 1, 2)
+            ]
+        );
     }
 
     #[test]
@@ -448,7 +560,7 @@ mod tests {
         bias[300] = 2.0;
         let mut logits = vec![0.0; EXPERTS];
         logits[42] = 2.0;
-        let selected = routes(&logits, &bias, 1).unwrap();
+        let selected = routes::<EXPERTS, TOP_K>(&logits, &bias, 1).unwrap();
         assert_eq!(
             selected.iter().map(|r| r.expert).collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 42, 300]
