@@ -1,0 +1,4 @@
+prefill tokens=266174 reused=0 seconds=446.582
+prefix tier=ram tokens=266112
+prefix DSpark tokens=266112
+prefill tokens=520362 reused=266112 seconds=801.389

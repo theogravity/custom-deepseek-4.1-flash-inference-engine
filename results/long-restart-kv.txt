@@ -1,0 +1,11 @@
+Opened checkpoint in 2.52s; weights upload on demand
+prefix tier=disk tokens=266112
+prefix DSpark tokens=266112
+prefill tokens=266179 reused=266112 seconds=18.190
+speculative source=learned rounds=5 proposed=12 accepted=12
+speculative source=lookup rounds=1 proposed=109 accepted=6
+prefix tier=disk tokens=520320
+prefix DSpark tokens=520320
+prefill tokens=520367 reused=520320 seconds=1.263
+speculative source=learned rounds=6 proposed=21 accepted=17
+speculative source=lookup rounds=1 proposed=110 accepted=1

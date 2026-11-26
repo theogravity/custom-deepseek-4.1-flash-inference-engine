@@ -99,3 +99,13 @@ Throughput depends on what the drafter can predict. The source edit retained mos
 Both DSpark variants reproduced the identical 256-token Tetris continuation as the undrafted target under the same deployment arithmetic. With source lookup disabled, one warm sample measured 84.4 tok/s target-only, 269.8 with the released weights, and 300.6 with the code-tuned weights. The engine passed all 48 release tests, including the real CUDA and checkpoint fixtures. [Drafter parity](results/drafter-parity.json) · [Pinned serving configuration](results/serving-profile.json)
 
 Codex, Claude Code, and Pi each read a fresh random file through a real tool call and returned the exact contents through LiteLLM. Native authentication, Anthropic thinking streams, and Pi's alternative DeepSeek route passed as well. A 28,538-token cold request retrieved a randomly chosen receipt in 37.23 s. A follow-up with a different instruction and 28,546 input tokens returned the same receipt in 0.319 s. [Client checks](results/drafter-clients.jsonl) · [Proxy retrieval](results/agent-retrieval.json)
+
+Through the existing LiteLLM OpenAI route, the same suite measured 303.3 tok/s for Tetris, 351.3 for the parser and 331.0 for the Rust cache. LiteLLM response-cache reads and writes were disabled. All 21 requests, including warm-ups, had a corresponding new backend prefill. Their prompt sizes, completion lengths and output hashes matched the direct requests in order. [Proxy timings](results/proxy-code.jsonl) · [Native execution counters](results/proxy-backend.txt)
+
+```sh
+python3 tools/code_speed.py --base http://127.0.0.1:4000/v1 --model 'DeepSeek V4.1 Flash (openai)' --bypass-proxy-cache --rounds 7
+```
+
+### Long-context checks
+
+A cold 266,174-token request returned three randomly generated vault receipts in the requested order in 447.8 s. A 520,362-token continuation reused the first 266,112 prompt tokens from RAM, processed the suffix and returned its three receipts in 802.9 s. After a process restart, a changed suffix forced each request through the engine again. Both still returned all three receipts. The 266,179-token request took 27.0 s with cold weights. The 520,367-token request took 7.21 s end to end and restored 520,320 target and DSpark positions from disk. Peak sampled memory was 96,828 and 96,888 MiB on GPUs 1 and 2. These measurements are single-request text retrieval; cold ingestion at long context remains expensive. [Cold and extended prompts](results/context.jsonl) · [Restart timing](results/context-restart.jsonl) · [Restore counters](results/long-restart-kv.txt) · [Memory samples summary](results/context-telemetry.json)

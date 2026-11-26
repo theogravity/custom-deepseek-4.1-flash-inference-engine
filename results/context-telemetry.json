@@ -1,0 +1,13 @@
+{
+  "sample_period_seconds": 12,
+  "samples": 104,
+  "minimum_host_mem_available_mib": 239691,
+  "peak_sampled_memory_mib": {
+    "1": 96828.0,
+    "2": 96888.0
+  },
+  "peak_sampled_temperature_c": {
+    "1": 46.0,
+    "2": 45.0
+  }
+}
