@@ -276,11 +276,15 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
     auto scales=static_cast<const unsigned char*>(w)+size_t(rows)*cols;
     auto values=static_cast<const __nv_bfloat16*>(a);
     auto parts=static_cast<float*>(c->partial.ptr);
-    // The small verification path keeps its original grid. Prefill can share
-    // each weight decode across up to four independent eight-token fragments.
-    const int tiles = (mode == 4 && batch >= 32) ? mx_tiles : 1;
+    // Head verification and large backbone batches can each reuse a decoded
+    // weight across independent eight-token fragments.
+    const int tiles = (mode == 7 || batch >= 32) ? mx_tiles : 1;
     dim3 grid(rows / 64, (batch + tiles * 8 - 1) / (tiles * 8), splits);
-    if (mode == 7)
+    if (mode == 7 && tiles == 4)
+        mx_project<true,4><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);
+    else if (mode == 7 && tiles == 2)
+        mx_project<true,2><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);
+    else if (mode == 7)
         mx_project<true><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);
     else if (tiles == 4)
         mx_project<false,4><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);

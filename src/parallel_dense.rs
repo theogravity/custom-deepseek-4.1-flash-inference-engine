@@ -384,6 +384,18 @@ mod tests {
             ];
             if mode == 4 {
                 shapes.extend([(33, true, 2), (64, true, 4), (129, true, 4)]);
+            } else if mode == 7 {
+                shapes.extend([
+                    (9, false, 2),
+                    (16, false, 2),
+                    (17, false, 4),
+                    (32, false, 4),
+                    (49, false, 4),
+                    (97, false, 4),
+                    (129, false, 4),
+                    (511, false, 4),
+                    (512, false, 4),
+                ]);
             }
             for (batch, prefill, tiles) in shapes {
                 for (owner, (full, shards)) in matrices.iter().enumerate() {

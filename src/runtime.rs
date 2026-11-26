@@ -183,6 +183,7 @@ pub struct Runtime {
     pub(crate) target_prefill: bool,
     prefill_tiles: i32,
     verification_tiles: i32,
+    head_row_tiles: bool,
     packed: bool,
     parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
@@ -224,6 +225,11 @@ impl Runtime {
             target_prefill: false,
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
+            head_row_tiles: match std::env::var("DS4_HEAD_ROW_TILES").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => anyhow::bail!("DS4_HEAD_ROW_TILES must be 0 or 1"),
+            },
             packed: packed_dense(),
             parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
@@ -654,7 +660,17 @@ impl Runtime {
         let n = batch.checked_mul(w.rows).context("dense output overflow")?;
         let mut out = self.buffer(n)?;
         let w = &self.matrices[name];
-        let mx_tiles = if self.target_prefill {
+        let mx_tiles = if w.mode == 7 {
+            if self.head_row_tiles && self.verification {
+                match batch {
+                    0..=8 => 1,
+                    9..=16 => 2,
+                    _ => 4,
+                }
+            } else {
+                1
+            }
+        } else if self.target_prefill {
             self.prefill_tiles
         } else if self.verification {
             self.verification_tiles
