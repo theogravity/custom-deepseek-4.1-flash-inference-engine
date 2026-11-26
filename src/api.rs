@@ -366,6 +366,8 @@ struct Metrics {
     max_seqs: usize,
     max_live_seqs: usize,
     swap_quantum_steps: usize,
+    requests_started: u64,
+    prefix_reused_tokens: u64,
     logical_active: usize,
     peak_logical_active: usize,
     resident: usize,
@@ -799,6 +801,7 @@ mod tests {
         limit: usize,
         prefill_ticks: usize,
         saved: Option<crate::swap::SwapHandle>,
+        reused: usize,
     }
     #[derive(Default)]
     struct TestEngine {
@@ -808,6 +811,7 @@ mod tests {
         stalled: Option<mpsc::Receiver<Result<Event, Infallible>>>,
         output_token: u32,
         prefill_ticks: usize,
+        reused: usize,
         store: Option<SwapStore>,
         fail_resume: Option<u32>,
         large_state: Option<u32>,
@@ -823,13 +827,14 @@ mod tests {
                 limit,
                 prefill_ticks: self.prefill_ticks,
                 saved: None,
+                reused: self.reused,
             })
         }
         fn prefill(s: &TestSession) -> bool {
             s.rounds <= s.prefill_ticks
         }
         fn processed(s: &TestSession) -> usize {
-            s.rounds
+            s.rounds + s.reused
         }
         fn suspend(&mut self, s: &mut TestSession) -> Result<()> {
             assert!(s.saved.is_none());
@@ -1031,6 +1036,7 @@ mod tests {
         let mut engine = TestEngine {
             output_token: token,
             prefill_ticks: 16,
+            reused: 1,
             store: Some(store.clone()),
             ..Default::default()
         };
@@ -1078,6 +1084,7 @@ mod tests {
             (0, 0, 0, 0)
         );
         assert!(m.rotations > 6 && m.resumes == m.rotations);
+        assert_eq!((m.requests_started, m.prefix_reused_tokens), (12, 12));
         let tiers = store.stats();
         assert!(tiers.ram_reads > 0 && tiers.disk_reads > 0);
         assert_eq!((tiers.ram_bytes, tiers.disk_bytes), (0, 0));

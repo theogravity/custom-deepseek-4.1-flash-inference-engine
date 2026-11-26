@@ -284,7 +284,17 @@ pub(super) fn schedule<E: BatchEngine>(
                 break;
             };
             *slot = match waiting.remove(i).unwrap() {
-                Waiting::New(job) => admit(engine, tokenizer, job, runtime),
+                Waiting::New(job) => {
+                    let admitted = admit(engine, tokenizer, job, runtime);
+                    if let Some(a) = &admitted {
+                        // At admission the committed position is exactly the prefix
+                        // restored for this prompt. Live swap restores are separate.
+                        let mut m = metrics.lock().unwrap();
+                        m.requests_started += 1;
+                        m.prefix_reused_tokens += E::processed(&a.session) as u64;
+                    }
+                    admitted
+                }
                 Waiting::Suspended(mut a) => match engine.resume(&mut a.session) {
                     Ok(()) => {
                         a.slice_steps = 0;
