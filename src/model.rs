@@ -2,82 +2,20 @@ use crate::{
     attention::{self, AttentionState},
     engram::Engram,
     moe,
-    runtime::Runtime,
+    runtime::{Dev, Runtime},
 };
 use anyhow::{ensure, Result};
 use rand::Rng;
-use rayon::prelude::*;
 use std::path::Path;
 use tokenizers::Tokenizer;
+
+#[path = "residual.rs"]
+mod residual;
 
 pub const DIM: usize = 5120;
 #[inline(always)]
 pub fn bf(x: f32) -> f32 {
     half::bf16::from_f32(x).to_f32()
-}
-
-struct Mix {
-    pre: [f32; 4],
-    post: [f32; 4],
-    comb: [[f32; 4]; 4],
-}
-fn mix(logits: &[f32], inv: f32, base: &[f32], scale: &[f32]) -> Mix {
-    let val = |i: usize, s: usize| logits[i] * inv * scale[s] + base[i];
-    let pre = std::array::from_fn(|j| 1. / (1. + (-val(j, 0)).exp()) + 1e-6);
-    let post = std::array::from_fn(|j| 2. / (1. + (-val(4 + j, 1)).exp()));
-    let mut comb: [[f32; 4]; 4] =
-        std::array::from_fn(|j| std::array::from_fn(|k| val(8 + 4 * j + k, 2)));
-    for row in &mut comb {
-        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        *row = row.map(|v| (v - max).exp());
-        let sum = row.iter().sum::<f32>();
-        *row = row.map(|v| v / sum + 1e-6);
-    }
-    for iter in 0..20 {
-        if iter > 0 {
-            for row in &mut comb {
-                let sum = row.iter().sum::<f32>() + 1e-6;
-                *row = row.map(|v| v / sum);
-            }
-        }
-        for j in 0..4 {
-            let sum = comb.iter().map(|r| r[j]).sum::<f32>() + 1e-6;
-            for row in &mut comb {
-                row[j] /= sum;
-            }
-        }
-    }
-    Mix { pre, post, comb }
-}
-fn collapse(h: &[f32], pre: &[[f32; 4]], norm: &[f32]) -> Vec<f32> {
-    let mut y = vec![0.; pre.len() * DIM];
-    y.par_chunks_exact_mut(DIM)
-        .zip(h.par_chunks_exact(4 * DIM))
-        .zip(pre.par_iter())
-        .for_each(|((row, old), p)| {
-            for i in 0..DIM {
-                row[i] = bf((0..4).map(|c| p[c] * old[c * DIM + i]).sum());
-            }
-            let inv = 1. / (row.iter().map(|v| v * v).sum::<f32>() / DIM as f32 + 1e-20).sqrt();
-            for (v, w) in row.iter_mut().zip(norm) {
-                *v = bf(*v * inv * w);
-            }
-        });
-    y
-}
-fn expand(h: &mut [f32], x: &[f32], mixes: &[Mix]) {
-    h.par_chunks_exact_mut(4 * DIM)
-        .zip(x.par_chunks_exact(DIM))
-        .zip(mixes.par_iter())
-        .for_each(|((old, row), m)| {
-            for i in 0..DIM {
-                let r = [old[i], old[DIM + i], old[2 * DIM + i], old[3 * DIM + i]];
-                for c in 0..4 {
-                    old[c * DIM + i] =
-                        bf(row[i] * m.post[c] + (0..4).map(|j| r[j] * m.comb[j][c]).sum::<f32>());
-                }
-            }
-        });
 }
 
 struct PromptCache {
@@ -125,14 +63,13 @@ impl Model {
     pub fn max_context(&self) -> usize {
         self.max_ctx
     }
-    fn forward(
+    fn forward_hidden(
         &mut self,
         cache: &mut AttentionState,
         ids: &[u32],
         pos: usize,
         b: usize,
-        want_logits: bool,
-    ) -> Result<Vec<f32>> {
+    ) -> Result<(Dev, Dev)> {
         let e = self.rt.weights.tensor("embed.weight")?;
         ensure!(
             e.dtype == "BF16" && e.shape == [129280, DIM],
@@ -151,62 +88,51 @@ impl Model {
                 h.extend_from_slice(&row);
             }
         }
-        let mut pre = vec![[1., 0., 0., 0.]; b];
+        self.rt.layer(0)?;
+        let mut h = self.rt.to_device(&h)?;
+        let mut mix = residual::initial_mix(&mut self.rt, b)?;
         for layer in 0..40 {
-            self.rt.layer(layer)?;
+            if layer == 20 {
+                let host_h = self.rt.to_host(&h)?;
+                let host_mix = self.rt.to_host(&mix)?;
+                self.rt.layer(layer)?;
+                h = self.rt.to_device(&host_h)?;
+                mix = self.rt.to_device(&host_mix)?;
+            }
             if layer == 1 || layer == 14 {
-                self.engram.apply(&mut self.rt, layer, ids, pos, &mut h)?;
+                let mut host_h = self.rt.to_host(&h)?;
+                self.engram
+                    .apply(&mut self.rt, layer, ids, pos, &mut host_h)?;
+                h = self.rt.to_device(&host_h)?;
             }
             for branch in ["attn", "ffn"] {
-                let stem = format!("layers.{layer}");
-                let projection = self.rt.linear(&format!("{stem}.hc_{branch}_fn"), &h, b)?;
-                let scale = self
-                    .rt
-                    .weights
-                    .vector(&format!("{stem}.hc_{branch}_scale"))?;
-                let base = self
-                    .rt
-                    .weights
-                    .vector(&format!("{stem}.hc_{branch}_base"))?;
-                ensure!(
-                    projection.len() == 24 * b && scale.len() == 3 && base.len() == 24,
-                    "invalid hyper-connection parameters"
-                );
-                let mixes: Vec<Mix> = h
-                    .par_chunks_exact(4 * DIM)
-                    .zip(projection.par_chunks_exact(24))
-                    .map(|(token, logits)| {
-                        let inv = 1.
-                            / (token.iter().map(|x| x * x).sum::<f32>() / (4 * DIM) as f32 + 1e-20)
-                                .sqrt();
-                        mix(logits, inv, &base, &scale)
-                    })
-                    .collect();
-                let norm = self
-                    .rt
-                    .weights
-                    .vector(&format!("{stem}.{branch}_norm.weight"))?;
-                ensure!(norm.len() == DIM, "invalid norm at {stem}");
-                let input = collapse(&h, &pre, &norm);
+                let input = residual::prepare(&mut self.rt, layer, branch, &h, &mut mix, b)?;
                 let output = if branch == "attn" {
-                    attention::forward(&mut self.rt, cache, layer, pos, &input, b)?
+                    attention::forward_dev(&mut self.rt, cache, layer, pos, &input, b)?
                 } else {
-                    moe::forward(&mut self.rt, layer, &input, b)?
+                    moe::forward_dev(&mut self.rt, layer, &input, b)?
                 };
-                ensure!(output.len() == DIM * b, "invalid {branch} result at {stem}");
-                expand(&mut h, &output, &mixes);
-                for (p, m) in pre.iter_mut().zip(mixes) {
-                    *p = m.pre;
-                }
+                residual::expand(&self.rt, &mut h, &output, &mix, b)?;
             }
         }
+        Ok((h, mix))
+    }
+
+    fn forward(
+        &mut self,
+        cache: &mut AttentionState,
+        ids: &[u32],
+        pos: usize,
+        b: usize,
+        want_logits: bool,
+    ) -> Result<Vec<f32>> {
+        let (h, mut mix) = self.forward_hidden(cache, ids, pos, b)?;
         if !want_logits {
             return Ok(vec![]);
         }
-        let norm = self.rt.weights.vector("norm.weight")?;
-        ensure!(norm.len() == DIM, "invalid final norm");
-        let x = collapse(&h[(b - 1) * 4 * DIM..], &pre[b - 1..], &norm);
-        self.rt.linear("head.weight", &x, 1)
+        let input = residual::readout(&mut self.rt, &h, &mut mix, b - 1)?;
+        let logits = self.rt.linear_dev("head.weight", &input, 1, 1)?;
+        self.rt.to_host(&logits)
     }
     pub fn generate(
         &mut self,
@@ -260,7 +186,7 @@ impl Model {
                 self.prefix = Some(PromptCache {
                     window_span: input.len().min(128),
                     tokens: input[..pos].to_vec(),
-                    attention: cache.host_snapshot(),
+                    attention: cache.host_snapshot()?,
                 });
             }
             let n = self.chunk.min(input.len() - pos);
