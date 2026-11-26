@@ -16,6 +16,7 @@ mod prompt_lookup;
 pub(crate) mod residual;
 
 pub const DIM: usize = 5120;
+#[cfg(test)]
 #[inline(always)]
 pub fn bf(x: f32) -> f32 {
     half::bf16::from_f32(x).to_f32()
@@ -75,11 +76,13 @@ fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
 // Rejected suffix samples are discarded with the corresponding target state.
 struct Scores(Vec<u32>);
 impl Scores {
-    fn read(rt:&mut Runtime,target:&Target,rows:usize,temperature:f32)->Result<Self>{
-        let logits=target.logits.as_ref().context("missing target scores")?;
-        Ok(Self(rt.sample(logits,rows,temperature)?))
+    fn read(rt: &mut Runtime, target: &Target, rows: usize, temperature: f32) -> Result<Self> {
+        let logits = target.logits.as_ref().context("missing target scores")?;
+        Ok(Self(rt.sample(logits, rows, temperature)?))
     }
-    fn sample(&self,row:usize)->Result<u32>{self.0.get(row).copied().context("missing target sample")}
+    fn sample(&self, row: usize) -> Result<u32> {
+        self.0.get(row).copied().context("missing target sample")
+    }
 }
 // Consume independent target draws only through the first rejection. The next
 // anchor is always sampled by the target, including when every proposal agrees.
@@ -312,7 +315,7 @@ impl Model {
             }
         }
         let mut draft_stats = DraftStats::default();
-        let mut lookup = prompt_lookup::PromptLookup::default();
+        let lookup = prompt_lookup::PromptLookup::new(input, self.lookup_k > 0);
         cache.begin_prefill(input.len());
         let reused = pos;
         let started = std::time::Instant::now();
@@ -358,10 +361,7 @@ impl Model {
             reused,
             started.elapsed().as_secs_f64()
         );
-        let mut token =
-            first
-                .context("missing prefill logits")?
-                .sample(0)?;
+        let mut token = first.context("missing prefill logits")?.sample(0)?;
         let mut emitted = 0;
         loop {
             ensure!(!cancelled(), "request cancelled");
@@ -400,8 +400,7 @@ impl Model {
             self.rt.verification = false;
             let target = target?;
             let scores = Scores::read(&mut self.rt, &target, batch, temperature)?;
-            let (accepted, next) =
-                verify_proposals(&proposed, |row| scores.sample(row))?;
+            let (accepted, next) = verify_proposals(&proposed, |row| scores.sample(row))?;
             let committed = accepted + 1; // the previously emitted input anchor is always committed
             if batch > 1 {
                 cache.finish_verify(committed)?;
@@ -473,11 +472,19 @@ mod tests {
         stats.record(ProposalSource::Lookup, 8, 4);
         stats.record(ProposalSource::Target, 0, 0);
         assert_eq!(
-            (stats.learned.rounds, stats.learned.proposed, stats.learned.accepted),
+            (
+                stats.learned.rounds,
+                stats.learned.proposed,
+                stats.learned.accepted
+            ),
             (2, 5, 3)
         );
         assert_eq!(
-            (stats.lookup.rounds, stats.lookup.proposed, stats.lookup.accepted),
+            (
+                stats.lookup.rounds,
+                stats.lookup.proposed,
+                stats.lookup.accepted
+            ),
             (1, 8, 4)
         );
     }

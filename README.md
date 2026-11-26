@@ -9,6 +9,7 @@ The release build needs Rust, a C++ host compiler and CUDA 13 with sm_120 suppor
 ```sh
 cd ~/llm/ds4-flash-rs
 cargo build --release --locked
+install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
 docker compose --env-file ../models/.env up --build -d --wait
 ```
 
@@ -29,41 +30,68 @@ cd ~/llm
 docker compose -p models -f models/dsv41-flash-exl3.yml up -d --wait
 ```
 
-## Model execution
+## Generation and drafters
 
-Layers 0–19 run on the first RTX card and layers 20–39 on the second. The engine expands dense MXFP8 weights into BF16 on demand for matrix multiplication. Short chunks use BF16 activations. The attention output is rounded through block-scaled FP8 before its grouped output projection. A custom CUDA kernel packs the vocabulary head into per-row, 32-channel FP8 groups and another computes its logits. Each layer selects six routed experts out of 384. CUDA decodes their packed trellises during multiplication. GPU slots hold recently used experts, and the mmap-backed checkpoint supplies misses. Each Engram layer gathers only its hashed int4 rows. Sliding-window and compressed sparse attention use request-local KV state. A snapshot of the previous prompt's last complete chunk permits prefix reuse across tool-result turns that share the same tokens and attention layout.
+The 40-layer target runs in two consecutive stages. Attention, hidden states, shared projections and the vocabulary head stay on the owning GPU. Large target expert batches run across both cards using staged peer transfers. Six routed experts are selected per layer. The CUDA kernels multiply the checkpoint's 3-bit EXL3 trellises and packed MXFP8 dense weights in place. The int4 Engram tables are memory-mapped on the host. Expert slots grow on demand and give back VRAM for temporary buffers and attention state.
 
-One request executes at a time. Other requests enter a bounded queue. The server accepts text, reasoning and DSML tools, supports both streamed and nonstreamed responses, and exposes `/v1/messages`, `/v1/messages/count_tokens`, `/v1/chat/completions`, `/v1/models` and `/health`. Codex uses LiteLLM's Responses translation. Vision, DSpark speculation, LMCache and continuous batching are outside this implementation. The Compose context cap is 524,288 tokens, matching the existing model-cli metadata. See the qualification section for lengths actually exercised.
+The deployed profile uses the code-tuned DSpark drafter with up to seven proposals. It reads the three MTP shards from the pack's `drafter-code-k7` overlay and checks their tensor names, shapes and types. The released DSpark weights in the main checkpoint are also supported. A learned confidence head can shorten a draft when later positions are unlikely to match. When an edit copies text from the input, prompt lookup can propose up to 128 source tokens. The target scores the proposals, commits the matching prefix and supplies the next token. Speculative output is streamed to the client as it is verified.
 
-## Validation and measurements
+| Setting | Deployed value | Purpose |
+|---|---|---|
+| `DS4_DRAFTER` | `code` | `released` selects the pack's original weights, `none` disables learned drafting |
+| `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
+| `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
+| `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
+| `DS4_PREFIX_RAM_MIB`, `DS4_PREFIX_DISK_MIB` | 2048, 65536 | Separate RAM and disk cache budgets in MiB |
+| `DS4_HOST_PREFIX_DIR` | `~/.cache/ds4-flash-rs/prefix` | Private host bind mount for restart-persistent KV and drafter windows |
 
-The following standalone commands own the GPUs. Stop the serving process before using them.
+For example, select the released drafter with the following command. Omit the environment overrides to return to the deployed profile.
 
 ```sh
-cd ~/llm/ds4-flash-rs
-docker compose --env-file ../models/.env stop
-RAYON_NUM_THREADS=12 target/release/ds4-flash-rs infer 'The capital of France is' --max-tokens 8
-RAYON_NUM_THREADS=12 target/release/ds4-flash-rs --chunk-size 64 bench
-RAYON_NUM_THREADS=12 target/release/ds4-flash-rs --chunk-size 64 verify
+DS4_DRAFTER=released docker compose --env-file ../models/.env up -d --wait
 ```
 
-`bench` runs one warm-up and six measured greedy generations and checks that every continuation agrees. The rate excludes prefill and the first token. `verify` is a strict comparison with the *other engine's* saved greedy token IDs. It returns a nonzero exit code on any divergence. The serving recipe uses tensor parallelism, alternate expert and reduction kernels, and speculative verification. Small logit differences can change which token wins. The qualification results below record the observed agreement.
+For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`. Standalone commands also accept `--drafter code|released|none` and `--spec-k N`. Compose sets the numerical and hardware switches used in the benchmarks. [Deployment configuration](compose.yml)
+
+## Prefix caching and API
+
+The native prefix cache saves target attention state and the drafter's last 128 positions at completed prefill boundaries. Keys cover the token prefix, attention layout and numerical settings, checkpoint files and tokenizer. Draft sidecars also bind to the drafter weights. Entries carry checksums, disk writes use atomic renames, and the store bounds RAM and disk independently. A request can restore a shared prefix after a tool call or a process restart. The engine evaluates the suffix and generates the new completion. Set both cache budgets to 0 to disable persistence and cross-request memoization.
+
+The worker executes one text request at a time and bounds the queue. It exposes OpenAI chat completions, Anthropic messages and token counting, model discovery and health checks. Both APIs support streaming, reasoning and DSML tool calls. Codex uses LiteLLM's Responses translation. The original recipe also supports vision and continuous batching. The Rust profile currently serves text with a configured limit of 524,288 tokens.
+
+## Reproduce the measurements
 
 ```sh
-CUDA_DEVICE_ORDER=PCI_BUS_ID DS4_TEST_DEVICE=1 DS4_TEST_CUDA_DEVICE=1 cargo test --release --locked -- --include-ignored
-docker compose --env-file ../models/.env up -d --wait
 python3 tools/clients.py
-python3 tools/roofline.py
+python3 tools/retrieval.py --records 1600
+python3 tools/roofline.py --packed
+# With DSV41_API_KEY or LITELLM_MASTER_KEY set in your shell
+python3 tools/code_speed.py --rounds 7
+python3 tools/code_speed.py --rounds 7 --tokens 3000 --edit-source ../model-cli/internal/selfupdate/selfupdate.go
 ```
 
-The client checks create temporary workspaces and require the assistant to read a fresh random receipt using a tool. The check accepts only an exact final reply. The credential comes from the existing model-cli launcher.
+The HTTP benchmark sends one request at a time directly to the authenticated inference server, with reasoning disabled and temperature zero. It consumes the SSE stream, uses the engine's completion token count and measures from first to last visible content. The benchmark reports first-token latency separately and excludes one warm-up per prompt. Each short new-code prompt fits inside a single prefill chunk. Source edits can use cached prefix state and source-token proposals. All reported tokens are generated and verified by the target.
 
-## Qualification on the two RTX PRO 6000s
+To run the full Rust test suite, drain the server and select the two inference GPU UUIDs. The suite includes checkpoint tokenizer, real EXL3, attention, peer-copy, speculative rollback and sampling fixtures.
 
-At temperature zero, the engine produced the same 32-token continuation on six measured runs after one warm-up. Median decode was **26.1 tok/s**, with a range of 25.7–26.5. Median time to the first output token on this 18-token raw prompt was 0.16 seconds once its weights were warm. The first run in a fresh process took 2.39 seconds to the first token after checkpoint setup. Performance varies with expert residency, prompt length, and the tokens generated. [Timing samples and output](results/decode.json) · [Bandwidth estimates](THEORY.md)
+```sh
+docker compose --env-file ../models/.env stop
+export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noheader | awk -F', ' '/RTX PRO 6000/{print $2}' | paste -sd,)"
+DS4_TEST_DEVICE=1 DS4_TEST_CUDA_DEVICE=1 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
+docker compose --env-file ../models/.env up -d --wait
+```
 
-The four raw prompts matched the previous server's first token. One entire continuation matched exactly. The three differing continuations and their expected token IDs are recorded in the comparison file. The installed Codex, Claude Code, and Pi clients also have independent tool-result checks. [Greedy comparison](results/greedy-comparison.txt) · [Client results](results/clients.jsonl) · [Client prefill timings](results/client-prefill.txt)
+## Measurements on this workstation
 
-A retrieval test asked for a randomly generated receipt in the first half of 160 records. The answer was exact on the cold 2,887-token prompt and a 2,895-token follow-up with a different final instruction. The engine logged 2,880 reused tokens on the follow-up. Prefill fell from 41.52 to 0.64 seconds. The local coding-client tests exercised prompts of up to 13,635 tokens. The 524,288-token cap and the old recipe's six-session throughput have not been qualified for this engine. [Retrieval responses](results/retrieval.json) · [Engine prefill counters](results/retrieval-prefill.txt)
+The original native engine measured 26.1 tok/s on a 32-token prime-number continuation. Its four short raw prompts matched the original recipe's first token and one entire continuation. The optimized profile uses grouped tensor-core attention, FP8 dense arithmetic and parallel reductions. Greedy equivalence checks below compare drafting against the optimized target on specific prompts. [Initial benchmark](results/decode.json) · [Original reference comparison](results/greedy-comparison.txt) · [Hardware and bandwidth model](THEORY.md)
 
-The release passed all 18 tests, including the real tokenizer and CUDA checks. During a live service stop, a 40-delta stream delivered its final message event and the container exited with code 0. [Release details](results/release.json) · [Shutdown check](results/shutdown.json)
+| Authenticated single-stream HTTP workload | Warm median output tok/s | Measurement |
+|---|---:|---|
+| New Python Tetris implementation | 303.4 | Six runs of 1,024 tokens |
+| New C JSON parser | 351.3 | Six runs of 1,024 tokens |
+| New Rust TTL cache | 330.6 | Six runs of 1,024 tokens |
+| Go source edit, returned in full | 846.6 | Two runs of 1,700 tokens after warm-up |
+
+Across the 18 warm new-code samples the median was **330.6 tok/s**. Each of these generations reached its length limit. The Go edit had a natural stop, changed the requested behavior and passed the original and case-insensitivity tests. Before and after restarting the service, every Go output had the same SHA-256. On the first request after restart both target and drafter restored 1,728 of 1,734 prompt tokens from disk. First-token latency was 1.48 s with cold model allocations and 22 ms on the next request. [New-code samples](results/api-new-code.jsonl) · [Full edits](results/api-edit.jsonl) · [After restart](results/api-disk-edit.jsonl) · [KV counters](results/restart-kv.txt)
+
+Throughput depends on what the drafter can predict. The source edit retained most of its input and 1,652 tokens were accepted from source lookup. An uncached opening, sampling at a different temperature, an essay, and a long transcript can produce very different rates. The first Tetris request in a fresh process measured 90.5 tok/s. [Experiment ledger](results/ledger.jsonl)

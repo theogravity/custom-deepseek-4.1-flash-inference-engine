@@ -4,6 +4,14 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-changed=native");
+    // The workstation is fixed to Blackwell. The family ISA includes native
+    // packed FP8-to-BF16 conversion for the W8A16 tensor-core kernels.
+    println!("cargo:rerun-if-env-changed=DS4_CUDA_ARCH");
+    let arch = env::var("DS4_CUDA_ARCH").unwrap_or_else(|_| "sm_120f".into());
+    assert!(
+        matches!(arch.as_str(), "sm_120" | "sm_120f" | "sm_120a"),
+        "unsupported Blackwell ISA"
+    );
     let mut objects = Vec::new();
     for entry in fs::read_dir("native").unwrap() {
         let path = entry.unwrap().path();
@@ -16,7 +24,7 @@ fn main() {
                 .args([
                     "-std=c++17",
                     "-O3",
-                    "-arch=sm_120",
+                    &format!("-arch={arch}"),
                     "-Xcompiler",
                     "-fPIC",
                     "-c"

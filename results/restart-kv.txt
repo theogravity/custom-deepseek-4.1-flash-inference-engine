@@ -1,0 +1,12 @@
+Opened checkpoint in 2.66s; weights upload on demand
+serving DeepSeek V4.1 Flash on 0.0.0.0:8001
+prefix tier=disk tokens=1728
+prefix DSpark tokens=1728
+prefill tokens=1734 reused=1728 seconds=1.467
+speculative source=learned rounds=6 proposed=31 accepted=27
+speculative source=lookup rounds=15 proposed=1848 accepted=1652
+prefix tier=ram tokens=1728
+prefix DSpark tokens=1728
+prefill tokens=1734 reused=1728 seconds=0.019
+speculative source=learned rounds=6 proposed=31 accepted=27
+speculative source=lookup rounds=15 proposed=1848 accepted=1652

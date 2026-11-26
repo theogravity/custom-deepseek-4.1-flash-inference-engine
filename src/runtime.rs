@@ -703,9 +703,9 @@ mod tests {
                 3,
             )
         })?;
-        for (n, v) in multi.chunks_exact(3).enumerate() {
+        for (n, v) in multi.as_chunks::<3>().0.iter().enumerate() {
             let positive = half::bf16::from_f32(544. * (n + 1) as f32).to_f32();
-            assert_eq!(v, [positive, -positive, 0.]);
+            assert_eq!(*v, [positive, -positive, 0.]);
         }
         Ok(())
     }

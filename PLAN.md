@@ -9,3 +9,20 @@ The target is one native text inference engine for the installed DeepSeek V4.1 F
 5. Measured six single-stream decode samples after one warm-up at temperature zero. The previous native build measured a median of 25.48 tok/s. The sm_120-compatible build measured 26.11 tok/s. The 2.5% difference is within run variation. These changes were kept for numeric compatibility. All runs returned the same sequence of prime numbers. The final rate is roughly 27% of this engine's short-context 95.6 tok/s weight-bandwidth estimate. [Baseline](results/baseline-decode.json) · [Final samples and generated text](results/decode.json) · [Ceiling](THEORY.md)
 6. Qualified cache reuse using distinct requests through LiteLLM. A first attempt repeated identical HTTP content and LiteLLM served the second answer from its own cache. A changed suffix produced two measured Rust prefills, with 2,880 of 2,895 input tokens reused on the second. Both returned the correct random receipt. [Responses](results/retrieval.json) · [Worker measurements](results/retrieval-prefill.txt)
 7. An early Docker stop killed the idle process after its timeout. Added SIGTERM and SIGINT handling and joined the inference worker before process exit. Stopped the final server while it streamed a real response. The client received the terminal event and Docker reported exit code 0. The service was restarted and its deployed executable matched the local release hash. [Shutdown check](results/shutdown.json) · [Build and tests](results/release.json)
+
+## Speculative engine and two-card tuning
+
+The optimization target was more than 300 target-verified output tokens/s for a single coding client. Each new-code sample uses 1,024 generated tokens, temperature zero and a short prompt. The three prompts were taken from the model pack. The source-edit task returns the complete updated Go file and can benefit from matching tokens in its input. Direct engine requests bypass the proxy's optional answer cache.
+
+| Experiment | Result and decision |
+|---|---|
+| Device-resident target, no drafter | The initial 25.75 tok/s control rose to 44.50 on the same workload. The GPU sampler and packed dense kernels subsequently took a 256-token Tetris control to 86 tok/s. |
+| Learned drafters | At an early build, original DSpark reached 123 tok/s and the code-tuned overlay reached 130 on a 128-token Tetris continuation. Kept both. |
+| Packed MXFP8 target and GPU head | The retiled packed matrix multiplications cut weight traffic and significantly improved verification. K=7 was the preferred tested setting for the code overlay. |
+| Splitting all dense projections, direct remote expert reads | Both slowed the short coding control. Dense tensor parallelism stays disabled. Replaced direct remote accesses with explicit staging. |
+| Staged target expert split | 287.97 vs 260.14 and 259.64 tok/s neighboring controls on 768 Tetris tokens. Kept. Draft-layer experts remain on their owning card. |
+| Learned confidence | A 0.4 cutoff shortened proposed verification from 929 to 824 rows with the same 634 accepted, increasing 260 to 270 tok/s before staged parallelism. |
+| Source lookup | Full 1,700-token Go edit reached 470.5 tok/s across six warm runs on an intermediate profile. The final combined profile reached 846.6 over two on-wire samples. All edits passed the Go regression. |
+| Combined profile | Six interleaved warm runs per new-code prompt at 303.4 / 351.3 / 330.6 tok/s. All three prompts were shorter than the cache's 64-token chunk. |
+
+The confidence and staging experiments used shorter screening runs. The on-wire suite exercised the combination for six warm runs per prompt, with a first warm-up for each. Historical trials and their continuation digests are in the ledger. The numerical profile uses FP8 and BF16 rounding and grouped reductions, so generated text can differ from the original vLLM recipe. [Raw trials](results/ledger.jsonl) · [Confidence controls](results/confidence.json) · [Timing protocol](tools/code_speed.py)

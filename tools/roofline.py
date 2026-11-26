@@ -10,6 +10,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", nargs="?", type=Path, default=Path("/mnt/models/dsv41-flash-exl3"))
     parser.add_argument("--gbps", nargs=2, type=float, default=[1702.39, 1702.74], help="Measured memory bandwidth for each stage, decimal GB/s")
+    parser.add_argument("--packed", action="store_true", help="read checkpoint MXFP8 data and scales directly on the GPU")
     args = parser.parse_args()
     # At <=512 compressed rows every candidate fits. The indexer can skip search.
     stages = [Counter(), Counter()]
@@ -43,9 +44,13 @@ def main():
                 continue
             elif field.endswith(".weight") and len(row["shape"]) == 2 and field != "engram.embed.weight":
                 width = 4 if row["dtype"] == "F32" else 2
+                stored = width * elements
+                if args.packed and row["dtype"] == "F8_E4M3":
+                    n, k = row["shape"]
+                    stored = elements + ((n+31)//32) * ((k+31)//32)
                 # The key projection is applied once per complete compression group.
                 rate = 0.5 if field == "attn.indexer.wk.weight" and layer in (2,8,14) else 1
-                stage["Other dense projections"] += width*elements*rate
+                stage["Other dense projections"] += stored*rate
     assert all(stage["Selected EXL3 experts"] > 1e9 for stage in stages)
     seconds = sum(sum(stage.values()) / (gbps*1e9) for stage,gbps in zip(stages,args.gbps))
     print(json.dumps({"stage_GB": [{k:round(v/1e9,4) for k,v in stage.items()} for stage in stages],
