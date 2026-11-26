@@ -1,0 +1,8 @@
+prefix tier=disk tokens=266112
+prefix DSpark tokens=266112
+prefill tokens=266174 reused=266112 seconds=0.590
+speculative source=learned rounds=7 proposed=22 accepted=17
+prefix tier=disk tokens=520320
+prefix DSpark tokens=520320
+prefill tokens=520362 reused=520320 seconds=0.357
+speculative source=learned rounds=6 proposed=22 accepted=19
