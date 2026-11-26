@@ -3,6 +3,8 @@ use crate::{
     chat::{self, Delta, Parser},
     model::{Model, Session, Step},
 };
+#[cfg(test)]
+mod context_tests;
 mod scheduler;
 use crate::swap::{SwapStats, SwapStore};
 use anyhow::{anyhow, ensure, Context, Result};
@@ -44,7 +46,41 @@ const QUEUE: usize = 8;
 const MAX_SEQS: usize = 6;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const BODY_LIMIT: usize = 32 << 20;
+const DEFAULT_MAX_TOKENS: u64 = 4096;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct ContextOverflow {
+    window: usize,
+    prompt: usize,
+    output: Option<(&'static str, u64)>,
+}
+impl std::fmt::Display for ContextOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            window,
+            prompt,
+            output,
+        } = self;
+        match output {
+            Some((field, requested)) => write!(
+                f,
+                "This model's maximum context length is {window} tokens ({MODEL_NAME}). \
+                 The prompt contains {prompt} tokens and {field} requests {requested} output tokens. \
+                 At most {} output tokens fit with this prompt.",
+                window.saturating_sub(*prompt),
+            ),
+            None => write!(
+                f,
+                "prompt is too long: {prompt} tokens > {} maximum for generation. \
+                 This model's maximum context length is {window} tokens ({MODEL_NAME}). \
+                 Shorten the input to leave room for at least one output token.",
+                window.saturating_sub(1),
+            ),
+        }
+    }
+}
+impl std::error::Error for ContextOverflow {}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Wire {
@@ -66,6 +102,16 @@ impl Wire {
         };
         (code, Json(body)).into_response()
     }
+
+    fn bad_request(self, error: anyhow::Error) -> Response {
+        if let (Self::OpenAi, Some(e)) = (self, error.downcast_ref::<ContextOverflow>()) {
+            let param = e.output.map_or("messages", |(field, _)| field);
+            let body = json!({"error": {"message":e.to_string(), "type":"invalid_request_error",
+                                        "param":param, "code":"context_length_exceeded"}});
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
+        self.error(StatusCode::BAD_REQUEST, &format!("{error:#}"))
+    }
 }
 
 struct ServerState {
@@ -83,6 +129,7 @@ struct Prepared {
     thinking: bool,
     tools: bool,
     max_tokens: usize,
+    requested: Option<u64>,
     temperature: f32,
     stops: Vec<String>,
     stream: bool,
@@ -113,23 +160,40 @@ fn prepare(req: Value, state: &ServerState, count: bool) -> Result<Prepared> {
         );
     }
     let ids = prompt.encode(&state.tokenizer, &state.plain)?;
-    if !count {
-        ensure!(
-            ids.len() < state.context,
-            "prompt contains {} tokens, model context is {}",
-            ids.len(),
-            state.context
-        );
+    if !count && ids.len() >= state.context {
+        return Err(ContextOverflow {
+            window: state.context,
+            prompt: ids.len(),
+            output: None,
+        }
+        .into());
     }
-    let limit = req.get("max_completion_tokens").or(req.get("max_tokens"));
-    let requested = match limit {
-        None | Some(Value::Null) => 4096,
-        Some(v) => v
-            .as_u64()
-            .filter(|i| *i > 0)
-            .context("max_tokens must be a positive integer")?,
+    let field = if !req["max_completion_tokens"].is_null() {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
     };
-    let max_tokens = requested.min(state.context.saturating_sub(ids.len()) as u64) as usize;
+    let requested = match req.get(field) {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let value = v
+                .as_u64()
+                .filter(|i| *i > 0)
+                .with_context(|| format!("{field} must be a positive integer"))?;
+            if !count && value > state.context as u64 {
+                return Err(ContextOverflow {
+                    window: state.context,
+                    prompt: ids.len(),
+                    output: Some((field, value)),
+                }
+                .into());
+            }
+            Some(value)
+        }
+    };
+    let max_tokens = requested
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .min(state.context.saturating_sub(ids.len()) as u64) as usize;
     let temperature = match req.get("temperature") {
         None | Some(Value::Null) => 1.,
         Some(v) => v
@@ -168,6 +232,7 @@ fn prepare(req: Value, state: &ServerState, count: bool) -> Result<Prepared> {
         thinking,
         tools,
         max_tokens,
+        requested,
         temperature,
         stops,
         stream,
@@ -290,7 +355,7 @@ async fn post_request(state: Arc<ServerState>, body: Bytes, wire: Wire, count: b
     .await;
     let input = match input {
         Ok(Ok(i)) => i,
-        Ok(Err(e)) => return wire.error(StatusCode::BAD_REQUEST, &format!("{e:#}")),
+        Ok(Err(e)) => return wire.bad_request(e),
         Err(_) => return wire.error(StatusCode::INTERNAL_SERVER_ERROR, "tokenizer worker failed"),
     };
     if count {
@@ -308,7 +373,9 @@ async fn post_request(state: Arc<ServerState>, body: Bytes, wire: Wire, count: b
             )
         }
     };
-    if input.stream {
+    let requested = input.requested;
+    let effective = input.max_tokens as u64;
+    let mut response = if input.stream {
         let (send, recv) = mpsc::channel(32);
         slot.send(Job {
             input,
@@ -333,7 +400,17 @@ async fn post_request(state: Arc<ServerState>, body: Bytes, wire: Wire, count: b
                 "inference worker stopped",
             ),
         }
+    };
+    if response.status().is_success() && requested.unwrap_or(DEFAULT_MAX_TOKENS) > effective {
+        let headers = response.headers_mut();
+        headers.insert("x-ds4-effective-max-tokens", effective.into());
+        if let Some(n) = requested {
+            headers.insert("x-ds4-requested-max-tokens", n.into());
+        } else {
+            headers.insert("x-ds4-default-max-tokens", DEFAULT_MAX_TOKENS.into());
+        }
     }
+    response
 }
 fn allowed(headers: &HeaderMap, key: &str) -> bool {
     let bearer = headers
@@ -907,6 +984,7 @@ mod tests {
             thinking: false,
             tools: false,
             max_tokens,
+            requested: Some(max_tokens as u64),
             temperature: 0.,
             stops: vec![],
             stream: false,
