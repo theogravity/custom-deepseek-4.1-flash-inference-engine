@@ -73,14 +73,14 @@ impl AttentionState {
                 .context("missing snapshot source")?;
             let (kv, keys, pending) = source_lengths(owner, pos);
             ensure!(
-                src.values.packed.len() == kv
-                    && src.keys.packed.len() == keys
+                src.values.len() == kv
+                    && src.keys.len() == keys
                     && src.pending_kv.len() == pending
                     && src.pending_gate.len() == pending,
                 "invalid compressed snapshot shape at layer {owner}"
             );
-            out.extend_from_slice(&src.values.packed);
-            out.extend_from_slice(&src.keys.packed);
+            src.values.append_snapshot(&mut out)?;
+            src.keys.append_snapshot(&mut out)?;
             for x in src.pending_kv.iter().chain(&src.pending_gate) {
                 out.extend_from_slice(&x.to_le_bytes());
             }

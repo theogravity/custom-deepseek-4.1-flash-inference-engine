@@ -31,6 +31,16 @@ const INDEX_BYTES: usize = INDEX_DIM + 4;
 
 unsafe extern "C" {
     fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
+    fn ds4_attn_prepare_tail(dev: i32, cache: *mut c_void, old: usize, bytes: usize) -> i32;
+    fn ds4_attn_normalize_raw(dev: i32, x: *mut f32, g: *const f32, n: i32) -> i32;
+    fn ds4_attn_pack_compressed(
+        dev: i32,
+        values: *const f32,
+        keys: *const f32,
+        vdst: *mut u8,
+        kdst: *mut u8,
+        n: i32,
+    ) -> i32;
     fn ds4_attn_index_bytes(width: i32, rows: i32, bytes: *mut usize) -> i32;
     fn ds4_attn_index_ids(
         dev: i32,
@@ -64,7 +74,6 @@ unsafe extern "C" {
         len: usize,
     ) -> i32;
     fn ds4_attn_data(buf: *mut c_void) -> *mut c_void;
-    #[cfg(test)]
     fn ds4_attn_read(device: i32, src: *const c_void, dst: *mut c_void, bytes: usize) -> i32;
     fn ds4_attn_window(
         device: i32,
@@ -190,10 +199,48 @@ fn cuda_ok(code: i32, op: &str) -> Result<()> {
 
 #[derive(Default)]
 struct Rows {
+    writer: Option<i32>,
     packed: Vec<u8>,
     devices: HashMap<i32, (GpuBuffer, usize)>,
 }
 impl Rows {
+    fn len(&self) -> usize {
+        self.writer
+            .map_or_else(|| self.packed.len(), |d| self.devices[&d].1)
+    }
+
+    fn append_snapshot(&self, out: &mut Vec<u8>) -> Result<()> {
+        if let Some(dev) = self.writer {
+            let (buffer, bytes) = &self.devices[&dev];
+            let old = out.len();
+            out.try_reserve(*bytes)?;
+            out.resize(old + bytes, 0);
+            if *bytes > 0 {
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_read(dev, buffer.data(), out[old..].as_mut_ptr().cast(), *bytes)
+                    },
+                    "reading compressed snapshot rows",
+                )?;
+            }
+        } else {
+            out.extend_from_slice(&self.packed);
+        }
+        Ok(())
+    }
+
+    fn prepare_tail(&mut self, rt: &mut Runtime, bytes: usize) -> Result<*mut u8> {
+        let device = rt.device;
+        let old = self.len();
+        let handle = self.with_tail(device, Some(&mut rt.moe_cache), bytes)?;
+        Ok(unsafe { ds4_attn_data(handle).cast::<u8>().add(old) })
+    }
+
+    fn finish_append(&mut self, dev: i32, bytes: usize) {
+        self.devices.get_mut(&dev).unwrap().1 += bytes;
+        self.writer = Some(dev);
+        self.packed = Vec::new();
+    }
     fn truncate(&mut self, bytes: usize) {
         self.packed.truncate(bytes);
         for (_, uploaded) in self.devices.values_mut() {
@@ -202,17 +249,38 @@ impl Rows {
     }
 
     fn on(&mut self, dev: i32, cache: Option<&mut crate::moe::MoeCache>) -> Result<*mut c_void> {
+        self.with_tail(dev, cache, 0)
+    }
+
+    fn with_tail(
+        &mut self,
+        dev: i32,
+        cache: Option<&mut crate::moe::MoeCache>,
+        tail: usize,
+    ) -> Result<*mut c_void> {
         use std::collections::hash_map::Entry;
+        if let Some(writer) = self.writer {
+            ensure!(writer == dev, "compressed source device changed");
+        }
+        let requested = self.len() + tail;
         let (buf, old) = match self.devices.entry(dev) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert((GpuBuffer::new(dev)?, 0)),
         };
-        let extra = &self.packed[*old..];
-        if !extra.is_empty() {
-            let growth = unsafe { ds4_attn_growth(buf.ptr.as_ptr(), self.packed.len()) };
-            if let Some(cache) = cache.filter(|_| growth != 0) {
+        // A restored host prefix and its first appended rows share one fresh
+        // allocation. Reserve the complete new buffer while the old one lives.
+        let growth = unsafe { ds4_attn_growth(buf.ptr.as_ptr(), requested) };
+        if growth != 0 {
+            if let Some(cache) = cache {
                 cache.reserve(dev, growth)?;
             }
+            cuda_ok(
+                unsafe { ds4_attn_prepare_tail(dev, buf.ptr.as_ptr(), *old, requested - *old) },
+                "growing compressed GPU rows",
+            )?;
+        }
+        if self.writer.is_none() && *old < self.packed.len() {
+            let extra = &self.packed[*old..];
             cuda_ok(
                 unsafe {
                     ds4_attn_upload(dev, buf.ptr.as_ptr(), extra.as_ptr(), *old, extra.len())
@@ -450,29 +518,29 @@ impl AttentionState {
     /// Branch at a completed backbone forward. Each resumed request uploads its
     /// own device rows lazily. Top-k selections and candidate blocks belong to
     /// the past chunk and are rebuilt by their source layers on the next call.
+    #[cfg(test)]
     pub fn host_snapshot(&self) -> Result<Self> {
         ensure!(self.verify.is_none(), "cannot snapshot active verification");
-        fn host_rows(rows: &Rows) -> Rows {
-            Rows {
-                packed: rows.packed.clone(),
-                devices: HashMap::new(),
-            }
+        fn host_rows(rows: &Rows) -> Result<Rows> {
+            let mut copy = Rows::default();
+            rows.append_snapshot(&mut copy.packed)?;
+            Ok(copy)
         }
         let sources = self
             .sources
             .iter()
             .map(|(&layer, source)| {
-                (
+                Ok((
                     layer,
                     Source {
-                        values: host_rows(&source.values),
-                        keys: host_rows(&source.keys),
+                        values: host_rows(&source.values)?,
+                        keys: host_rows(&source.keys)?,
                         pending_kv: source.pending_kv.clone(),
                         pending_gate: source.pending_gate.clone(),
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let windows = self
             .windows
             .iter()
@@ -718,18 +786,21 @@ fn append_source(
     ratio: usize,
     owner: usize,
     verify: Option<&mut Verification>,
+    resident: bool,
 ) -> Result<()> {
     ensure!(
-        src.keys.packed.len() == pos / ratio * INDEX_BYTES
-            && src.values.packed.len() == pos / ratio * KV_BYTES,
+        src.keys.len() == pos / ratio * INDEX_BYTES && src.values.len() == pos / ratio * KV_BYTES,
         "discontinuous compressed cache at {pos}"
     );
     let kv = project(rt, prefix, "compressor.wkv", x, batch, DIM, 1)?;
-    let kv = rt.to_host(&kv)?;
+    if ratio == 1 && resident {
+        return append_resident(rt, src, prefix, kv, pos, batch, ratio);
+    }
     let mut latent = if ratio == 1 {
-        kv
+        rt.to_host(&kv)?
     } else {
         let gates = project(rt, prefix, "compressor.wgate", x, batch, DIM, 1)?;
+        let kv = rt.to_host(&kv)?;
         let gates = rt.to_host(&gates)?;
         if let Some(mark) = verify {
             mark.pending
@@ -739,6 +810,11 @@ fn append_source(
     };
     if latent.is_empty() {
         return Ok(());
+    }
+    if resident {
+        let n = latent.len() / DIM;
+        let latent = rt.to_device(&latent)?;
+        return append_resident(rt, src, prefix, latent, pos, n, ratio);
     }
     normalize(
         &mut latent,
@@ -764,6 +840,73 @@ fn append_source(
     }
     pack_index_keys(&keys, &mut src.keys.packed);
     pack_values(&latent, &mut src.values.packed);
+    Ok(())
+}
+
+fn gpu_compress() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DS4_GPU_COMPRESS").is_some_and(|v| v == "1"))
+}
+
+fn append_resident(
+    rt: &mut Runtime,
+    src: &mut Source,
+    prefix: &str,
+    mut latent: Dev,
+    pos: usize,
+    n: usize,
+    ratio: usize,
+) -> Result<()> {
+    let g = rt.vector_ptr(&format!("{prefix}.compressor.norm.weight"), DIM)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize_raw(rt.device, latent.as_mut_ptr(), g, n as i32) },
+        "normalizing compressed values",
+    )?;
+    let mut keys = project(rt, prefix, "indexer.wk", &latent, n, INDEX_DIM, 1)?;
+    let g = rt.vector_ptr(&format!("{prefix}.indexer.k_norm.weight"), INDEX_DIM)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize(rt.device, keys.as_mut_ptr(), g, INDEX_DIM as i32, n as i32) },
+        "normalizing compressed index keys",
+    )?;
+    let host: Vec<_> = (0..n)
+        .map(|i| rotary_freqs((pos / ratio + i) * ratio, true))
+        .collect();
+    let freqs = rt.to_device(host.as_flattened().as_flattened())?;
+    for (x, width) in [(&mut keys, INDEX_DIM), (&mut latent, DIM)] {
+        cuda_ok(
+            unsafe {
+                ds4_attn_transform(
+                    rt.device,
+                    x.as_mut_ptr(),
+                    ptr::null_mut(),
+                    freqs.as_ptr(),
+                    1,
+                    width as i32,
+                    0,
+                    0,
+                    n as i32,
+                )
+            },
+            "rotating compressed source rows",
+        )?;
+    }
+    let values = src.values.prepare_tail(rt, n * KV_BYTES)?;
+    let target = src.keys.prepare_tail(rt, n * INDEX_BYTES)?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_pack_compressed(
+                rt.device,
+                latent.as_ptr(),
+                keys.as_ptr(),
+                values,
+                target,
+                n as i32,
+            )
+        },
+        "packing compressed source rows",
+    )?;
+    src.values.finish_append(rt.device, n * KV_BYTES);
+    src.keys.finish_append(rt.device, n * INDEX_BYTES);
     Ok(())
 }
 
@@ -1170,6 +1313,7 @@ pub fn forward_dev(
                 ratio,
                 owner,
                 state.verify.as_mut(),
+                gpu_compress(),
             )?;
         }
         if layer == owner || [24, 28, 32, 36].contains(&layer) {
@@ -1775,6 +1919,174 @@ mod tests {
                     .map(|k| ids[k] as i32)
                     .collect();
                 assert_eq!(actual, want, "filtered visible {visible}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_resident_compressor_bytes_match_restored_and_rejected_prefixes() -> Result<()> {
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let n = 9;
+        let mut values: Vec<f32> = (0..n * DIM)
+            .map(|i| ((i as f32 + 0.1) * 0.179).sin() * 13.317)
+            .collect();
+        let mut keys: Vec<f32> = (0..n * INDEX_DIM)
+            .map(|i| b16(((i as f32 + 0.9) * 0.207).cos() * 7.059))
+            .collect();
+        let gamma: Vec<f32> = (0..DIM)
+            .map(|j| 0.01 + ((j + 3) % 93) as f32 / 88.)
+            .collect();
+        let angles: Vec<_> = (0..n).map(|t| rotary_freqs(991 + 2 * t, true)).collect();
+        let v = upload(device, &values)?;
+        let k = upload(device, &keys)?;
+        let g = upload(device, &gamma)?;
+        let f = upload(device, &angles)?;
+        cuda_ok(
+            unsafe { ds4_attn_normalize_raw(device, v.data(), g.data(), n as i32) },
+            "raw compressor normalization fixture",
+        )?;
+        cuda_ok(
+            unsafe { ds4_attn_normalize(device, k.data(), g.data(), INDEX_DIM as i32, n as i32) },
+            "index normalization fixture",
+        )?;
+        normalize(&mut values, &gamma);
+        normalize(&mut keys, &gamma[..INDEX_DIM]);
+        for (d, src, width) in [(&v, &mut values, DIM), (&k, &mut keys, INDEX_DIM)] {
+            cuda_ok(
+                unsafe {
+                    ds4_attn_transform(
+                        device,
+                        d.data(),
+                        ptr::null_mut(),
+                        f.data(),
+                        1,
+                        width as i32,
+                        0,
+                        0,
+                        n as i32,
+                    )
+                },
+                "compressed rotary fixture",
+            )?;
+            for (row, angle) in src.chunks_exact_mut(width).zip(&angles) {
+                rotate(row, angle, false);
+            }
+        }
+        let mut ref_v = Vec::new();
+        let mut ref_k = Vec::new();
+        pack_values(&values, &mut ref_v);
+        pack_index_keys(&keys, &mut ref_k);
+        let mut vs = Rows {
+            packed: ref_v[..KV_BYTES].to_vec(),
+            ..Rows::default()
+        };
+        let mut ks = Rows {
+            packed: ref_k[..INDEX_BYTES].to_vec(),
+            ..Rows::default()
+        };
+        // Begin with a host snapshot. Append GPU rows, roll back three, and
+        // append new bytes into the previously rejected slots.
+        for (start, end) in [(1, n), (n - 3, n)] {
+            let size = end - start;
+            let mut dest = [ptr::null_mut(); 2];
+            for ((r, width), dst) in [(&mut vs, KV_BYTES), (&mut ks, INDEX_BYTES)]
+                .into_iter()
+                .zip(&mut dest)
+            {
+                r.truncate(start * width);
+                let h = r.with_tail(device, None, size * width)?;
+                *dst = unsafe { ds4_attn_data(h).cast::<u8>().add(start * width) };
+            }
+            cuda_ok(
+                unsafe {
+                    ds4_attn_pack_compressed(
+                        device,
+                        v.data::<f32>().add(start * DIM),
+                        k.data::<f32>().add(start * INDEX_DIM),
+                        dest[0],
+                        dest[1],
+                        size as i32,
+                    )
+                },
+                "packing compressed fixture",
+            )?;
+            vs.finish_append(device, size * KV_BYTES);
+            ks.finish_append(device, size * INDEX_BYTES);
+            for (actual, expected) in [(&vs, &ref_v), (&ks, &ref_k)] {
+                let mut bytes = Vec::new();
+                actual.append_snapshot(&mut bytes)?;
+                assert_eq!(&bytes, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
+    fn cuda_checkpoint_compressor_matches_across_split_pairs() -> Result<()> {
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "mask to both inference GPUs"
+        );
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        for (owner, ratio) in [(2, 2), (20, 1)] {
+            rt.layer(owner)?;
+            let (mut cpu, mut gpu) = (Source::default(), Source::default());
+            let prefix = format!("layers.{owner}.attn");
+            for (pos, n) in [(0, 1), (1, 4), (5, 2), (7, 8)] {
+                let x: Vec<_> = (0..n * HIDDEN)
+                    .map(|i| b16(((i + pos * HIDDEN) as f32 * 0.1369).cos()))
+                    .collect();
+                let x = rt.to_device(&x)?;
+                let mark = || Verification {
+                    pos,
+                    batch: n,
+                    pending: HashMap::new(),
+                };
+                let (mut cp, mut gp) = (mark(), mark());
+                append_source(
+                    &mut rt,
+                    &mut cpu,
+                    &prefix,
+                    &x,
+                    pos,
+                    n,
+                    ratio,
+                    owner,
+                    Some(&mut cp),
+                    false,
+                )?;
+                append_source(
+                    &mut rt,
+                    &mut gpu,
+                    &prefix,
+                    &x,
+                    pos,
+                    n,
+                    ratio,
+                    owner,
+                    Some(&mut gp),
+                    true,
+                )?;
+                for (got, want) in [(&gpu.keys, &cpu.keys), (&gpu.values, &cpu.values)] {
+                    let mut bytes = Vec::new();
+                    got.append_snapshot(&mut bytes)?;
+                    assert_eq!(
+                        bytes, want.packed,
+                        "checkpoint compressed rows owner={owner}, pos={pos}"
+                    );
+                }
+                assert_eq!(cpu.pending_kv, gpu.pending_kv);
+                assert_eq!(cpu.pending_gate, gpu.pending_gate);
+                if ratio == 2 {
+                    assert_eq!(cp.pending[&owner].kv, gp.pending[&owner].kv);
+                    assert_eq!(cp.pending[&owner].gates, gp.pending[&owner].gates);
+                }
             }
         }
         Ok(())

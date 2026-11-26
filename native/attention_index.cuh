@@ -56,6 +56,21 @@ __global__ void chronological_ids(const unsigned long long *rank, int width, int
         out[size_t(blockIdx.x)*Limit+threadIdx.x*items+j]=int(keys[j]);
 }
 
+// Segmented radix sort handles many small query rows. With just a few long
+// rows, give the entire grid to each sort instead of one segmented operation.
+inline bool wide_index_sort(int stride,int rows) { return rows<=4 && stride>=8192; }
+inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long long *input,
+        unsigned long long *output,int stride,int rows,const int *offsets) {
+    if (!wide_index_sort(stride,rows)) return cub::DeviceSegmentedRadixSort::SortKeysDescending(
+        work,bytes,input,output,rows*stride,rows,offsets,offsets ? offsets+1 : nullptr);
+    for(int t=0;t<(work ? rows : 1);++t) {
+        auto e=cub::DeviceRadixSort::SortKeysDescending(work,bytes,input ? input+size_t(t)*stride : nullptr,
+            output ? output+size_t(t)*stride : nullptr,stride);
+        if (e!=cudaSuccess) return e;
+    }
+    return cudaSuccess;
+}
+
 struct IndexWorkspace {
     size_t ids, scores, ranks, sorted, offsets, temp, temp_bytes, bytes;
     cudaError_t plan(int width,int rows) {
@@ -69,9 +84,7 @@ struct IndexWorkspace {
         temp_bytes=0;
         for(int stride : {width,(width+index_block-1)/index_block}) {
             size_t size=0;
-            auto e=cub::DeviceSegmentedRadixSort::SortKeysDescending(nullptr,size,
-                static_cast<const unsigned long long *>(nullptr),static_cast<unsigned long long *>(nullptr),
-                rows*stride,rows,static_cast<const int *>(nullptr),static_cast<const int *>(nullptr));
+            auto e=sort_index_rows(nullptr,size,nullptr,nullptr,stride,rows,nullptr);
             if(e!=cudaSuccess)return e;
             temp_bytes=std::max(temp_bytes,size);
         }

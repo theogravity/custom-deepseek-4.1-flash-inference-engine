@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cub/block/block_radix_sort.cuh>
 #include <cub/device/device_segmented_radix_sort.cuh>
+#include <cub/device/device_radix_sort.cuh>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <algorithm>
@@ -64,12 +65,13 @@ __device__ float bf16(float x) {
 
 // The CPU reference accumulates squares in feature order without contraction.
 // Compute the products in parallel, then preserve that order for the single sum.
+template<bool RoundInput>
 __global__ void normalize_rows(float *x, const float *gamma, int width) {
     extern __shared__ float squares[];
     __shared__ float inv;
     float *row = x + size_t(blockIdx.x) * width;
     for (int j = threadIdx.x; j < width; j += blockDim.x) {
-        const float v = bf16(row[j]);
+        const float v = RoundInput ? bf16(row[j]) : row[j];
         squares[j] = __fmul_rn(v, v);
     }
     __syncthreads();
@@ -80,7 +82,7 @@ __global__ void normalize_rows(float *x, const float *gamma, int width) {
     }
     __syncthreads();
     for (int j = threadIdx.x; j < width; j += blockDim.x)
-        row[j] = bf16(__fmul_rn(__fmul_rn(bf16(row[j]), inv), gamma[j]));
+        row[j] = bf16(__fmul_rn(__fmul_rn(RoundInput ? bf16(row[j]) : row[j], inv), gamma[j]));
 }
 
 // One block per head. The sine/cosine pairs come from the same host sin_cos
@@ -121,6 +123,29 @@ __global__ void transform_heads(float *data, __nv_bfloat16 *window, const float2
         if (window) window[off+j] = __float2bfloat16_rn(row[j]);
         else data[off+j] = row[j];
     }
+}
+
+// Match the checkpoint's record layout. One warp quantizes a 128-column
+// index key or a 64-column non-rotary key/value group.
+__global__ void pack_compressor(const float *values,const float *keys,uint8_t *value_bytes,uint8_t *key_bytes) {
+    int row=blockIdx.x, warp=threadIdx.x/32, lane=threadIdx.x%32;
+    auto *value=value_bytes+size_t(row)*584;
+    auto *index=key_bytes+size_t(row)*132;
+    const float *src=warp==7 ? keys+size_t(row)*128 : values+size_t(row)*512+warp*64;
+    int width=warp==7 ? 128 : 64;
+    float peak=1e-4f;
+    for(int j=lane;j<width;j+=32) peak=fmaxf(peak,fabsf(src[j]));
+    for(int d=16;d;d/=2) peak=fmaxf(peak,__shfl_xor_sync(0xffffffffu,peak,d));
+    unsigned bits=(__float_as_uint(__fmul_rn(peak,1.f/448.f))+0x7fffffu)&0x7f800000u;
+    float scale=__uint_as_float(bits);
+    uint8_t *dst=warp==7 ? index : value+warp*64;
+    for(int j=lane;j<width;j+=32) dst[j]=__nv_fp8_e4m3(__fdiv_rn(src[j],scale)).__x;
+    if (!lane) {
+        if (warp==7) { *reinterpret_cast<float *>(index+128)=scale; value[583]=0; }
+        else value[576+warp]=bits>>23;
+    }
+    if(threadIdx.x<64) reinterpret_cast<__nv_bfloat16 *>(value+448)[threadIdx.x]=
+        __float2bfloat16_rn(values[size_t(row)*512+448+threadIdx.x]);
 }
 
 __device__ float unpack_value(const uint8_t *row, int col) {
@@ -303,7 +328,7 @@ extern "C" int ds4_attn_window(int dev, void *handle, int start, int rows,
 extern "C" int ds4_attn_normalize(int dev, float *x, const float *gamma, int width, int batch) {
     TRY(cudaSetDevice(dev));
     if (width < 1 || width > 5120) return (int)cudaErrorInvalidValue;
-    normalize_rows<<<batch,256,width * sizeof(float)>>>(x, gamma, width);
+    normalize_rows<true><<<batch,256,width * sizeof(float)>>>(x, gamma, width);
     return (int)cudaGetLastError();
 }
 
@@ -416,12 +441,13 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     score_keys<<<dim3((width+block/32-1)/(block/32),rows),block>>>(packed,queries,weights,ids,width,scores);
     TRY(cudaGetLastError());
     auto sort=[&](int stride)->cudaError_t {
-        index_bounds<<<(rows+block)/block,block>>>(offsets,stride,rows);
-        auto e=cudaGetLastError();
-        if (e!=cudaSuccess) return e;
+        if (!wide_index_sort(stride,rows)) {
+            index_bounds<<<(rows+block)/block,block>>>(offsets,stride,rows);
+            auto e=cudaGetLastError();
+            if (e!=cudaSuccess) return e;
+        }
         size_t available=s.temp_bytes;
-        return cub::DeviceSegmentedRadixSort::SortKeysDescending(work+s.temp,available,
-            rank,sorted,rows*stride,rows,offsets,offsets+1);
+        return sort_index_rows(work+s.temp,available,rank,sorted,stride,rows,offsets);
     };
     rank_positions<<<grid,block>>>(scores,ids,rank,width);
     TRY(cudaGetLastError());
@@ -437,4 +463,20 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         TRY(cudaGetLastError());
     }
     return 0;
+}
+
+extern "C" int ds4_attn_normalize_raw(int dev, float *x, const float *g, int n) {
+    TRY(cudaSetDevice(dev));
+    normalize_rows<false><<<n,block,dim*sizeof(float)>>>(x,g,dim);
+    return cudaGetLastError();
+}
+extern "C" int ds4_attn_prepare_tail(int dev,void *cache,size_t old,size_t bytes) {
+    TRY(cudaSetDevice(dev));
+    return static_cast<Buffer *>(cache)->grow(old+bytes,old);
+}
+extern "C" int ds4_attn_pack_compressed(int dev,const float *values,const float *keys,
+        uint8_t *value_bytes,uint8_t *key_bytes,int n) {
+    TRY(cudaSetDevice(dev));
+    pack_compressor<<<n,block>>>(values,keys,value_bytes,key_bytes);
+    return cudaGetLastError();
 }
