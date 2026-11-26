@@ -1,0 +1,230 @@
+{
+  "measurement": "Opt-in measurements on the existing lazy restore path. GPU install measures host time in the existing allocation and upload calls. Subsequent GPU work is stream-ordered without an added DMA completion fence. Wall to ready includes intervening inference and scheduling. Disk reads can be served by the OS page cache.",
+  "groups": [
+    {
+      "kind": "prefix",
+      "tier": "disk",
+      "position_range": [
+        403968,
+        403968
+      ],
+      "samples": 6,
+      "target_restored_bytes_median": 728304640.0,
+      "target_lookup_read_ms": {
+        "median": 492.39,
+        "min": 483.62,
+        "max": 506.66
+      },
+      "target_deserialize_ms": {
+        "median": 176.13,
+        "min": 161.97,
+        "max": 192.7
+      },
+      "draft_lookup_read_ms": {
+        "median": 10.8,
+        "min": 2.44,
+        "max": 11.0
+      },
+      "draft_restore_ms": {
+        "median": 0.2,
+        "min": 0.09,
+        "max": 0.32
+      },
+      "target_gpu_install_ms": {
+        "median": 63.35,
+        "min": 28.33,
+        "max": 64.6
+      },
+      "timed_operations_ms": {
+        "median": 747.44,
+        "min": 684.76,
+        "max": 766.22
+      },
+      "wall_to_ready_ms": {
+        "median": 3777.88,
+        "min": 2586.17,
+        "max": 5969.53
+      }
+    },
+    {
+      "kind": "prefix",
+      "tier": "disk",
+      "position_range": [
+        524096,
+        524096
+      ],
+      "samples": 29,
+      "target_restored_bytes_median": 943333760,
+      "target_lookup_read_ms": {
+        "median": 612.07,
+        "min": 521.32,
+        "max": 640.76
+      },
+      "target_deserialize_ms": {
+        "median": 189.25,
+        "min": 172.21,
+        "max": 229.0
+      },
+      "draft_lookup_read_ms": {
+        "median": 2.25,
+        "min": 1.95,
+        "max": 11.61
+      },
+      "draft_restore_ms": {
+        "median": 0.1,
+        "min": 0.08,
+        "max": 6.09
+      },
+      "target_gpu_install_ms": {
+        "median": 97.17,
+        "min": 62.11,
+        "max": 134.17
+      },
+      "timed_operations_ms": {
+        "median": 903.66,
+        "min": 795.07,
+        "max": 973.16
+      },
+      "wall_to_ready_ms": {
+        "median": 1124.95,
+        "min": 980.84,
+        "max": 4687.21
+      }
+    },
+    {
+      "kind": "prefix",
+      "tier": "ram",
+      "position_range": [
+        524096,
+        524096
+      ],
+      "samples": 3,
+      "target_restored_bytes_median": 943333760,
+      "target_lookup_read_ms": {
+        "median": 2.08,
+        "min": 1.99,
+        "max": 2.09
+      },
+      "target_deserialize_ms": {
+        "median": 199.4,
+        "min": 197.52,
+        "max": 202.99
+      },
+      "draft_lookup_read_ms": {
+        "median": 2.03,
+        "min": 2.02,
+        "max": 2.04
+      },
+      "draft_restore_ms": {
+        "median": 0.09,
+        "min": 0.09,
+        "max": 0.1
+      },
+      "target_gpu_install_ms": {
+        "median": 96.99,
+        "min": 96.37,
+        "max": 97.97
+      },
+      "timed_operations_ms": {
+        "median": 299.87,
+        "min": 299.7,
+        "max": 304.19
+      },
+      "wall_to_ready_ms": {
+        "median": 452.71,
+        "min": 449.21,
+        "max": 4186.44
+      }
+    },
+    {
+      "kind": "live",
+      "tier": "ram",
+      "position_range": [
+        524170,
+        524270
+      ],
+      "samples": 14,
+      "target_restored_bytes_median": 943541400.0,
+      "target_lookup_read_ms": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "target_deserialize_ms": {
+        "median": 189.93,
+        "min": 174.81,
+        "max": 197.41
+      },
+      "draft_lookup_read_ms": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "draft_restore_ms": {
+        "median": 0.1,
+        "min": 0.09,
+        "max": 0.1
+      },
+      "target_gpu_install_ms": {
+        "median": 64.87,
+        "min": 59.06,
+        "max": 70.86
+      },
+      "timed_operations_ms": {
+        "median": 256.74,
+        "min": 238.47,
+        "max": 265.63
+      },
+      "wall_to_ready_ms": {
+        "median": 454.02,
+        "min": 412.78,
+        "max": 585.47
+      }
+    },
+    {
+      "kind": "live",
+      "tier": "disk",
+      "position_range": [
+        524168,
+        524282
+      ],
+      "samples": 27,
+      "target_restored_bytes_median": 943559300,
+      "target_lookup_read_ms": {
+        "median": 618.13,
+        "min": 544.04,
+        "max": 625.69
+      },
+      "target_deserialize_ms": {
+        "median": 189.03,
+        "min": 172.7,
+        "max": 200.75
+      },
+      "draft_lookup_read_ms": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "draft_restore_ms": {
+        "median": 0.1,
+        "min": 0.08,
+        "max": 0.11
+      },
+      "target_gpu_install_ms": {
+        "median": 61.24,
+        "min": 45.35,
+        "max": 71.48
+      },
+      "timed_operations_ms": {
+        "median": 869.18,
+        "min": 784.67,
+        "max": 887.23
+      },
+      "wall_to_ready_ms": {
+        "median": 1081.96,
+        "min": 961.38,
+        "max": 1980.1
+      }
+    }
+  ]
+}

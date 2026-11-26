@@ -144,7 +144,21 @@ An eight-client cold test at the default 32-step quantum kept six requests on th
 
 The packed FP32 GPU index scorer and shape-dependent radix sort produced identical receipt outputs across all 42 responses in each configuration. Warm aggregate full-window decode increased from 242.6 tok/s with scalar scoring to 288.9 with packed scoring and 361.1 after changing the sort dispatch. All 59 release tests passed on the two inference GPUs, including rollback, mixed-request failure isolation, token and block selection, cache reuse and per-session memory sizing. [Scalar control](results/six-full-scalar.jsonl) · [Packed scoring control](results/six-full-packed-index.jsonl) · [GPU index timings](results/packed-index-timing.txt) · [Release tests](results/test-six-release.txt)
 
-### Long-context checks
+### KV restore and rotation measurements
+
+Eight requests reached 524,288 tokens apiece while sharing six GPU slots. Six resumed independent prior conversations, and two used a common document with distinct late receipts. We set the live RAM tier to 1 GiB and the rotation quantum to four steps to exercise disk overflow. The first wave finished in 44.04 s and the second in 39.63 s. All 16 responses matched their individual serial replays. Across the two concurrent waves the engine saved and restored 14 live states through RAM and 27 through disk, with zero save or restore failures. [Eight full-window clients and serial controls](results/eight-full-ram-disk.jsonl)
+
+| Restored state | Source | Restores | Median time in restore operations | Median wall time to last GPU install call returning |
+|---|---|---:|---:|---:|
+| 403,968-token reusable prefix | Disk | 6 | 747 ms | 3.78 s |
+| Near-full reusable prefix | RAM | 3 | 300 ms | 453 ms |
+| Near-full reusable prefix | Disk | 29 | 904 ms | 1.12 s |
+| Near-full suspended session | RAM | 14 | 257 ms | 454 ms |
+| Near-full suspended session | Disk | 27 | 869 ms | 1.08 s |
+
+The six 403,968-token prefix samples came from the preceding six-client run. The 32 near-full prefix samples came from 16 concurrent requests and their 16 serial replays. All 41 live restores came from the two concurrent waves. Timing starts at lookup and ends when the host returns from the final GPU install call. Subsequent computation follows the uploads on the CUDA streams. The measurements use the existing synchronization in the serving path. The operations column sums lookup/read, deserialization, drafter restore and GPU installation within each sample. The wall column also includes scheduling and inference interleaved with this work. At near-full context a suspended target image contains about 900 MiB. Disk samples used the normal filesystem page cache. The service defaults are 48 GiB live RAM, 128 GiB live disk and a 32-step quantum. [Per-phase medians and ranges](results/kv-restore-summary.json) · [Individual restore events](results/kv-restore-events.jsonl)
+
+### Long-context retrieval
 
 A cold 266,174-token request returned three randomly generated vault receipts in the requested order in 447.8 s. A 520,362-token continuation reused the first 266,112 prompt tokens from RAM, processed the suffix and returned its three receipts in 802.9 s. After a process restart, a changed suffix forced each request through the engine again. Both still returned all three receipts. The 266,179-token request took 27.0 s with cold weights. The 520,367-token request took 7.21 s end to end and restored 520,320 target and DSpark positions from disk. The final hybrid build repeated exact retrieval in 1.87 s and 2.59 s with warm weights, restoring both prefixes from disk. [Hybrid retrieval](results/hybrid-context.jsonl) · [Hybrid worker counters](results/hybrid-context-backend.txt)
 

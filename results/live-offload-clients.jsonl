@@ -1,0 +1,6 @@
+{"check": "auth", "proxy_port": 4000, "engine_port": 8001, "model": "DeepSeek V4.1 Flash", "ok": true, "seconds": 0.059}
+{"check": "stream", "model": "DeepSeek V4.1 Flash", "events": 27, "thinking_chars": 59, "ok": true, "seconds": 1.031}
+{"check": "codex", "version": "codex-cli 0.172.0", "tool_result_verified": true, "ok": true, "seconds": 46.007}
+{"check": "claude", "version": "2.1.296 (Claude Code)", "tool_result_verified": true, "ok": true, "seconds": 3.135}
+{"check": "pi", "version": "1.4.0", "tool_result_verified": true, "ok": true, "seconds": 3.074}
+{"check": "pi-deepseek", "version": "1.4.0", "tool_result_verified": true, "ok": true, "seconds": 2.069}
