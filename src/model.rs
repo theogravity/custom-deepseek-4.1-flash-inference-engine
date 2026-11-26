@@ -1,8 +1,7 @@
 use crate::{
-    attention::{self, AttentionState},
+    attention::AttentionState,
     draft::DraftState,
     engram::Engram,
-    moe,
     prefix::PrefixCache,
     runtime::{Dev, Runtime},
 };
@@ -10,6 +9,8 @@ use anyhow::{bail, ensure, Context, Result};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
+#[path = "batch.rs"]
+pub(crate) mod batch;
 #[path = "prompt_lookup.rs"]
 mod prompt_lookup;
 #[path = "residual.rs"]
@@ -145,6 +146,81 @@ impl Drop for DraftStats {
     }
 }
 
+struct ForwardItem<'a> {
+    cache: &'a mut AttentionState,
+    ids: &'a [u32],
+    pos: usize,
+    rows: usize,
+    logit_rows: usize,
+    capture_features: bool,
+}
+
+/// One request's model state. After the last prefill chunk, ids[pos] is the
+/// sampled anchor already delivered to the client and awaiting target KV.
+pub(crate) struct Session {
+    ids: Vec<u32>,
+    prompt_len: usize,
+    pos: usize,
+    limit: usize,
+    temperature: f32,
+    cache: AttentionState,
+    draft: Option<DraftState>,
+    lookup: prompt_lookup::PromptLookup,
+    stats: DraftStats,
+    points: Vec<usize>,
+    next_point: usize,
+    reused: usize,
+    started: std::time::Instant,
+    emitted: usize,
+    finished: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Step {
+    pub tokens: Vec<u32>,
+    pub eos: bool,
+    pub finished: bool,
+}
+
+impl Session {
+    /// Number of committed target input positions currently in this request's KV.
+    pub(crate) fn processed_tokens(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn is_prefill(&self) -> bool {
+        !self.finished && self.pos < self.prompt_len
+    }
+
+    fn emit(&mut self, mut tokens: Vec<u32>, next: u32) -> Step {
+        self.emitted += tokens.len() + 1;
+        let eos = next == 1;
+        self.finished = eos || self.emitted == self.limit;
+        if !eos {
+            tokens.push(next);
+            if !self.finished {
+                self.ids.push(next);
+            }
+        }
+        Step {
+            tokens,
+            eos,
+            finished: self.finished,
+        }
+    }
+}
+
+struct DecodePlan {
+    source: ProposalSource,
+    rows: usize,
+}
+
+struct DecodeWork<'a> {
+    index: usize,
+    session: &'a mut Session,
+    plan: DecodePlan,
+}
+
 pub struct Model {
     prefix: PrefixCache,
     spec_k: usize,
@@ -197,66 +273,16 @@ impl Model {
         logit_rows: usize,
         capture_features: bool,
     ) -> Result<Target> {
-        ensure!(
-            logit_rows <= b,
-            "requested more logit rows than target inputs"
-        );
-        let mut features = None;
-        self.rt.layer(0)?;
-        let mut h = residual::embed(&mut self.rt, &ids[pos..pos + b])?;
-        let mut mix = residual::initial_mix(&mut self.rt, b)?;
-        let mut engram_rows: Option<crate::engram::EngramRows> = None;
-        for layer in 0..40 {
-            let stem = format!("layers.{layer}");
-            if layer == 20 {
-                let host_h = self.rt.to_host(&h)?;
-                let host_mix = self.rt.to_host(&mix)?;
-                self.rt.layer(layer)?;
-                h = self.rt.to_device(&host_h)?;
-                mix = self.rt.to_device(&host_mix)?;
-            }
-            if let Some(rows) = engram_rows.take() {
-                rows.apply(&mut self.rt, &mut h)?;
-            }
-            if capture_features && layer >= 37 {
-                if layer == 37 {
-                    features = Some(self.rt.buffer(b * 3 * DIM)?);
-                }
-                residual::capture(&self.rt, &h, features.as_mut().unwrap(), layer - 37, b)?;
-            }
-            for branch in ["attn", "ffn"] {
-                let input = residual::prepare(&mut self.rt, &stem, branch, &h, &mut mix, b)?;
-                let output = if branch == "attn" {
-                    attention::forward_dev(&mut self.rt, cache, layer, pos, &input, b)?
-                } else {
-                    moe::forward_dev(&mut self.rt, layer, &input, b)?
-                };
-                residual::expand(&self.rt, &mut h, &output, &mix, b)?;
-                if branch == "attn" && (layer == 0 || layer == 13) {
-                    // Gather the next Engram's mmap rows while this layer's
-                    // attention output and residual expansion run on the GPU.
-                    engram_rows =
-                        Some(
-                            self.engram
-                                .gather(&self.rt.weights, layer + 1, ids, pos, b)?,
-                        );
-                }
-            }
-        }
-        let logits = if logit_rows > 0 {
-            let input = residual::readout(
-                &mut self.rt,
-                &h,
-                &mut mix,
-                "norm.weight",
-                b - logit_rows,
-                logit_rows,
-            )?;
-            Some(self.rt.linear_dev("head.weight", &input, logit_rows, 1)?)
-        } else {
-            None
-        };
-        Ok(Target { logits, features })
+        self.forward_batch(&mut [ForwardItem {
+            cache,
+            ids,
+            pos,
+            rows: b,
+            logit_rows,
+            capture_features,
+        }])?
+        .pop()
+        .context("missing single-sequence target")
     }
     pub fn generate(
         &mut self,
@@ -275,38 +301,57 @@ impl Model {
         cancelled: impl Fn() -> bool,
         mut emit: impl FnMut(u32) -> bool,
     ) -> Result<usize> {
+        let mut session = self.start_request(input.to_vec(), limit, temperature)?;
+        let mut delivered = 0;
+        while !session.finished {
+            ensure!(!cancelled(), "request cancelled");
+            let step = self.step_batch(&mut [&mut session]).pop().unwrap()?;
+            for token in step.tokens {
+                ensure!(!cancelled(), "request cancelled");
+                delivered += 1;
+                if !emit(token) {
+                    return Ok(delivered);
+                }
+            }
+            if step.eos {
+                ensure!(!cancelled(), "request cancelled");
+                delivered += 1;
+            }
+        }
+        Ok(delivered)
+    }
+
+    pub(crate) fn start_request(
+        &mut self,
+        ids: Vec<u32>,
+        limit: usize,
+        temperature: f32,
+    ) -> Result<Session> {
+        let prompt_len = ids.len();
         ensure!(
-            !input.is_empty() && input.len() <= self.max_ctx && input.iter().all(|t| *t < 129280),
+            prompt_len > 0 && prompt_len <= self.max_ctx && ids.iter().all(|t| *t < 129280),
             "invalid prompt length or token ID"
         );
         ensure!(
             temperature.is_finite() && temperature >= 0.,
             "invalid temperature"
         );
-        let limit = limit.min(self.max_ctx - input.len());
-        if limit == 0 {
-            return Ok(0);
-        }
-        let mut ids = input.to_vec();
-        // Cache a completed prefill chunk. Reusing the same chunk boundaries preserves
-        // the sparse attention and projection rounding seen by a fresh request.
-        let points = if self.prefix.enabled() {
-            checkpoints(input.len(), self.chunk)
+        let limit = limit.min(self.max_ctx - prompt_len);
+        let points = if limit > 0 && self.prefix.enabled() {
+            checkpoints(prompt_len, self.chunk)
         } else {
             vec![]
         };
-        let snapshot_pos = points.last().copied().unwrap_or(0);
-        let span = input.len().min(128);
-        let (mut pos, mut cache) =
-            cached(self.prefix.restore(input, snapshot_pos, span), "restore")
-                .flatten()
-                .unwrap_or_default();
-        let mut next_point = points.partition_point(|&at| at <= pos);
+        let span = prompt_len.min(128);
+        let (pos, mut cache) = points
+            .last()
+            .and_then(|&last| cached(self.prefix.restore(&ids, last, span), "restore").flatten())
+            .unwrap_or_default();
         let mut draft = (self.spec_k > 0 && limit > 2).then(DraftState::new);
         if pos > 0 && draft.is_some() {
-            let restored = self.prefix.read_draft(input, pos, span).and_then(|bytes| {
+            let restored = self.prefix.read_draft(&ids, pos, span).and_then(|bytes| {
                 bytes
-                    .map(|bytes| DraftState::restore(&mut self.rt, pos, &bytes))
+                    .map(|b| DraftState::restore(&mut self.rt, pos, &b))
                     .transpose()
             });
             if let Some(state) = cached(restored, "DSpark restore").flatten() {
@@ -314,130 +359,275 @@ impl Model {
                 draft = Some(state);
             }
         }
-        let mut draft_stats = DraftStats::default();
-        let lookup = prompt_lookup::PromptLookup::new(input, self.lookup);
-        cache.begin_prefill(input.len());
-        let reused = pos;
-        let started = std::time::Instant::now();
-        let mut first = None;
-        while pos < input.len() {
-            ensure!(!cancelled(), "request cancelled");
-            if points.get(next_point) == Some(&pos) {
-                if cached(self.prefix.store(input, pos, span, &cache), "store").is_some() {
-                    if let Some(state) = draft.as_ref().filter(|d| d.ready(pos)) {
-                        let saved = state
-                            .snapshot(&mut self.rt, pos)
-                            .and_then(|data| self.prefix.write_draft(input, pos, span, &data));
-                        cached(saved, "DSpark store");
+        let next_point = points.partition_point(|&at| at <= pos);
+        let lookup = prompt_lookup::PromptLookup::new(&ids, self.lookup);
+        cache.begin_prefill_with_limit(prompt_len, prompt_len + limit);
+        Ok(Session {
+            ids,
+            prompt_len,
+            pos,
+            limit,
+            temperature,
+            cache,
+            draft,
+            lookup,
+            stats: DraftStats::default(),
+            points,
+            next_point,
+            reused: pos,
+            started: std::time::Instant::now(),
+            emitted: 0,
+            finished: limit == 0,
+        })
+    }
+
+    /// Advance each admitted request by one prefill chunk or one verification
+    /// round. Each result corresponds to its input slot. Drop failed sessions.
+    pub(crate) fn step_batch(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
+        let mut results: Vec<_> = (0..sessions.len()).map(|_| None).collect();
+        let mut work = Vec::new();
+        let mut rows = 0;
+        for (index, session) in sessions.iter_mut().enumerate() {
+            if session.finished {
+                results[index] = Some(Ok(Step {
+                    finished: true,
+                    ..Step::default()
+                }));
+            } else if session.is_prefill() {
+                // Retain the same chunk boundaries and prefill precision as the
+                // snapshot's original request. Admit just one chunk this tick.
+                results[index] = Some(self.prefill_step(session));
+            } else {
+                match self.plan_decode(session) {
+                    Ok(plan) => {
+                        if rows + plan.rows > 512 {
+                            self.decode_group(&mut work, &mut results);
+                            work.clear();
+                            rows = 0;
+                        }
+                        rows += plan.rows;
+                        work.push(DecodeWork {
+                            index,
+                            session,
+                            plan,
+                        });
                     }
+                    Err(e) => results[index] = Some(Err(e)),
                 }
-                next_point += 1;
             }
-            let n = self.chunk.min(input.len() - pos);
-            let last = pos + n == input.len();
-            // Seed only chunks needed by the next saved window or the actual decode.
-            let horizon = points.get(next_point).copied().unwrap_or(input.len());
-            let observe = draft.is_some() && pos + n > horizon.saturating_sub(128);
-            let target = self.forward(&mut cache, &ids, pos, n, usize::from(last), observe)?;
-            if let Some(draft) = draft.as_mut().filter(|_| observe) {
-                draft.observe(
-                    &mut self.rt,
-                    target
-                        .features
-                        .as_ref()
-                        .context("missing DSpark prefill features")?,
-                    pos,
-                    n,
-                )?;
-            }
-            if last {
-                first = Some(Scores::read(&mut self.rt, &target, 1, temperature)?);
-            }
-            pos += n;
         }
+        if !work.is_empty() {
+            self.decode_group(&mut work, &mut results);
+        }
+        results.into_iter().map(Option::unwrap).collect()
+    }
+
+    fn prefill_step(&mut self, session: &mut Session) -> Result<Step> {
+        let pos = session.pos;
+        let prompt = &session.ids[..session.prompt_len];
+        let span = prompt.len().min(128);
+        if session.points.get(session.next_point) == Some(&pos) {
+            if cached(
+                self.prefix.store(prompt, pos, span, &session.cache),
+                "store",
+            )
+            .is_some()
+            {
+                if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
+                    let saved = draft
+                        .snapshot(&mut self.rt, pos)
+                        .and_then(|data| self.prefix.write_draft(prompt, pos, span, &data));
+                    cached(saved, "DSpark store");
+                }
+            }
+            session.next_point += 1;
+        }
+        let n = self.chunk.min(prompt.len() - pos);
+        let last = pos + n == prompt.len();
+        let horizon = session
+            .points
+            .get(session.next_point)
+            .copied()
+            .unwrap_or(prompt.len());
+        let observe = session.draft.is_some() && pos + n > horizon.saturating_sub(128);
+        let target = self.forward(
+            &mut session.cache,
+            prompt,
+            pos,
+            n,
+            usize::from(last),
+            observe,
+        )?;
+        if let Some(draft) = session.draft.as_mut().filter(|_| observe) {
+            draft.observe(
+                &mut self.rt,
+                target
+                    .features
+                    .as_ref()
+                    .context("missing DSpark prefill features")?,
+                pos,
+                n,
+            )?;
+        }
+        session.pos += n;
+        if !last {
+            return Ok(Step::default());
+        }
+        let token = Scores::read(&mut self.rt, &target, 1, session.temperature)?.sample(0)?;
         eprintln!(
             "prefill tokens={} reused={} seconds={:.3}",
-            input.len(),
-            reused,
-            started.elapsed().as_secs_f64()
+            session.prompt_len,
+            session.reused,
+            session.started.elapsed().as_secs_f64()
         );
-        let mut token = first.context("missing prefill logits")?.sample(0)?;
-        let mut emitted = 0;
-        loop {
-            ensure!(!cancelled(), "request cancelled");
-            emitted += 1;
-            if token == 1 || !emit(token) || emitted == limit {
-                return Ok(emitted);
-            }
-            // A restored target snapshot can start after the drafter's window.
-            // Seed the complete visible history before generating its first proposal.
-            ids.push(token);
-            let remaining = limit - emitted - 1;
-            let width = self.spec_k.min(remaining);
-            let learned = draft.as_mut().filter(|d| width > 0 && d.ready(pos));
-            let mut proposed = lookup.propose(&ids, remaining, learned.is_some());
-            let mut source = if proposed.is_empty() {
-                ProposalSource::Target
-            } else {
-                ProposalSource::Lookup
-            };
-            if source == ProposalSource::Target {
-                if let Some(draft) = learned {
-                    source = ProposalSource::Learned;
-                    proposed = draft.propose(&mut self.rt, pos, token, width)?;
-                    ensure!(
-                        proposed.len() <= width && proposed.iter().all(|&t| t < 129280),
-                        "invalid DSpark proposal"
-                    );
-                }
-            }
-            ids.extend_from_slice(&proposed);
-            let batch = 1 + proposed.len();
-            if batch > 1 {
-                cache.begin_verify(pos, batch)?;
-            }
-            self.rt.verification = batch > 1;
-            let target = self.forward(&mut cache, &ids, pos, batch, batch, draft.is_some());
-            self.rt.verification = false;
-            let target = target?;
-            let scores = Scores::read(&mut self.rt, &target, batch, temperature)?;
-            let (accepted, next) = verify_proposals(&proposed, |row| scores.sample(row))?;
-            let committed = accepted + 1; // the previously emitted input anchor is always committed
-            if batch > 1 {
-                cache.finish_verify(committed)?;
-            }
-            draft_stats.record(source, proposed.len(), accepted);
-            if let Some(draft) = draft.as_mut() {
-                if source == ProposalSource::Learned {
-                    draft.report_confidence(proposed.len(), accepted);
-                }
-                draft.observe(
-                    &mut self.rt,
-                    target
-                        .features
-                        .as_ref()
-                        .context("missing DSpark verification features")?,
-                    pos,
-                    committed,
-                )?;
-            }
-            pos += committed;
-            ids.truncate(pos);
-            for &verified in &proposed[..accepted] {
-                ensure!(!cancelled(), "request cancelled");
-                emitted += 1;
-                if !emit(verified) {
-                    return Ok(emitted);
-                }
-            }
-            token = next;
+        Ok(session.emit(Vec::new(), token))
+    }
+
+    fn plan_decode(&mut self, session: &mut Session) -> Result<DecodePlan> {
+        let remaining = session.limit - session.emitted - 1;
+        let width = self.spec_k.min(remaining);
+        let learned = session
+            .draft
+            .as_mut()
+            .filter(|d| width > 0 && d.ready(session.pos));
+        let mut proposed = session
+            .lookup
+            .propose(&session.ids, remaining, learned.is_some());
+        let source = if !proposed.is_empty() {
+            ProposalSource::Lookup
+        } else if let Some(draft) = learned {
+            self.rt.layer(39)?;
+            proposed = draft.propose(&mut self.rt, session.pos, session.ids[session.pos], width)?;
+            ensure!(
+                proposed.len() <= width && proposed.iter().all(|&t| t < 129280),
+                "invalid DSpark proposal"
+            );
+            ProposalSource::Learned
+        } else {
+            ProposalSource::Target
+        };
+        let rows = proposed.len() + 1;
+        if rows > 1 {
+            session.cache.begin_verify(session.pos, rows)?;
         }
+        session.ids.extend_from_slice(&proposed);
+        Ok(DecodePlan { source, rows })
+    }
+
+    fn decode_group(&mut self, work: &mut [DecodeWork<'_>], results: &mut [Option<Result<Step>>]) {
+        let mut items: Vec<_> = work
+            .iter_mut()
+            .map(|w| ForwardItem {
+                cache: &mut w.session.cache,
+                ids: &w.session.ids,
+                pos: w.session.pos,
+                rows: w.plan.rows,
+                logit_rows: w.plan.rows,
+                capture_features: w.session.draft.is_some(),
+            })
+            .collect();
+        self.rt.verification = items.len() > 1 || items[0].rows > 1;
+        let targets = self.forward_batch(&mut items);
+        self.rt.verification = false;
+        match targets {
+            Ok(targets) if targets.len() == work.len() => {
+                for (one, target) in work.iter_mut().zip(targets) {
+                    results[one.index] = Some(self.finish_decode(one.session, &one.plan, target));
+                }
+            }
+            other => {
+                let message = other.err().map_or_else(
+                    || "wrong number of target outputs".to_string(),
+                    |e| format!("{e:#}"),
+                );
+                for one in work {
+                    results[one.index] =
+                        Some(Err(anyhow::anyhow!("target forward failed: {message}")));
+                }
+            }
+        }
+    }
+
+    fn finish_decode(
+        &mut self,
+        session: &mut Session,
+        plan: &DecodePlan,
+        target: Target,
+    ) -> Result<Step> {
+        let pos = session.pos;
+        let proposed = &session.ids[pos + 1..];
+        let scores = Scores::read(&mut self.rt, &target, plan.rows, session.temperature)?;
+        let (accepted, next) = verify_proposals(proposed, |row| scores.sample(row))?;
+        let committed = accepted + 1;
+        if plan.rows > 1 {
+            session.cache.finish_verify(committed)?;
+        }
+        session.stats.record(plan.source, proposed.len(), accepted);
+        if let Some(draft) = session.draft.as_mut() {
+            if plan.source == ProposalSource::Learned {
+                draft.report_confidence(proposed.len(), accepted);
+            }
+            draft.observe(
+                &mut self.rt,
+                target
+                    .features
+                    .as_ref()
+                    .context("missing DSpark verification features")?,
+                pos,
+                committed,
+            )?;
+        }
+        let tokens = proposed[..accepted].to_vec();
+        session.pos += committed;
+        session.ids.truncate(session.pos);
+        Ok(session.emit(tokens, next))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_sessions_emit_verified_tokens_and_count_eos_once() {
+        fn sequence(limit: usize) -> Session {
+            let ids = vec![5, 6, 7];
+            Session {
+                prompt_len: ids.len(),
+                pos: ids.len(),
+                limit,
+                temperature: 0.,
+                cache: AttentionState::default(),
+                draft: None,
+                lookup: prompt_lookup::PromptLookup::new(&ids, Default::default()),
+                stats: DraftStats::default(),
+                points: vec![],
+                next_point: 0,
+                reused: 0,
+                started: std::time::Instant::now(),
+                emitted: 0,
+                finished: false,
+                ids,
+            }
+        }
+        let mut length = sequence(3);
+        let mut stop = sequence(12);
+        let first = length.emit(vec![], 20);
+        assert_eq!(first.tokens, [20]);
+        assert!(!first.finished && !first.eos);
+        assert_eq!(length.ids[length.pos], 20);
+        let last = length.emit(vec![30], 40);
+        assert_eq!(last.tokens, [30, 40]);
+        assert!(last.finished && !last.eos);
+        assert_eq!(length.emitted, 3);
+        assert_eq!(stop.emitted, 0);
+        let first = stop.emit(vec![], 22);
+        assert_eq!(first.tokens, [22]);
+        let last = stop.emit(vec![90, 91], 1);
+        assert_eq!(last.tokens, [90, 91]);
+        assert!(last.finished && last.eos);
+        assert_eq!(stop.emitted, 4);
+    }
 
     #[test]
     fn prefix_boundaries_and_draft_observations_cover_each_live_window() {

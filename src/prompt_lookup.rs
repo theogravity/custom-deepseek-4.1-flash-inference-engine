@@ -34,19 +34,19 @@ pub(super) fn configured() -> Result<Config> {
     })
 }
 
-pub(super) struct PromptLookup<'a> {
-    prompt: &'a [u32],
+pub(super) struct PromptLookup {
+    prompt_len: usize,
     config: Config,
     latest: HashMap<[u32; 4], usize>,
     previous: Vec<u32>,
 }
-impl<'a> PromptLookup<'a> {
+impl PromptLookup {
     /// Restrict lookup to the source text supplied by this request. Generic
     /// code generation can reuse punctuation from its own output frequently
     /// even when the subsequent code differs, wasting a long verification pass.
-    pub(super) fn new(prompt: &'a [u32], config: Config) -> Self {
+    pub(super) fn new(prompt: &[u32], config: Config) -> Self {
         let mut lookup = Self {
-            prompt,
+            prompt_len: prompt.len(),
             config,
             latest: HashMap::new(),
             previous: vec![],
@@ -66,6 +66,7 @@ impl<'a> PromptLookup<'a> {
         if ids.len() < 4 || width == 0 {
             return vec![];
         }
+        let prompt = &ids[..self.prompt_len];
         let n = ids.len();
         let suffix: &[u32; 4] = ids[n - 4..].try_into().unwrap();
         let mut end = self.latest.get(suffix).copied().unwrap_or(0);
@@ -76,12 +77,11 @@ impl<'a> PromptLookup<'a> {
                 break;
             }
             let mut matched = 4;
-            while matched < end.min(n).min(128)
-                && self.prompt[end - matched - 1] == ids[n - matched - 1]
+            while matched < end.min(n).min(128) && prompt[end - matched - 1] == ids[n - matched - 1]
             {
                 matched += 1;
             }
-            let score = (matched, width.min(self.prompt.len() - end));
+            let score = (matched, width.min(prompt.len() - end));
             if score > best {
                 best = score;
                 source = end;
@@ -97,12 +97,16 @@ impl<'a> PromptLookup<'a> {
             (true, 32..64) => available.min(64),
             _ => available,
         };
-        self.prompt[source..source + length].to_vec()
+        prompt[source..source + length].to_vec()
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn history(prompt: &[u32], suffix: &[u32]) -> Vec<u32> {
+        [prompt, &[9001], suffix].concat()
+    }
+
     fn config(adaptive: bool) -> Config {
         Config {
             max_width: 128,
@@ -126,7 +130,7 @@ mod tests {
             (64, 128),
             (95, 128),
         ] {
-            let mut history = vec![9000; 40];
+            let mut history = history(&prompt, &[9000; 40]);
             history.extend_from_slice(&prompt[end - matched..end]);
             assert_eq!(
                 lookup.propose(&history, 150, false),
@@ -141,7 +145,10 @@ mod tests {
             assert_eq!(lookup.propose(&history, 3, false), prompt[end..end + 3]);
         }
         // A long match at the end of the prompt has only a short continuation.
-        assert_eq!(lookup.propose(&prompt[160..258], 128, false), prompt[258..]);
+        assert_eq!(
+            lookup.propose(&history(&prompt, &prompt[160..258]), 128, false),
+            prompt[258..]
+        );
         let capped = PromptLookup::new(
             &prompt,
             Config {
@@ -149,9 +156,12 @@ mod tests {
                 adaptive: true,
             },
         );
-        assert_eq!(capped.propose(&prompt[..64], 128, false), prompt[64..73]);
+        assert_eq!(
+            capped.propose(&history(&prompt, &prompt[..64]), 128, false),
+            prompt[64..73]
+        );
         assert!(PromptLookup::new(&prompt, Config::default())
-            .propose(&prompt[..64], 128, false)
+            .propose(&history(&prompt, &prompt[..64]), 128, false)
             .is_empty());
     }
 
@@ -159,19 +169,35 @@ mod tests {
     fn longest_source_suffix_wins_and_never_crosses_prompt_end() {
         let prompt = [9, 8, 0, 1, 2, 3, 4, 5, 6, 7, 9, 9, 0, 1, 2, 3, 77];
         let lookup = PromptLookup::new(&prompt, config(false));
-        assert_eq!(lookup.propose(&[9, 8, 0, 1, 2, 3], 4, false), [4, 5, 6, 7]);
-        assert_eq!(lookup.propose(&[9, 9, 0, 1, 2, 3], 128, false), [77]);
+        assert_eq!(
+            lookup.propose(&history(&prompt, &[9, 8, 0, 1, 2, 3]), 4, false),
+            [4, 5, 6, 7]
+        );
+        assert_eq!(
+            lookup.propose(&history(&prompt, &[9, 9, 0, 1, 2, 3]), 128, false),
+            [77]
+        );
         assert!(lookup
-            .propose(&[101, 102, 103, 104, 101, 102, 103, 104], 128, false)
+            .propose(
+                &history(&prompt, &[101, 102, 103, 104, 101, 102, 103, 104]),
+                128,
+                false
+            )
             .is_empty());
-        assert!(lookup.propose(&[1, 2, 3], 128, false).is_empty());
+        assert!(lookup
+            .propose(&history(&prompt, &[1, 2, 3]), 128, false)
+            .is_empty());
         let prompt: Vec<_> = (0..140).collect();
         assert_eq!(
-            PromptLookup::new(&prompt, config(false)).propose(&[0, 1, 2, 3], 128, false),
+            PromptLookup::new(&prompt, config(false)).propose(
+                &history(&prompt, &[0, 1, 2, 3]),
+                128,
+                false
+            ),
             (4..132).collect::<Vec<_>>()
         );
         assert!(PromptLookup::new(&prompt, Config::default())
-            .propose(&[0, 1, 2, 3], 128, false)
+            .propose(&history(&prompt, &[0, 1, 2, 3]), 128, false)
             .is_empty());
     }
 }
