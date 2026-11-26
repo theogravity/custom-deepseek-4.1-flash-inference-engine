@@ -110,6 +110,39 @@ impl Weights {
         );
         Ok(w)
     }
+    /// Swap only the three MTP shards after checking the complete overlay.
+    pub fn overlay_mtp(&mut self, root: &Path) -> Result<()> {
+        let overlay = Self::open(root)?;
+        ensure!(
+            overlay.entries.len()
+                == self
+                    .entries
+                    .keys()
+                    .filter(|k| k.starts_with("mtp."))
+                    .count(),
+            "incomplete MTP overlay"
+        );
+        for (name, item) in &overlay.entries {
+            let original = self
+                .entries
+                .get(name)
+                .context("unexpected drafter tensor")?;
+            ensure!(
+                name.starts_with("mtp.")
+                    && original.shape == item.shape
+                    && original.dtype == item.dtype,
+                "incompatible drafter tensor {name}"
+            );
+        }
+        let offset = self.maps.len();
+        self.maps.extend(overlay.maps);
+        self.entries
+            .extend(overlay.entries.into_iter().map(|(key, mut e)| {
+                e.shard += offset;
+                (key, e)
+            }));
+        Ok(())
+    }
     pub fn tensor(&self, name: &str) -> Result<Tensor<'_>> {
         let t = self
             .entries

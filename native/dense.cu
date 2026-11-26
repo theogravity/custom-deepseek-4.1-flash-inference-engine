@@ -1,6 +1,7 @@
 // Rust owns descriptors and model ordering. This unit implements dense
 // projections with cuBLAS.
 #include "head.cuh"
+#include "mxfp8.cuh"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -53,7 +54,7 @@ struct Buffer {
 struct Context {
   int device;
   cublasHandle_t blas = nullptr;
-  Buffer input, short_input, output;
+  Buffer input, short_input, output, partial;
   ~Context() {
     if (blas)
       cublasDestroy(blas);
@@ -89,8 +90,14 @@ extern "C" void ds_dense_destroy(Context *c) {
   delete c;
 }
 extern "C" void ds_free(int device, void *ptr) {
-  cudaSetDevice(device);
+  int current;
+  if (cudaGetDevice(&current) != cudaSuccess)
+    return;
+  if (current != device)
+    cudaSetDevice(device);
   cudaFree(ptr);
+  if (current != device)
+    cudaSetDevice(current);
 }
 extern "C" int ds_set_device(int device) {
   CUDA(cudaSetDevice(device));
@@ -111,21 +118,40 @@ extern "C" int ds_upload(int device, void **out, const void *src,
   CUDA(cudaSetDevice(device));
   size_t n = size_t(rows) * cols;
   Buffer result;
-  if (mode == 3) {
-    Buffer bf16;
+  if (mode == 4) {
+    Buffer raw;
+    size_t scale_n=size_t(rows/32)*(cols/32);
+    if (result.resize(n+scale_n) || raw.resize(n)) return -1;
+    CUDA(cudaMemcpy(raw.ptr,src,n,cudaMemcpyHostToDevice));
+    CUDA(cudaMemcpy(static_cast<unsigned char*>(result.ptr)+n,sc,scale_n,cudaMemcpyHostToDevice));
+    mx_retile<<<dim3(rows/64,cols/16),128>>>(static_cast<const unsigned char*>(raw.ptr),
+        static_cast<uint2*>(result.ptr),rows,cols);
+    CUDA(cudaGetLastError());
+    CUDA(cudaDeviceSynchronize());
+    *out=result.ptr;result.ptr=nullptr;return 0;
+  }
+  if (mode == 3 || mode == 7) {
+    Buffer bf16, packed;
     if (result.resize(n + n / 32) || bf16.resize(n * 2))
       return -1;
     CUDA(cudaMemcpy(bf16.ptr, src, n * 2, cudaMemcpyHostToDevice));
+    if (mode==7 && packed.resize(n)) return -1;
+    auto raw = mode==7 ? packed.ptr : result.ptr;
     pack_head<<<(n + 255) / 256, 256>>>((__nv_bfloat16 *)bf16.ptr,
-                                        (__nv_fp8_e4m3 *)result.ptr,
+                                        (__nv_fp8_e4m3 *)raw,
                                         (unsigned char *)result.ptr + n, n);
     CUDA(cudaGetLastError());
+    if(mode==7){
+      mx_retile<<<dim3(rows/64,cols/16),128>>>(static_cast<const unsigned char*>(raw),
+          static_cast<uint2*>(result.ptr),rows,cols);
+      CUDA(cudaGetLastError());
+    }
     CUDA(cudaDeviceSynchronize());
     *out = result.ptr;
     result.ptr = nullptr;
     return 0;
   }
-  if (result.resize(n * (mode == 0 ? 4 : 2)))
+  if (result.resize(n * (mode == 0 || mode == 5 ? 4 : 2)))
     return -1;
   if (mode != 2) {
     CUDA(cudaMemcpy(result.ptr, src, result.cap, cudaMemcpyHostToDevice));
@@ -160,33 +186,76 @@ __global__ void prepare(const float *x, __nv_bfloat16 *y, size_t n,
   if (i < n)
     y[i] = __float2bfloat16_rn(a);
 }
-extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
-                       int rows, int cols, int batch, int groups, int mode) {
+extern "C" int ds_alloc_f32(int device, float **out, size_t n) {
+  CUDA(cudaSetDevice(device));
+  CUDA(cudaMalloc(out, n * sizeof(float)));
+  return 0;
+}
+extern "C" int ds_copy_f32(int device, float *dst, const float *src, size_t n,
+                           int to_host) {
+  CUDA(cudaSetDevice(device));
+  CUDA(cudaMemcpy(dst, src, n * sizeof(float),
+                  to_host == 2 ? cudaMemcpyDeviceToDevice :
+                  to_host == 1 ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice));
+  return 0;
+}
+__global__ void round_bf16(float *data, size_t n) {
+  size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < n)
+    data[i] = __bfloat162float(__float2bfloat16_rn(data[i]));
+}
+extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
+                          int rows, int cols, int batch, int groups, int mode,
+                          int round_output, int prefill) {
   CUDA(cudaSetDevice(c->device));
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
-  if (c->input.resize(nx * 4) || c->output.resize(ny * 4))
-    return -1;
-  CUDA(cudaMemcpy(c->input.ptr, x, nx * 4, cudaMemcpyHostToDevice));
   if (mode == 3) {
-    head_gemv<<<(rows + 7) / 8, 256>>>(
-        (const __nv_fp8_e4m3 *)w,
-        (const unsigned char *)w + size_t(rows) * cols,
-        (const float *)c->input.ptr, (float *)c->output.ptr, rows, cols);
+    auto weights = static_cast<const __nv_fp8_e4m3 *>(w);
+    auto scales = static_cast<const unsigned char *>(w) + size_t(rows) * cols;
+    if (batch == 1)
+      head_gemv<1><<<(rows + 7) / 8, 256>>>(weights, scales, x, y, rows, cols, batch);
+    else
+      head_gemv<4><<<dim3((rows + 7) / 8, (batch+3)/4), 256>>>(weights, scales, x, y, rows, cols, batch);
     CUDA(cudaGetLastError());
-    CUDA(cudaMemcpy(y, c->output.ptr, ny * 4, cudaMemcpyDeviceToHost));
     return 0;
   }
-  void *a = c->input.ptr;
+  if(mode==5 || mode==6){
+    int splits=(cols+1023)/1024;
+    if(c->partial.resize(size_t(splits)*ny*sizeof(float)))return -1;
+    dim3 grid(rows,(batch+3)/4,splits);
+    if(mode==5)stable_dot<<<grid,128>>>(static_cast<const float*>(w),x,static_cast<float*>(c->partial.ptr),rows,cols,batch,groups,splits);
+    else stable_dot<<<grid,128>>>(static_cast<const __nv_bfloat16*>(w),x,static_cast<float*>(c->partial.ptr),rows,cols,batch,groups,splits);
+    CUDA(cudaGetLastError());
+    mx_sum<<<(ny+255)/256,256>>>(static_cast<const float*>(c->partial.ptr),y,ny,splits,round_output);
+    CUDA(cudaGetLastError());
+    return 0;
+  }
+  const void *a = x;
   auto kind = CUDA_R_32F;
   if (mode) {
     if (c->short_input.resize(nx * 2))
       return -1;
     prepare<<<(nx + 255) / 256, 256>>>((float *)a,
                                        (__nv_bfloat16 *)c->short_input.ptr, nx,
-                                       mode == 2 && batch > 128);
+                                       prefill && (mode == 2 || mode == 4) && batch > 128);
     CUDA(cudaGetLastError());
     a = c->short_input.ptr;
     kind = CUDA_R_16BF;
+  }
+  if (mode == 4 || mode == 7) {
+    int splits=std::max(1,std::min(cols/32, (512*64+rows-1)/rows));
+    if(c->partial.resize(size_t(splits)*ny*sizeof(float)))return -1;
+    auto weights=static_cast<const uint2*>(w);
+    auto scales=static_cast<const unsigned char*>(w)+size_t(rows)*cols;
+    auto values=static_cast<const __nv_bfloat16*>(a);
+    auto parts=static_cast<float*>(c->partial.ptr);
+    dim3 grid(rows/64,(batch+7)/8,splits);
+    if(mode==7)mx_project<true><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);
+    else mx_project<false><<<grid,128>>>(weights,scales,values,parts,rows,cols,batch,groups,splits);
+    CUDA(cudaGetLastError());
+    mx_sum<<<(ny+255)/256,256>>>(static_cast<const float*>(c->partial.ptr),y,ny,splits,round_output || mode==7);
+    CUDA(cudaGetLastError());
+    return 0;
   }
   int block = rows / groups;
   float alpha = 1, beta = 0;
@@ -195,10 +264,27 @@ extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
     BLAS(cublasGemmEx(c->blas, CUBLAS_OP_T, CUBLAS_OP_N, block, batch, cols,
                       &alpha, (char *)w + size_t(g) * block * cols * item, kind,
                       cols, (char *)a + size_t(g) * cols * item, kind,
-                      groups * cols, &beta, (float *)c->output.ptr + g * block,
-                      CUDA_R_32F, rows, CUBLAS_COMPUTE_32F,
-                      CUBLAS_GEMM_DEFAULT));
+                      groups * cols, &beta, y + g * block, CUDA_R_32F, rows,
+                      CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
   }
+  if (round_output) {
+    round_bf16<<<(ny + 255) / 256, 256>>>(y, ny);
+    CUDA(cudaGetLastError());
+  }
+  return 0;
+}
+
+// Host entry point used by the small standalone numeric test.
+extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
+                       int rows, int cols, int batch, int groups, int mode) {
+  CUDA(cudaSetDevice(c->device));
+  size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
+  if (c->input.resize(nx * 4) || c->output.resize(ny * 4))
+    return -1;
+  CUDA(cudaMemcpy(c->input.ptr, x, nx * 4, cudaMemcpyHostToDevice));
+  if (ds_project(c, w, (const float *)c->input.ptr, (float *)c->output.ptr,
+                 rows, cols, batch, groups, mode, 0, 1))
+    return -1;
   CUDA(cudaMemcpy(y, c->output.ptr, ny * 4, cudaMemcpyDeviceToHost));
   return 0;
 }

@@ -7,7 +7,6 @@ use crate::{
     runtime::{Dev, Runtime},
 };
 use anyhow::{bail, ensure, Context, Result};
-use rand::Rng;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -72,52 +71,16 @@ fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
     }
 }
 
-enum Scores {
-    Greedy(Vec<u32>),
-    Logits(Vec<f32>),
-}
-
+// The target draws one independent sample for each candidate position on GPU.
+// Rejected suffix samples are discarded with the corresponding target state.
+struct Scores(Vec<u32>);
 impl Scores {
-    fn read(rt: &mut Runtime, target: &Target, rows: usize, temperature: f32) -> Result<Self> {
-        let logits = target.logits.as_ref().context("missing target scores")?;
-        ensure!(
-            logits.len() == rows * 129280,
-            "invalid target score dimensions"
-        );
-        if temperature == 0. {
-            Ok(Self::Greedy(rt.argmax(logits, rows)?))
-        } else {
-            Ok(Self::Logits(rt.to_host(logits)?))
-        }
+    fn read(rt:&mut Runtime,target:&Target,rows:usize,temperature:f32)->Result<Self>{
+        let logits=target.logits.as_ref().context("missing target scores")?;
+        Ok(Self(rt.sample(logits,rows,temperature)?))
     }
-
-    fn sample(&self, row: usize, temperature: f32, rng: &mut impl Rng) -> Result<u32> {
-        match self {
-            Self::Greedy(tokens) => tokens.get(row).copied().context("missing target argmax"),
-            Self::Logits(logits) => {
-                let values = logits
-                    .get(row * 129280..(row + 1) * 129280)
-                    .context("missing target logits")?;
-                ensure!(
-                    values.iter().all(|v| v.is_finite()),
-                    "nonfinite target logits"
-                );
-                let mut best = f32::NEG_INFINITY;
-                let mut token = 0;
-                for (i, &v) in values.iter().enumerate() {
-                    let u: f32 = rng.sample(rand::distributions::Open01);
-                    let score = v - temperature * (-u.ln()).ln();
-                    if score > best {
-                        best = score;
-                        token = i as u32;
-                    }
-                }
-                Ok(token)
-            }
-        }
-    }
+    fn sample(&self,row:usize)->Result<u32>{self.0.get(row).copied().context("missing target sample")}
 }
-
 // Consume independent target draws only through the first rejection. The next
 // anchor is always sampled by the target, including when every proposal agrees.
 fn verify_proposals(
@@ -375,11 +338,10 @@ impl Model {
             reused,
             started.elapsed().as_secs_f64()
         );
-        let mut rng = rand::thread_rng();
         let mut token =
             first
                 .context("missing prefill logits")?
-                .sample(0, temperature, &mut rng)?;
+                .sample(0)?;
         let mut emitted = 0;
         loop {
             ensure!(!cancelled(), "request cancelled");
@@ -414,7 +376,7 @@ impl Model {
             let target = target?;
             let scores = Scores::read(&mut self.rt, &target, batch, temperature)?;
             let (accepted, next) =
-                verify_proposals(&proposed, |row| scores.sample(row, temperature, &mut rng))?;
+                verify_proposals(&proposed, |row| scores.sample(row))?;
             let committed = accepted + 1; // the previously emitted input anchor is always committed
             if batch > 1 {
                 cache.finish_verify(committed)?;

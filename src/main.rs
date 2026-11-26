@@ -1,9 +1,12 @@
 mod api;
 mod attention;
 mod chat;
+mod draft;
+mod draft_attention;
 mod engram;
 mod model;
 mod moe;
+mod prefix;
 mod runtime;
 mod weights;
 
@@ -23,6 +26,12 @@ struct Args {
     max_context: usize,
     #[arg(long, global = true, default_value_t = 32)]
     chunk_size: usize,
+    /// Choose the checkpoint's original or code-tuned DSpark drafter.
+    #[arg(long, global = true, value_parser = ["none","released","code"])]
+    drafter: Option<String>,
+    /// Number of speculative tokens proposed per target verification.
+    #[arg(long, global = true)]
+    spec_k: Option<usize>,
     #[command(subcommand)]
     command: Action,
 }
@@ -88,6 +97,12 @@ fn select_cards() -> Result<()> {
 fn main() -> Result<()> {
     use std::io::Write;
     let args = Args::parse();
+    if let Some(name) = &args.drafter {
+        std::env::set_var("DS4_DRAFTER", name);
+    }
+    if let Some(k) = args.spec_k {
+        std::env::set_var("DS4_SPEC_K", k.to_string());
+    }
     let key = if matches!(args.command, Action::Serve { .. }) {
         let key = std::env::var("DSV41_API_KEY")
             .or_else(|_| std::env::var("LITELLM_MASTER_KEY"))

@@ -16,6 +16,8 @@ tokenizers = "0.22"
 rayon = "1"
 rand = "0.8"
 clap = { version = "4.6.10", features = ["derive"] }
+sha2 = "0.10.9"
+tempfile = "3.27.0"
 
 [profile.release]
 debug = 1

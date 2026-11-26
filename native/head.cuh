@@ -20,22 +20,27 @@ __global__ void pack_head(const __nv_bfloat16 *input, __nv_fp8_e4m3 *weights,
     scales[i / 32] = exponent + 127;
 }
 
+// Share each vocabulary weight load across a small tile of speculative rows.
+template<int Tile>
 __global__ void head_gemv(const __nv_fp8_e4m3 *weights,
                           const unsigned char *scales, const float *input,
-                          float *output, int rows, int cols) {
+                          float *output, int rows, int cols, int batch) {
   const int row = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
   const int lane = threadIdx.x & 31;
-  if (row >= rows)
-    return;
+  if (row >= rows) return;
+  const int first = blockIdx.y * Tile;
   const size_t start = size_t(row) * cols;
-  float partial = 0;
+  float acc[Tile] = {};
   for (int i = lane; i < cols; i += 32) {
     const size_t j = start + i;
-    float weight = ldexpf(float(weights[j]), int(scales[j / 32]) - 127);
-    partial = fmaf(input[i], weight, partial);
+    const float w = ldexpf(float(weights[j]), int(scales[j / 32]) - 127);
+    #pragma unroll
+    for (int t=0; t<Tile; ++t)
+      if (first+t < batch) acc[t] = fmaf(input[size_t(first+t)*cols+i], w, acc[t]);
   }
-  for (int delta = 16; delta; delta /= 2)
-    partial += __shfl_down_sync(0xffffffff, partial, delta);
-  if (lane == 0)
-    output[row] = __bfloat162float(__float2bfloat16_rn(partial));
+  #pragma unroll
+  for (int t=0; t<Tile; ++t) {
+    for (int d=16; d; d/=2) acc[t] += __shfl_down_sync(0xffffffff, acc[t], d);
+    if (!lane && first+t < batch) output[size_t(first+t)*rows+row] = __bfloat162float(__float2bfloat16_rn(acc[t]));
+  }
 }
