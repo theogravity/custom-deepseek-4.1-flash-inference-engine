@@ -3,6 +3,7 @@ use crate::{
     draft::{self, DraftInput, DraftState},
     engram::Engram,
     prefix::PrefixCache,
+    restore_timing::{timed, Host},
     runtime::{Dev, Runtime},
     swap::{SwapHandle, SwapStore},
 };
@@ -380,25 +381,36 @@ impl Model {
             vec![]
         };
         let span = prompt_len.min(128);
-        let (pos, mut cache) = points
+        let (pos, mut cache, mut timing) = points
             .last()
             .and_then(|&last| cached(self.prefix.restore(&ids, last, span), "restore").flatten())
             .unwrap_or_default();
         let mut draft = (self.spec_k > 0 && limit > 2).then(DraftState::new);
         if pos > 0 && draft.is_some() {
-            let restored = self.prefix.read_draft(&ids, pos, span).and_then(|bytes| {
-                bytes
-                    .map(|b| DraftState::restore(&mut self.rt, pos, &b))
-                    .transpose()
-            });
-            if let Some(state) = cached(restored, "DSpark restore").flatten() {
-                eprintln!("prefix DSpark tokens={pos}");
-                draft = Some(state);
+            let (sidecar, read_time) =
+                timed(timing.is_some(), || self.prefix.read_draft(&ids, pos, span));
+            if let Some(profile) = &mut timing {
+                profile.draft_read(read_time);
+            }
+            if let Some((tier, bytes)) = cached(sidecar, "DSpark restore").flatten() {
+                let (restored, elapsed) = timed(timing.is_some(), || {
+                    DraftState::restore(&mut self.rt, pos, &bytes)
+                });
+                if let Some(profile) = &mut timing {
+                    profile.draft_restore(tier, bytes.len(), elapsed, restored.is_ok());
+                }
+                if let Some(state) = cached(restored, "DSpark restore") {
+                    eprintln!("prefix DSpark tokens={pos}");
+                    draft = Some(state);
+                }
             }
         }
         let next_point = points.partition_point(|&at| at <= pos);
         let lookup = prompt_lookup::PromptLookup::new(&ids, self.lookup);
         cache.begin_prefill_with_limit(prompt_len, prompt_len + limit);
+        if let Some(profile) = timing {
+            cache.profile_restore(profile.probe(pos));
+        }
         Ok(Session {
             ids,
             prompt_len,
@@ -458,23 +470,40 @@ impl Model {
         let Some(handle) = session.suspended.as_ref() else {
             return Ok(());
         };
+        let mut timing = Host::start("live");
         let bytes = handle.read()?;
-        let (target, draft) = rotation_payload(&bytes)?;
-        let cache = AttentionState::restore_rotation(
-            target,
-            session.pos,
-            session.prompt_len,
-            session.prompt_len + session.limit,
-        )?;
+        if let Some(profile) = &mut timing {
+            profile.backing_read(handle.tier());
+        }
+        let (decoded, elapsed) = timed(timing.is_some(), || -> Result<_> {
+            let (target, draft) = rotation_payload(&bytes)?;
+            let cache = AttentionState::restore_rotation(
+                target,
+                session.pos,
+                session.prompt_len,
+                session.prompt_len + session.limit,
+            )?;
+            Ok((cache, target.len(), draft))
+        });
+        let (mut cache, target_bytes, draft) = decoded?;
+        if let Some(profile) = &mut timing {
+            profile.decoded(target_bytes, elapsed);
+        }
         let draft = if draft.is_empty() {
             None
         } else {
-            Some(DraftState::restore_rotation(
-                &mut self.rt,
-                session.pos,
-                draft,
-            )?)
+            let (restored, elapsed) = timed(timing.is_some(), || {
+                DraftState::restore_rotation(&mut self.rt, session.pos, draft)
+            });
+            let state = restored?;
+            if let Some(profile) = &mut timing {
+                profile.draft_restore(handle.tier(), draft.len(), elapsed, true);
+            }
+            Some(state)
         };
+        if let Some(profile) = timing {
+            cache.profile_restore(profile.probe(session.pos));
+        }
         session.cache = cache;
         session.draft = draft;
         session.suspended = None;

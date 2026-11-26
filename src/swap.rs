@@ -1,5 +1,6 @@
 //! Backing for live, interrupted requests. Unlike reusable prefix snapshots, a
 //! live image has one owner and must survive until that request resumes or exits.
+use crate::restore_timing::Tier;
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -34,11 +35,6 @@ pub(crate) struct SwapStore(Arc<Backing>);
 struct Backing {
     directory: Option<PathBuf>,
     stats: Mutex<SwapStats>,
-}
-#[derive(Clone, Copy)]
-enum Tier {
-    Ram,
-    Disk,
 }
 struct Reservation {
     store: SwapStore,
@@ -226,6 +222,12 @@ impl SwapStore {
     }
 }
 impl SwapHandle {
+    pub(crate) fn tier(&self) -> Tier {
+        match &self.0 {
+            Location::Ram(_) => Tier::Ram,
+            Location::Disk(_) => Tier::Disk,
+        }
+    }
     pub(crate) fn read(&self) -> Result<SwapRead> {
         match &self.0 {
             Location::Ram(image) => {

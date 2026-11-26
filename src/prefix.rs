@@ -1,6 +1,9 @@
 //! Content-addressed snapshots at exact prefill boundaries. A file contains
 //! target KV only. The decoder always evaluates the remaining prompt and output.
-use crate::attention::AttentionState;
+use crate::{
+    attention::AttentionState,
+    restore_timing::{timed, Host, Tier},
+};
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -180,7 +183,7 @@ impl PrefixCache {
         tokens: &[u32],
         pos: usize,
         span: usize,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<(Tier, Vec<u8>)>> {
         if !self.enabled() {
             return Ok(None);
         }
@@ -189,7 +192,7 @@ impl PrefixCache {
             let entry = self.ram.remove(i).unwrap();
             let data = entry.1.clone();
             self.ram.push_back(entry);
-            return Ok(Some(data));
+            return Ok(Some((Tier::Ram, data)));
         }
         if let Some(path) = self.file(&key).filter(|p| p.exists()) {
             match self.read_blob(&path, &key, 2 * MIB).and_then(|data| {
@@ -198,7 +201,7 @@ impl PrefixCache {
             }) {
                 Ok(data) => {
                     self.remember(key, data.clone());
-                    return Ok(Some(data));
+                    return Ok(Some((Tier::Disk, data)));
                 }
                 Err(e) => {
                     eprintln!("unreadable draft cache file: {e:#}");
@@ -342,36 +345,56 @@ impl PrefixCache {
             }
         }
     }
-    fn read_disk(&self, path: &Path, key: &Key, pos: usize) -> Result<(AttentionState, Vec<u8>)> {
-        let data = self.read_blob(path, key, 6 * MIB + 2048 * pos)?;
-        Ok((AttentionState::decode_snapshot(&data, pos)?, data))
+    fn decode_target(
+        data: &[u8],
+        pos: usize,
+        tier: Tier,
+        timing: &mut Option<Host>,
+    ) -> Result<AttentionState> {
+        if let Some(profile) = timing {
+            profile.backing_read(tier);
+        }
+        let (state, elapsed) = timed(timing.is_some(), || {
+            AttentionState::decode_snapshot(data, pos)
+        });
+        if let Some(profile) = timing {
+            profile.decoded(data.len(), elapsed);
+        }
+        state
     }
     pub fn restore(
         &mut self,
         tokens: &[u32],
         max_pos: usize,
         span: usize,
-    ) -> Result<Option<(usize, AttentionState)>> {
+    ) -> Result<Option<(usize, AttentionState, Option<Host>)>> {
         if self.ram_limit == 0 && self.dir.is_none() {
             return Ok(None);
         }
+        let mut timing = Host::start("prefix");
         for (pos, key) in self.keys(tokens, max_pos, span)?.into_iter().rev() {
             if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
                 let entry = self.ram.remove(i).unwrap();
-                let state = AttentionState::decode_snapshot(&entry.1, pos)?;
+                let state = Self::decode_target(&entry.1, pos, Tier::Ram, &mut timing)?;
                 self.ram.push_back(entry);
                 eprintln!("prefix tier=ram tokens={pos}");
-                return Ok(Some((pos, state)));
+                return Ok(Some((pos, state, timing)));
             }
             if let Some(path) = self.file(&key) {
                 if !path.exists() {
                     continue;
                 }
-                match self.read_disk(&path, &key, pos) {
+                let read = self
+                    .read_blob(&path, &key, 6 * MIB + 2048 * pos)
+                    .and_then(|data| {
+                        let state = Self::decode_target(&data, pos, Tier::Disk, &mut timing)?;
+                        Ok((state, data))
+                    });
+                match read {
                     Ok((state, data)) => {
                         self.remember(key, data);
                         eprintln!("prefix tier=disk tokens={pos}");
-                        return Ok(Some((pos, state)));
+                        return Ok(Some((pos, state, timing)));
                     }
                     Err(e) => {
                         eprintln!("discarding unreadable prefix at {pos} tokens: {e:#}");

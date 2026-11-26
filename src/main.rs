@@ -7,6 +7,7 @@ mod engram;
 mod model;
 mod moe;
 mod prefix;
+mod restore_timing;
 mod runtime;
 mod swap;
 mod weights;
