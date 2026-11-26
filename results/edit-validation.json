@@ -1,0 +1,29 @@
+{
+  "base_file": "model-cli/internal/selfupdate/selfupdate.go",
+  "base_sha256": "2d92a3dee1f2cc00a5ab44354bf328b251cead1a615128015bb10c707354b960",
+  "generated_source_sha256": "c4de5bd88855e711350c6b9c85a7fd9e8a65b072132abd69fa5b7b8217d6374b",
+  "fenced_output_sha256": "a6cea5b1eb646b9f93637852de086627f9874bf8466c2424deecd76162649fa9",
+  "identical_http_generations": 7,
+  "unified_diff": [
+    "--- before.go",
+    "+++ after.go",
+    "@@ -23,7 +23,8 @@",
+    " // The re-exec'd process sets this to avoid looping; users can export it to opt",
+    " // out (e.g. for scripted or offline runs).",
+    " func SkipUpdate() bool {",
+    "-\treturn os.Getenv(noUpdateEnv) == \"1\"",
+    "+\tv := os.Getenv(noUpdateEnv)",
+    "+\treturn v == \"1\" || strings.EqualFold(v, \"true\")",
+    " }",
+    " ",
+    " // RunningFromGoRun reports whether the current process is a temporary `go run`"
+  ],
+  "go_toolchain": "go version go1.26.8 linux/amd64",
+  "validation": [
+    "Original selfupdate package unit tests",
+    "Additional requested behavior test"
+  ],
+  "regression_test": "package selfupdate\nimport \"testing\"\nfunc TestRequestedFlag(t *testing.T){for _, tc := range []struct{v string; on bool}{{\"TRUE\",true},{\"True\",true},{\"1\",true},{\"0\",false},{\"\",false}}{t.Setenv(\"MODEL_CLI_NO_UPDATE\",tc.v);if SkipUpdate()!=tc.on {t.Fatalf(\"failed value %q\",tc.v)}}}\n",
+  "go_test_exit": 0,
+  "go_test_output": "ok  \tds4editcheck\t0.002s"
+}
