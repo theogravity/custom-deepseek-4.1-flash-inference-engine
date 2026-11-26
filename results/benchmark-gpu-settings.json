@@ -1325,5 +1325,6 @@
         ]
       ]
     }
-  ]
+  ],
+  "cpu_power_profile": "benchmark-cpu-power.json"
 }

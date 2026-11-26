@@ -43,5 +43,6 @@
     "voltage_boost_percent": 0,
     "locked_gpu_clocks": false,
     "locked_vram_clocks": false
-  }
+  },
+  "cpu_power_profile": "benchmark-cpu-power.json"
 }

@@ -50,6 +50,10 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
+| `DS4_OUTPUT_LOOKUP` | single | Draft from recent verified output when one client is decoding. Select 0 to disable or 1 to enable at all loads |
+| `DS4_PREFILL_MX_TILES`, `DS4_VERIFY_MX_TILES` | 4, 4 | Number of packed projection tiles per block during prompt ingestion and multi-token target verification |
+| `DS4_PARALLEL_PREFILL_ROUTER` | 1 | Select routed experts across prompt rows using the CPU worker pool |
+| `DS4_OVERLAP_PREFILL_ENGRAM` | 0 | Optionally overlap Engram reads with target GPU work during prefill |
 | `DS4_ADAPTIVE_LOOKUP` | 1 | Select learned vs. source proposals from contiguous matches. Use 0 for fixed-width source lookup |
 | `DS4_PREFIX_RAM_MIB`, `DS4_PREFIX_DISK_MIB` | 2048, 65536 | Separate RAM and disk cache budgets in MiB |
 | `DS4_HOST_PREFIX_DIR` | `~/.cache/ds4-flash-rs/prefix` | Private host bind mount for restart-persistent KV and drafter windows |
@@ -123,7 +127,7 @@ docker compose --env-file ../models/.env up -d --wait
 
 ## Measurements on this workstation
 
-For one active client generating 128 receipt tokens, direct and LiteLLM decode rates differed by at most 0.43% across eight context lengths. Both routes exceeded 300 tok/s through 65,536 input tokens and delivered about 238 tok/s at 524,160. The benchmark includes separate measurements for OpenAI Chat and Anthropic Messages. [C1 output tok/s by context length](C1-BENCHMARK.md)
+At the 600 W GPU setting, one client generating 128 verified receipt tokens exceeded 300 output tok/s across all eight prompt lengths. With 524,160 input tokens it reached 322.9 tok/s direct and 322.0 via LiteLLM on OpenAI Chat. On the upstream Python edit, the native service reached 278 tok/s at C1 and 459 tok/s aggregate at C6. [Direct and proxied rates by context](C1-BENCHMARK.md) · [Upstream comparison](UPSTREAM-COMPARISON.md)
 
 The original workstation benchmarks and the full C1 proxy sweep used both RTX PRO 6000 Blackwell cards with a **375 W limit per card**, **+450 MHz P0 core offset**, **+4,000 MHz P0 VRAM offset**, **0% voltage boost**, and **PowerMizer Auto**. GPU and VRAM clock locking were disabled. The workstation owner confirmed the historical configuration. The saved LACT settings and a live power-limit readback agree on both cards. The screenshot’s 3,015 MHz core, 15,365 MHz VRAM, 320.1 W and temperature values were instantaneous readings. [GPU settings and saved voltage/frequency points](results/benchmark-gpu-settings.json) · [Owner’s screenshot](results/rtx-pro-6000-lact.png)
 

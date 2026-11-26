@@ -1,0 +1,43 @@
+{
+  "cpu": "AMD Ryzen Threadripper PRO 9965WX",
+  "socket_count": 1,
+  "physical_cores": 24,
+  "logical_cpus": 48,
+  "reported_by_owner": {
+    "approximate_limit_w": 180,
+    "scope": "all benchmarks"
+  },
+  "readback": {
+    "time": "2026-11-25T20:58:49-08:00",
+    "hwmon": "amd_hsmp_hwmon",
+    "driver": "hsmp_acpi",
+    "power1_cap_uw": 225000000,
+    "power1_input_uw": 124952000
+  },
+  "boot_policy": {
+    "unit": "cpu-power-cap.service",
+    "enabled": "enabled",
+    "actual_state": "inactive",
+    "configured_socket_cap_w": 180,
+    "boot_events": [
+      "2026-11-25T13:26:25-08:00 workstation systemd[1]: multi-user.target: Found ordering cycle: cpu-power-cap.service/start after power-profiles-daemon.service/start after multi-user.target/start - after cpu-power-cap.service",
+      "2026-11-25T13:26:25-08:00 workstation systemd[1]: multi-user.target: Job cpu-power-cap.service/start deleted to break ordering cycle starting with multi-user.target/start"
+    ],
+    "scope": "Definition in place at the 20:58 readback"
+  },
+  "coverage": "Earlier native runs lack simultaneous CPU cap measurements. The observed socket cap is specific to the timestamp above. The published reference has its own hardware conditions.",
+  "next_boot": {
+    "unit": "/etc/systemd/system/cpu-power-cap.service",
+    "unit_sha256": "99db2dba0fa07b841df3896280d6560733553244a3202792cef5b4b9ca755ed3",
+    "boot_cap_w": 180,
+    "offline_boot_transactions": [
+      "graphical.target",
+      "multi-user.target"
+    ],
+    "installed_without_manager_reload_or_start": true,
+    "immediate_socket_cap_before_after_w": [
+      225,
+      225
+    ]
+  }
+}
