@@ -175,14 +175,15 @@ def document(args, key, agent):
     return fit_text(head, words, suffix, nwords, args.input, size, early_index+1), [early, receipt]
 
 
-def continued_documents(args, key, tok, frozen):
+def continued_documents(args, key, tok, frozen, agents=range(STREAMS)):
     if frozen["version"] != 1 or frozen["seed"] != args.seed:
         raise ValueError("staged history version or seed mismatch")
     sessions = frozen["sessions"]
     if len(sessions) != STREAMS or len({s["prompt_ids_sha256"] for s in sessions}) != STREAMS:
         raise ValueError("expected six distinct frozen histories")
     specs, proofs = [], []
-    for agent, s in enumerate(sessions):
+    for agent in agents:
+        s = sessions[agent]
         turns = s["messages"]
         if s["agent"] != agent or [m["role"] for m in turns] != ["user", "assistant"]:
             raise ValueError(f"invalid frozen transcript for agent {agent}")
