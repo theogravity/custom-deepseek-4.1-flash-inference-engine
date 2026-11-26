@@ -10,6 +10,10 @@ Choose a fresh seed for a cold first phase. At 64-token chunks, six existing
 403,968-token checkpoints leave 721,152 input tokens to process in phase 2.
 Processing both sizes then needs 3,145,152 input tokens and two decode rounds.
 One direct cold full-window run needs 3,144,960 input tokens and one decode round.
+
+Add --litellm to either command to stream completions through the local OpenAI
+alias with LiteLLM response cache reads and writes disabled. Sizing and batch
+counters still use the authenticated native server specified by --base.
 """
 
 import argparse
@@ -25,9 +29,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.request import Request, urlopen
 
-from code_speed import PROMPTS
+from code_speed import NON_TEXT_FIELDS, PROMPTS
 
 MODEL = "DeepSeek V4.1 Flash"
+LITELLM_MODEL = "DeepSeek V4.1 Flash (openai)"
 STREAMS = 6
 DEFAULT_SEED = 268815548685955
 
@@ -256,6 +261,8 @@ def check_output(text, expected, idx):
 
 def stream(args, key, prompt, expected, barrier, idx):
     body = payload(prompt, args.output)
+    if args.litellm:
+        body.update(model=LITELLM_MODEL, cache={"no-cache": True, "no-store": True})
     body.update(stream=True, stream_options={"include_usage": True})
     barrier.wait(timeout=120)
     start = time.monotonic()
@@ -263,7 +270,7 @@ def stream(args, key, prompt, expected, barrier, idx):
     content = []
     done = False
     stream_id = None
-    with http(args.base, "/v1/chat/completions", key, body) as resp:
+    with http(args.litellm or args.base, "/v1/chat/completions", key, body) as resp:
         for line in resp:
             if not line.startswith(b"data:"):
                 continue
@@ -281,7 +288,7 @@ def stream(args, key, prompt, expected, barrier, idx):
             for choice in event.get("choices", []):
                 finish = choice.get("finish_reason") or finish
                 delta = choice.get("delta", {})
-                if delta.get("reasoning_content") or delta.get("tool_calls"):
+                if any(delta.get(field) for field in NON_TEXT_FIELDS):
                     raise ValueError("expected plain visible output")
                 if text := delta.get("content"):
                     last = time.monotonic()
@@ -309,7 +316,9 @@ def stream(args, key, prompt, expected, barrier, idx):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", default="http://127.0.0.1:8001")
+    ap.add_argument("--base", default="http://127.0.0.1:8001", help="native server root (default http://127.0.0.1:8001)")
+    ap.add_argument("--litellm", nargs="?", const="http://127.0.0.1:4000", metavar="ROOT",
+                    help="send completions to the LiteLLM OpenAI alias (default proxy root http://127.0.0.1:4000)")
     ap.add_argument("--seed", type=int, help=f"document seed (default {DEFAULT_SEED} or the frozen histories' seed)")
     ap.add_argument("--shared", action="store_true")
     ap.add_argument("--input", type=int, help="exact target context input token count")
@@ -330,7 +339,10 @@ def main():
         ap.error("staged runs require six independent histories and --input")
     if args.save_histories and args.rounds != 1:
         ap.error("freeze a single round of histories")
+    if args.litellm and args.baseline:
+        ap.error("--litellm requires native concurrency metrics")
     key = os.environ.get("DSV41_API_KEY") or os.environ["LITELLM_MASTER_KEY"]
+    completion_key = (os.environ.get("LITELLM_MASTER_KEY") or key) if args.litellm else key
     tok = load_tokenizer(args.tokenizer) if args.save_histories or args.continue_histories else None
     frozen = json.loads(args.continue_histories.read_text()) if args.continue_histories else None
     if args.seed is None:
@@ -342,13 +354,17 @@ def main():
         specs = [document(args, key, i) for i in range(STREAMS)]
     else:
         specs = [(list(PROMPTS.values())[i%3] + ("" if i<3 else " Include explanatory code comments."), []) for i in range(STREAMS)]
+    expected_inputs = [args.input] * STREAMS
+    if args.litellm and args.input is None:
+        expected_inputs = [query(args.base, "/v1/messages/count_tokens", key,
+                                 payload(prompt, args.output))["input_tokens"] for prompt, _ in specs]
     ok = True
     for rep in range(args.rounds):
         barrier = threading.Barrier(STREAMS)
         before = {} if args.baseline else query(args.base,"/metrics",key)
         start = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(STREAMS) as pool:
-            pending = [pool.submit(stream,args,key,*s,barrier,i) for i,s in enumerate(specs)]
+            pending = [pool.submit(stream,args,completion_key,*s,barrier,i) for i,s in enumerate(specs)]
             peak_observed_tokens = 0
             if not args.baseline:
                 unfinished = pending
@@ -367,7 +383,8 @@ def main():
         overlap = min(r["last"] for r in rows)-max(r["first"] for r in rows)
         after = {} if args.baseline else query(args.base,"/metrics",key)
         valid = all(r["exact"] and r["finish"] == "length" and r["output"] == args.output
-                    and (not args.input or r["prompt"] == args.input) for r in rows)
+                    and (expected is None or r["prompt"] == expected)
+                    for r, expected in zip(rows, expected_inputs, strict=True))
         valid &= len({r["stream_id"] for r in rows}) == STREAMS
         if proofs:
             for row, proof in zip(rows, proofs, strict=True):
@@ -386,6 +403,8 @@ def main():
             r["first_s"] = r.pop("first")-start
             r["last_s"] = r.pop("last")-start
         print(json.dumps({"round":rep,"seed":args.seed,"shared_prefix":args.shared,"requested_input":args.input,
+             "completion_route":"litellm" if args.litellm else "native",
+             "completion_model":LITELLM_MODEL if args.litellm else MODEL,
              "seconds":elapsed,"aggregate_wall_tok_s":sum(r["output"] for r in rows)/elapsed,
              "six_stream_overlap_s":overlap,"six_target_passes_delta":six_passes,
              "observed_six_processed_tokens":peak_observed_tokens,"aggregate_decode_tok_s":decode_rate,"all_valid":valid,"concurrent":running_together,

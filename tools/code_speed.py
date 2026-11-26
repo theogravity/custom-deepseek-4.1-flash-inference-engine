@@ -14,6 +14,8 @@ PROMPTS = {
     "parser": "Write a JSON parser in C (objects, arrays, strings with escapes, numbers, true/false/null) with a small test main(). Output only the code.",
     "cache": "Implement a thread-safe LRU cache with TTL expiry in Rust, with unit tests. Output only the code.",
 }
+NON_TEXT_FIELDS = ("reasoning", "reasoning_content", "reasoning_details", "tool_calls",
+                   "function_call", "refusal", "audio")
 
 
 def request(args, prompt, limit, key, *, bypass_proxy_cache=False):
@@ -46,8 +48,7 @@ def request(args, prompt, limit, key, *, bypass_proxy_cache=False):
             for choice in event.get("choices", []):
                 finish = choice.get("finish_reason") or finish
                 delta = choice.get("delta", {})
-                if any(delta.get(key) for key in ("reasoning", "reasoning_content", "reasoning_details",
-                                                    "tool_calls", "function_call", "refusal", "audio")):
+                if any(delta.get(key) for key in NON_TEXT_FIELDS):
                     raise ValueError("throughput benchmark received a non-text output block")
                 content = delta.get("content")
                 if content:
