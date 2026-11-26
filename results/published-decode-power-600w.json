@@ -1,0 +1,29 @@
+{
+  "bench": "published-decode-600w",
+  "period": "From start of power sampler during the first pass until the final published decode output",
+  "sample_count_per_card": 97,
+  "first_sample_local": "2026-11-25T20:27:00-08:00",
+  "last_sample_local": "2026-11-25T20:28:42-08:00",
+  "cards": [
+    {
+      "host_gpu": 1,
+      "enforced_w": [
+        600.0
+      ],
+      "median_draw_w": 280.66,
+      "max_sampled_draw_w": 347.71,
+      "samples_over_375w": 0,
+      "samples_sw_power_cap_active": 0
+    },
+    {
+      "host_gpu": 2,
+      "enforced_w": [
+        600.0
+      ],
+      "median_draw_w": 333.73,
+      "max_sampled_draw_w": 414.08,
+      "samples_over_375w": 30,
+      "samples_sw_power_cap_active": 0
+    }
+  ]
+}
