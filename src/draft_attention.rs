@@ -13,6 +13,9 @@ const HEADS: usize = 64;
 const WINDOW: usize = 128;
 const STAGES: usize = 3;
 
+#[path = "draft_rotation.rs"]
+mod rotation;
+
 unsafe extern "C" {
     fn ds4_attn_normalize(
         device: i32,

@@ -34,6 +34,17 @@ impl DraftState {
             trace: None,
         })
     }
+    pub(crate) fn rotation_snapshot(&self, rt: &mut Runtime, pos: usize) -> Result<Vec<u8>> {
+        self.attention
+            .encode_rotation(rt, pos, self.trace.as_deref())
+    }
+    pub(crate) fn restore_rotation(rt: &mut Runtime, pos: usize, bytes: &[u8]) -> Result<Self> {
+        let (attention, trace) = DraftAttention::decode_rotation(rt, pos, bytes)?;
+        Ok(Self { attention, trace })
+    }
+    pub(crate) fn release_device(self) {
+        self.attention.release_device();
+    }
     pub fn observe(
         &mut self,
         rt: &mut Runtime,

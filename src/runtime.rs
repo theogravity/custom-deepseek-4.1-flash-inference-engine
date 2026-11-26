@@ -141,10 +141,16 @@ impl Dev {
     fn device(&self) -> i32 {
         self.allocation.as_ref().unwrap().device
     }
+    /// Release session storage at eviction, bypassing the transient buffer pool.
+    pub(crate) fn release(mut self) {
+        drop(self.allocation.take());
+    }
 }
 impl Drop for Dev {
     fn drop(&mut self) {
-        let a = self.allocation.take().unwrap();
+        let Some(a) = self.allocation.take() else {
+            return;
+        };
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         // Limit idle workspace to 256 MiB per card even as prompt chunk sizes vary.
         if a.capacity <= (64 << 20) - pool.elements {
@@ -281,13 +287,23 @@ impl Runtime {
         Ok(out)
     }
     pub fn to_host(&self, input: &Dev) -> Result<Vec<f32>> {
-        let mut out = vec![0.; input.len()];
+        self.to_host_range(input, 0, input.len())
+    }
+    pub(crate) fn to_host_range(&self, input: &Dev, start: usize, len: usize) -> Result<Vec<f32>> {
+        ensure!(
+            start.checked_add(len).is_some_and(|end| end <= input.len()),
+            "invalid device read range"
+        );
+        let mut out = vec![0.; len];
+        if len == 0 {
+            return Ok(out);
+        }
         let copied = checked(unsafe {
             ds_copy_f32(
                 input.device(),
                 out.as_mut_ptr(),
-                input.as_ptr(),
-                input.len(),
+                input.as_ptr().add(start),
+                len,
                 1,
             )
         });
