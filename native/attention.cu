@@ -1,4 +1,6 @@
 #include <cuda_runtime.h>
+#include <cub/block/block_radix_sort.cuh>
+#include <cub/device/device_segmented_radix_sort.cuh>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <algorithm>
@@ -248,6 +250,7 @@ __global__ void score_keys(const uint8_t *keys, const float *queries, const floa
     }
     if (!lane) scores[t * width + slot] = score;
 }
+#include "attention_index.cuh"
 } // namespace
 
 extern "C" void *ds4_attn_buffer_new() { return new(std::nothrow) Buffer; }
@@ -372,5 +375,66 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
         weights,ids ? at<int>(b,io) : nullptr,width,at<float>(b,so));
     TRY(cudaGetLastError());
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// The Rust caller reserves the full next allocation before growth. Both copies
+// coexist until the preserved prefix has moved to the larger allocation.
+extern "C" size_t ds4_attn_growth(void *handle, size_t request) {
+    auto capacity=static_cast<const Buffer *>(handle)->capacity;
+    return request <= capacity ? 0 : std::max(request,capacity+capacity/2);
+}
+
+extern "C" int ds4_attn_index_bytes(int width, int rows, size_t *bytes) {
+    IndexWorkspace s;
+    TRY(s.plan(width,rows));
+    *bytes=s.bytes;
+    return 0;
+}
+
+extern "C" int ds4_attn_index_ids(int dev, int *out, int width, int pos, int ratio, int rows) {
+    TRY(cudaSetDevice(dev));
+    index_ids<<<dim3((width+block-1)/block,rows),block>>>(nullptr,out,width,pos,ratio);
+    return cudaGetLastError();
+}
+
+extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, const float *queries,
+        const float *weights, const int *candidates, int width, int pos, int ratio, int rows,
+        int *picks, int *out_blocks) {
+    TRY(cudaSetDevice(dev));
+    IndexWorkspace s;
+    TRY(s.plan(width,rows));
+    auto *ids=reinterpret_cast<int *>(work+s.ids);
+    auto *scores=reinterpret_cast<float *>(work+s.scores);
+    auto *rank=reinterpret_cast<unsigned long long *>(work+s.ranks);
+    auto *sorted=reinterpret_cast<unsigned long long *>(work+s.sorted);
+    auto *offsets=reinterpret_cast<int *>(work+s.offsets);
+    auto *packed=static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
+    dim3 grid((width+block-1)/block,rows);
+    index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
+    TRY(cudaGetLastError());
+    score_keys<<<dim3((width+block/32-1)/(block/32),rows),block>>>(packed,queries,weights,ids,width,scores);
+    TRY(cudaGetLastError());
+    auto sort=[&](int stride)->cudaError_t {
+        index_bounds<<<(rows+block)/block,block>>>(offsets,stride,rows);
+        auto e=cudaGetLastError();
+        if (e!=cudaSuccess) return e;
+        size_t available=s.temp_bytes;
+        return cub::DeviceSegmentedRadixSort::SortKeysDescending(work+s.temp,available,
+            rank,sorted,rows*stride,rows,offsets,offsets+1);
+    };
+    rank_positions<<<grid,block>>>(scores,ids,rank,width);
+    TRY(cudaGetLastError());
+    TRY(sort(width));
+    chronological_ids<top><<<rows,block>>>(sorted,width,picks);
+    TRY(cudaGetLastError());
+    if(out_blocks) {
+        int count=(width+index_block-1)/index_block;
+        rank_blocks<<<dim3((count+block-1)/block,rows),block>>>(scores,rank,width,pos,ratio);
+        TRY(cudaGetLastError());
+        TRY(sort(count));
+        chronological_ids<candidate_limit><<<rows,block>>>(sorted,count,out_blocks);
+        TRY(cudaGetLastError());
+    }
     return 0;
 }

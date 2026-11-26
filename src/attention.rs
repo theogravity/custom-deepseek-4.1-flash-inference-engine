@@ -30,6 +30,30 @@ const NOPE: usize = DIM - ROPE;
 const INDEX_BYTES: usize = INDEX_DIM + 4;
 
 unsafe extern "C" {
+    fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
+    fn ds4_attn_index_bytes(width: i32, rows: i32, bytes: *mut usize) -> i32;
+    fn ds4_attn_index_ids(
+        dev: i32,
+        out: *mut i32,
+        width: i32,
+        pos: i32,
+        ratio: i32,
+        rows: i32,
+    ) -> i32;
+    fn ds4_attn_index_select(
+        dev: i32,
+        work: *mut u8,
+        cache: *const c_void,
+        q: *const f32,
+        weights: *const f32,
+        blocks: *const i32,
+        width: i32,
+        pos: i32,
+        ratio: i32,
+        rows: i32,
+        picks: *mut i32,
+        out_blocks: *mut i32,
+    ) -> i32;
     fn ds4_attn_buffer_new() -> *mut c_void;
     fn ds4_attn_buffer_free(device: i32, buf: *mut c_void);
     fn ds4_attn_upload(
@@ -177,7 +201,7 @@ impl Rows {
         }
     }
 
-    fn on(&mut self, dev: i32) -> Result<*mut c_void> {
+    fn on(&mut self, dev: i32, cache: Option<&mut crate::moe::MoeCache>) -> Result<*mut c_void> {
         use std::collections::hash_map::Entry;
         let (buf, old) = match self.devices.entry(dev) {
             Entry::Occupied(e) => e.into_mut(),
@@ -185,6 +209,10 @@ impl Rows {
         };
         let extra = &self.packed[*old..];
         if !extra.is_empty() {
+            let growth = unsafe { ds4_attn_growth(buf.ptr.as_ptr(), self.packed.len()) };
+            if let Some(cache) = cache.filter(|_| growth != 0) {
+                cache.reserve(dev, growth)?;
+            }
             cuda_ok(
                 unsafe {
                     ds4_attn_upload(dev, buf.ptr.as_ptr(), extra.as_ptr(), *old, extra.len())
@@ -319,6 +347,8 @@ pub struct AttentionState {
     scratch: HashMap<i32, GpuBuffer>,
     selected: Vec<Vec<i32>>,
     picks: HashMap<i32, GpuBuffer>,
+    device_picks: Option<Dev>,
+    device_blocks: Option<Dev>,
     width: usize,
     freqs: HashMap<(i32, bool), (usize, usize, Dev)>,
     blocks: Vec<Vec<usize>>,
@@ -798,10 +828,42 @@ fn select(
 ) -> Result<()> {
     let max_len = (pos + n) / ratio;
     state.selected.clear();
+    let gpu = gpu_index();
+    if gpu {
+        state.width = max_len.min(TOP);
+        state.device_picks = if state.width == 0 {
+            None
+        } else {
+            Some(rt.buffer(n * state.width)?)
+        };
+    }
     if layer == CANDIDATE_LAYER {
+        state.device_blocks = if gpu && max_len > TOP_BLOCKS * BLOCK {
+            Some(rt.buffer(n * TOP_BLOCKS)?)
+        } else {
+            None
+        };
         state.blocks.clear();
     }
     if max_len <= TOP {
+        if gpu {
+            if let Some(ids) = state.device_picks.as_mut() {
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_index_ids(
+                            rt.device,
+                            ids.as_mut_ptr().cast(),
+                            state.width as i32,
+                            pos as i32,
+                            ratio as i32,
+                            n as i32,
+                        )
+                    },
+                    "building causal index rows",
+                )?;
+            }
+            return Ok(());
+        }
         state.selected = (0..n)
             .map(|t| (0..((pos + t + 1) / ratio) as i32).collect())
             .collect();
@@ -841,7 +903,20 @@ fn select(
         .get_mut(&owner)
         .context("missing index key source")?
         .keys
-        .on(rt.device)?;
+        .on(rt.device, Some(&mut rt.moe_cache))?;
+    if gpu {
+        let picks = state
+            .device_picks
+            .as_mut()
+            .context("missing GPU index output")?;
+        let blocks = state
+            .device_blocks
+            .as_mut()
+            .map_or(ptr::null_mut(), |v| v.as_mut_ptr().cast::<i32>());
+        return device_select(
+            rt, layer, pos, n, ratio, max_len, keys, &q, &w, blocks, picks,
+        );
+    }
     let work = scratch(state, rt.device)?;
     // Tile host scores to keep long-context prefill scratch bounded. After layer
     // 20, only the 2048 winning eight-token blocks need scoring.
@@ -908,6 +983,87 @@ fn select(
                 .collect();
             state.selected.push(selected);
         }
+        t += rows;
+    }
+    Ok(())
+}
+
+fn gpu_index() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DS4_GPU_INDEX").is_some_and(|v| v == "1"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn device_select(
+    rt: &mut Runtime,
+    layer: usize,
+    pos: usize,
+    n: usize,
+    ratio: usize,
+    max_len: usize,
+    keys: *const c_void,
+    q: &Dev,
+    w: &Dev,
+    blocks: *mut i32,
+    picks: &mut Dev,
+) -> Result<()> {
+    let block_span = TOP_BLOCKS * BLOCK;
+    // Layers after 20 use its candidate blocks only when the individual row
+    // exceeds the block budget. A tile may straddle that boundary in prefill.
+    let start_filtered = ((block_span + 1) * ratio - 1).saturating_sub(pos).min(n);
+    let mut t = 0;
+    while t < n {
+        let filtered = layer > CANDIDATE_LAYER && t >= start_filtered;
+        let end = if layer > CANDIDATE_LAYER && !filtered {
+            start_filtered
+        } else {
+            n
+        };
+        let bound = if filtered { block_span } else { max_len };
+        let rows = (2_097_152 / bound).max(1).min(end - t);
+        let width = if filtered {
+            block_span
+        } else {
+            (pos + t + rows) / ratio
+        };
+        let mut bytes = 0;
+        cuda_ok(
+            unsafe { ds4_attn_index_bytes(width as i32, rows as i32, &mut bytes) },
+            "sizing index sort scratch",
+        )?;
+        let mut work = rt.buffer(bytes.div_ceil(4))?;
+        ensure!(
+            !filtered || !blocks.is_null(),
+            "missing GPU candidate blocks"
+        );
+        cuda_ok(
+            unsafe {
+                let b = if blocks.is_null() || !(filtered || layer == CANDIDATE_LAYER) {
+                    blocks
+                } else {
+                    blocks.add(t * TOP_BLOCKS)
+                };
+                ds4_attn_index_select(
+                    rt.device,
+                    work.as_mut_ptr().cast(),
+                    keys,
+                    q.as_ptr().add(t * INDEX_HEADS * INDEX_DIM),
+                    w.as_ptr().add(t * INDEX_HEADS),
+                    if filtered { b } else { ptr::null() },
+                    width as i32,
+                    (pos + t) as i32,
+                    ratio as i32,
+                    rows as i32,
+                    picks.as_mut_ptr().cast::<i32>().add(t * TOP),
+                    if layer == CANDIDATE_LAYER {
+                        b
+                    } else {
+                        ptr::null_mut()
+                    },
+                )
+            },
+            "ranking index keys on GPU",
+        )?;
         t += rows;
     }
     Ok(())
@@ -1020,38 +1176,49 @@ pub fn forward_dev(
             select(
                 rt, state, owner, ratio, &prefix, layer, x, &qr, pos, batch, freqs,
             )?;
-            ensure!(
-                state.selected.len() == batch,
-                "missing shared top-k index rows"
-            );
-            state.width = state.selected.iter().map(Vec::len).max().unwrap_or(0);
-            if state.width > 0 {
-                let mut flat = Vec::with_capacity(batch * state.width);
-                for row in &state.selected {
-                    flat.extend_from_slice(row);
-                    flat.resize(flat.len() + state.width - row.len(), -1);
+            if !gpu_index() {
+                ensure!(
+                    state.selected.len() == batch,
+                    "missing shared top-k index rows"
+                );
+                state.width = state.selected.iter().map(Vec::len).max().unwrap_or(0);
+                if state.width > 0 {
+                    let mut flat = Vec::with_capacity(batch * state.width);
+                    for row in &state.selected {
+                        flat.extend_from_slice(row);
+                        flat.resize(flat.len() + state.width - row.len(), -1);
+                    }
+                    use std::collections::hash_map::Entry;
+                    let picks = match state.picks.entry(rt.device) {
+                        Entry::Occupied(e) => e.into_mut(),
+                        Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
+                    };
+                    picks.write(&flat)?;
                 }
-                use std::collections::hash_map::Entry;
-                let picks = match state.picks.entry(rt.device) {
-                    Entry::Occupied(e) => e.into_mut(),
-                    Entry::Vacant(e) => e.insert(GpuBuffer::new(rt.device)?),
-                };
-                picks.write(&flat)?;
             }
         }
         width = state.width;
         if width != 0 {
-            ids = state
-                .picks
-                .get(&rt.device)
-                .context("missing selected attention indices")?
-                .data();
+            ids = if gpu_index() {
+                state
+                    .device_picks
+                    .as_ref()
+                    .context("missing GPU index row")?
+                    .as_ptr()
+                    .cast()
+            } else {
+                state
+                    .picks
+                    .get(&rt.device)
+                    .context("missing selected attention indices")?
+                    .data()
+            };
             values = state
                 .sources
                 .get_mut(&owner)
                 .context("missing compressed attention source")?
                 .values
-                .on(rt.device)?;
+                .on(rt.device, Some(&mut rt.moe_cache))?;
         }
     }
     drop(qr);
@@ -1477,6 +1644,253 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_index_matches_cpu_ranking_across_causal_thresholds() -> Result<()> {
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let short = upload(device, &[-9i32; 6])?;
+        cuda_ok(
+            unsafe { ds4_attn_index_ids(device, short.data(), 2, 1, 2, 3) },
+            "short index rows",
+        )?;
+        let mut host = [0i32; 6];
+        read(&short, &mut host)?;
+        assert_eq!(host, [0, -1, 0, -1, 0, 1]);
+        for (pos, ratio, n, zero) in [
+            (1020, 2, 129, false),
+            (TOP_BLOCKS * BLOCK - 2, 1, 9, false),
+            (TOP_BLOCKS * BLOCK + 109, 1, 3, true),
+        ] {
+            let width = (pos + n) / ratio;
+            let scores: Vec<f32> = (0..width)
+                .map(|k| {
+                    if zero {
+                        0.
+                    } else {
+                        ((k.wrapping_mul(1717) ^ (k / 7)) % 997) as f32
+                    }
+                })
+                .collect();
+            let mut packed = vec![0u8; width * INDEX_BYTES];
+            for (row, &score) in packed.chunks_exact_mut(INDEX_BYTES).zip(&scores) {
+                row[0] = 0x38; // E4M3 1.0
+                row[INDEX_DIM..].copy_from_slice(&score.to_le_bytes());
+            }
+            let packed = upload(device, &packed)?;
+            let mut q = vec![0f32; n * INDEX_HEADS * INDEX_DIM];
+            let mut w = vec![0f32; n * INDEX_HEADS];
+            for j in 0..n {
+                q[j * INDEX_HEADS * INDEX_DIM] = 1.;
+                w[j * INDEX_HEADS] = 64.;
+            }
+            let q = upload(device, &q)?;
+            let w = upload(device, &w)?;
+            let blocks = upload(device, &vec![-1i32; n * TOP_BLOCKS])?;
+            let picks = upload(device, &vec![-1i32; n * TOP])?;
+            let mut bytes = 0;
+            cuda_ok(
+                unsafe { ds4_attn_index_bytes(width as i32, n as i32, &mut bytes) },
+                "index fixture size",
+            )?;
+            let work = upload(device, &vec![0u8; bytes])?;
+            let has_blocks = width > TOP_BLOCKS * BLOCK;
+            cuda_ok(
+                unsafe {
+                    ds4_attn_index_select(
+                        device,
+                        work.data(),
+                        packed.ptr.as_ptr(),
+                        q.data(),
+                        w.data(),
+                        ptr::null(),
+                        width as i32,
+                        pos as i32,
+                        ratio as i32,
+                        n as i32,
+                        picks.data(),
+                        if has_blocks {
+                            blocks.data()
+                        } else {
+                            ptr::null_mut()
+                        },
+                    )
+                },
+                "index fixture",
+            )?;
+            let mut got = vec![0i32; n * TOP];
+            read(&picks, &mut got)?;
+            let mut chosen = vec![0i32; n * TOP_BLOCKS];
+            if has_blocks {
+                read(&blocks, &mut chosen)?;
+            }
+            for j in 0..n {
+                let visible = (pos + j + 1) / ratio;
+                let mut want: Vec<i32> = best(&scores[..visible], TOP)
+                    .into_iter()
+                    .map(|x| x as i32)
+                    .collect();
+                want.resize(TOP, -1);
+                assert_eq!(got[j * TOP..(j + 1) * TOP], want, "visible {visible}");
+                if visible <= TOP_BLOCKS * BLOCK {
+                    continue;
+                }
+                let spans = candidate_blocks(&scores[..visible]);
+                assert_eq!(
+                    chosen[j * TOP_BLOCKS..(j + 1) * TOP_BLOCKS],
+                    spans.iter().map(|&k| k as i32).collect::<Vec<_>>()
+                );
+                let ids: Vec<usize> = spans
+                    .iter()
+                    .flat_map(|&b| b * BLOCK..((b + 1) * BLOCK).min(visible))
+                    .collect();
+                let mut weight = 0;
+                cuda_ok(
+                    unsafe { ds4_attn_index_bytes((TOP_BLOCKS * BLOCK) as i32, 1, &mut weight) },
+                    "filtered index fixture size",
+                )?;
+                let scratch = upload(device, &vec![0u8; weight])?;
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_index_select(
+                            device,
+                            scratch.data(),
+                            packed.ptr.as_ptr(),
+                            q.data::<f32>().add(j * INDEX_HEADS * INDEX_DIM),
+                            w.data::<f32>().add(j * INDEX_HEADS),
+                            blocks.data::<i32>().add(j * TOP_BLOCKS),
+                            (TOP_BLOCKS * BLOCK) as i32,
+                            (pos + j) as i32,
+                            ratio as i32,
+                            1,
+                            picks.data(),
+                            ptr::null_mut(),
+                        )
+                    },
+                    "filtered index fixture",
+                )?;
+                let mut actual = vec![0i32; TOP];
+                read(&picks, &mut actual)?;
+                let filtered: Vec<f32> = ids.iter().map(|&k| scores[k]).collect();
+                let want: Vec<i32> = best(&filtered, TOP)
+                    .into_iter()
+                    .map(|k| ids[k] as i32)
+                    .collect();
+                assert_eq!(actual, want, "filtered visible {visible}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "compares full 512k index selection timing on DS4_TEST_DEVICE"]
+    fn cuda_index_512k_timing_and_parity() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaDeviceSynchronize() -> i32;
+        }
+        let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        for (width, n) in [(600, 129), (16391, 8), (524288, 1)] {
+            let mut keys = vec![0u8; width * INDEX_BYTES];
+            for (k, row) in keys.chunks_exact_mut(INDEX_BYTES).enumerate() {
+                row[0] = 0x38;
+                let scale = ((k.wrapping_mul(6563) ^ (k / 19)) % 8191) as f32;
+                row[INDEX_DIM..].copy_from_slice(&scale.to_le_bytes());
+            }
+            let keys = upload(dev, &keys)?;
+            let q = upload(dev, &vec![1f32; n * INDEX_HEADS * INDEX_DIM])?;
+            let w = upload(dev, &vec![2f32; n * INDEX_HEADS])?;
+            let picks = upload(dev, &vec![-1i32; n * TOP])?;
+            let blocks = upload(dev, &vec![-1i32; n * TOP_BLOCKS])?;
+            let mut bytes = 0;
+            cuda_ok(
+                unsafe { ds4_attn_index_bytes(width as i32, n as i32, &mut bytes) },
+                "index benchmark layout",
+            )?;
+            let workspace = upload(dev, &vec![0u8; bytes])?;
+            let scratch = GpuBuffer::new(dev)?;
+            let has_blocks = width > TOP_BLOCKS * BLOCK;
+            let pos = width - n;
+            let run = || {
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_index_select(
+                            dev,
+                            workspace.data(),
+                            keys.ptr.as_ptr(),
+                            q.data(),
+                            w.data(),
+                            ptr::null(),
+                            width as i32,
+                            pos as i32,
+                            1,
+                            n as i32,
+                            picks.data(),
+                            if has_blocks {
+                                blocks.data()
+                            } else {
+                                ptr::null_mut()
+                            },
+                        )
+                    },
+                    "index benchmark selection",
+                )
+            };
+            let mut scores = vec![0f32; width * n];
+            let mut reference = || -> Result<(Vec<i32>, Vec<i32>)> {
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_scores(
+                            dev,
+                            scratch.ptr.as_ptr(),
+                            keys.ptr.as_ptr(),
+                            q.data(),
+                            w.data(),
+                            ptr::null(),
+                            width as i32,
+                            n as i32,
+                            scores.as_mut_ptr(),
+                        )
+                    },
+                    "index benchmark baseline",
+                )?;
+                let mut selected = Vec::with_capacity(n * TOP);
+                let mut candidates = Vec::with_capacity(n * TOP_BLOCKS);
+                for (j, row) in scores.chunks_exact(width).enumerate() {
+                    let visible = &row[..pos + j + 1];
+                    selected.extend(best(visible, TOP).into_iter().map(|id| id as i32));
+                    selected.resize((j + 1) * TOP, -1);
+                    if has_blocks {
+                        candidates
+                            .extend(candidate_blocks(visible).into_iter().map(|id| id as i32));
+                    }
+                }
+                Ok((selected, candidates))
+            };
+            run()?;
+            let (expected, expected_blocks) = reference()?;
+            let mut got = vec![0i32; n * TOP];
+            read(&picks, &mut got)?;
+            assert_eq!(got, expected, "512k index token winners");
+            if has_blocks && pos >= TOP_BLOCKS * BLOCK {
+                let mut got = vec![0i32; n * TOP_BLOCKS];
+                read(&blocks, &mut got)?;
+                assert_eq!(got, expected_blocks, "512k index block winners");
+            }
+            let start = std::time::Instant::now();
+            for _ in 0..3 {
+                run()?;
+            }
+            cuda_ok(unsafe { cudaDeviceSynchronize() }, "timing GPU index")?;
+            let gpu_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
+            let start = std::time::Instant::now();
+            for _ in 0..3 {
+                std::hint::black_box(reference()?);
+            }
+            let host_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
+            eprintln!("index rows={n} positions={width} workspace={} bytes GPU={gpu_us:.1}us CPU-rank={host_us:.1}us",bytes);
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "set DS4_TEST_DEVICE to a visible CUDA sm_120 inference GPU ordinal"]
     fn cuda_tensor_core_sparse_matches_scalar_and_rowwise_verification() -> Result<()> {
         unsafe extern "C" {
@@ -1521,7 +1935,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 &mut source.packed,
             );
-            let cache = source.on(device)?;
+            let cache = source.on(device, None)?;
             let prior = upload(device, &prior)?;
             let current = upload(device, &current)?;
             let q = upload(device, &queries)?;
@@ -1623,7 +2037,7 @@ mod tests {
         key[2] = 3.;
         let mut rows = Rows::default();
         pack_values(&key, &mut rows.packed);
-        let latent = rows.on(device)?;
+        let latent = rows.on(device, None)?;
         let mut query = vec![0.; HEADS * DIM];
         let sink = [-2.0f32; HEADS];
         for h in 0..HEADS {
