@@ -1,0 +1,321 @@
+{
+  "checkpoint": "checkpoint-2026-11-26-c2-02-markov",
+  "decision": "Reject the two-per-warp proposal shortlist. Its isolated rank-256 scan was faster, but lower acceptance increased verification rounds and both single-client workloads lost more than 4%.",
+  "suite": "One warm-up and six warm waves per workload on a freshly started process for each leg. Edit first, then coding.",
+  "devices": "host GPUs 1, 2; RTX PRO 6000 Blackwell, 375 W per GPU, 225 W CPU socket",
+  "edit": "25,625 input, 1,500 output, published first-token-to-end metric including reasoning; deterministic edit of functions 50\u201390.",
+  "long": "404,151 input, 512 output, first-to-last visible text excluding first token; frozen coding history.",
+  "gpu_tests_passed": 91,
+  "base_profile": "compose.yml + compose.c1-optimized.yml; DS4_BATCH_TOPK=1, DS4_EXPERT_EVICTION=lfu, DS4_C1_OUTPUT_CONSENSUS=1, DS4_PROMPT_LOOKUP=1, DS4_OUTPUT_LOOKUP=single, DS4_ADAPTIVE_LOOKUP=1, DS4_LOOKUP_K=128. Each leg additionally sets the flags in config.",
+  "config": [
+    [
+      "off-a",
+      "ds4-flash-rs:c1-markov",
+      {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "on",
+      "ds4-flash-rs:c1-markov",
+      {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "1"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ],
+    [
+      "off-b",
+      "ds4-flash-rs:c1-markov",
+      {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "0"
+      },
+      [
+        "edit",
+        "long"
+      ],
+      6
+    ]
+  ],
+  "legs": {
+    "off-a": {
+      "image": "sha256:66bd73a4e721b3968ccd4af699ea6dc14dacf2bd8b94dbf06d45f5018eef1bcf",
+      "env": {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "0"
+      },
+      "edit": {
+        "rates": [
+          383.9264458349463,
+          383.8389994752516,
+          383.4579621816445,
+          383.4073721943525,
+          384.94723627770907,
+          383.9200162775946
+        ],
+        "median": 383.8795078764231,
+        "whole": 377.9592892369417,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "ebb36acf49a97b13746a41884c43bf03f74ea21aa687cd0685a0eefd2f8e8207",
+        "spec_including_warmup": {
+          "learned": [
+            1043,
+            4557,
+            2954
+          ],
+          "lookup": [
+            112,
+            7105,
+            6384
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          254.22248447642133,
+          253.2271731817147,
+          252.96529257556045,
+          252.23866379987368,
+          253.0031749176726,
+          254.2423755979729
+        ],
+        "median": 253.11517404969365,
+        "whole": 196.16206828534536,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "f0f950297d17f4c8b61638405623ec4ee06c528bf8a53f8aa75079f17fe89524",
+        "spec_including_warmup": {
+          "learned": [
+            602,
+            3794,
+            2968
+          ]
+        }
+      }
+    },
+    "on": {
+      "image": "sha256:66bd73a4e721b3968ccd4af699ea6dc14dacf2bd8b94dbf06d45f5018eef1bcf",
+      "env": {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "1"
+      },
+      "edit": {
+        "rates": [
+          366.2068101627387,
+          366.4048689055384,
+          366.48321609825626,
+          366.67277080620477,
+          368.95436750873773,
+          368.6550809048676
+        ],
+        "median": 366.57799345223054,
+        "whole": 361.08820017258813,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "b46570215cf48b0f6599c00544f7933ff5861df2dd101241d7cebeabd54966bb",
+        "spec_including_warmup": {
+          "learned": [
+            1127,
+            4781,
+            2863
+          ],
+          "lookup": [
+            112,
+            7105,
+            6391
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          241.50583316365694,
+          242.8929458675833,
+          242.2992222907399,
+          242.35036176509155,
+          241.10152665003767,
+          242.05363850939548
+        ],
+        "median": 242.1764304000677,
+        "whole": 192.16942605627662,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "f442a3667f4429b09eb41e6ae44d7864af8976e479e17012abc5540b34ae84a0",
+        "spec_including_warmup": {
+          "learned": [
+            637,
+            4060,
+            2940
+          ]
+        }
+      }
+    },
+    "off-b": {
+      "image": "sha256:66bd73a4e721b3968ccd4af699ea6dc14dacf2bd8b94dbf06d45f5018eef1bcf",
+      "env": {
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "0"
+      },
+      "edit": {
+        "rates": [
+          383.2966265272049,
+          383.1832918862246,
+          383.63770566139857,
+          383.73523334701537,
+          384.11291901988,
+          383.2692470064475
+        ],
+        "median": 383.4671660943018,
+        "whole": 377.5509884809826,
+        "hashes": [
+          [
+            "0fd431718937c66f17598069d91890804ec3137dd1d3413b0a9fc70e05200552",
+            "2ee45432806140b2b152549720424f5a19cc029b7a3503827f11e97e399e7288",
+            "ee0f973540b0cf674a01e5fe76d4893dee68d967de7d0badc837ed2347da2efb"
+          ]
+        ],
+        "raw_sha256": "30217943f42b48dd1734cce842c9e7896fb142d2d149b7cd81b43166c856a5dc",
+        "spec_including_warmup": {
+          "learned": [
+            1043,
+            4557,
+            2954
+          ],
+          "lookup": [
+            112,
+            7105,
+            6384
+          ]
+        }
+      },
+      "long": {
+        "rates": [
+          253.42412254958913,
+          252.2363877890186,
+          251.90274901683588,
+          252.57591137243273,
+          253.60021510462292,
+          252.2994281043556
+        ],
+        "median": 252.43766973839416,
+        "whole": 195.26237940930338,
+        "hashes": [
+          "fd4ac13bac5ef67d5f679cc3dbd1e6482ec325b4bfec36fa012d7eb45169fe26"
+        ],
+        "raw_sha256": "c04e8790e70cf1ff6427f447c872047a87646adf6bb1883926a93eeec26025d6",
+        "spec_including_warmup": {
+          "learned": [
+            602,
+            3794,
+            2968
+          ]
+        }
+      }
+    }
+  },
+  "micro-summary": {
+    "shape": "synthetic BF16 correction and raw logits, 129280 vocabulary x 256 rank, 7 draft positions; table reused warm across iterations",
+    "legs": [
+      {
+        "mode": 0,
+        "median_us_for_seven_rows": 96.65,
+        "timed_samples": 12,
+        "matching_ids": 7
+      },
+      {
+        "mode": 1,
+        "median_us_for_seven_rows": 28.499,
+        "timed_samples": 12,
+        "matching_ids": 7
+      },
+      {
+        "mode": 0,
+        "median_us_for_seven_rows": 96.546,
+        "timed_samples": 12,
+        "matching_ids": 7
+      }
+    ],
+    "raw_sha256": "667e7b95d423cb1a9072f38e94f8c69e635471124cd1be3747f28b0bf10d7693"
+  },
+  "table-bounds": {
+    "mtp.2.markov_head.embed.weight": {
+      "source": "/mnt/models/dsv41-flash-exl3/drafter-code-k7/model-00046-of-00048.safetensors",
+      "shape": [
+        129280,
+        256
+      ],
+      "bf16_max_magnitude_bits": "0x40eb",
+      "required_max_magnitude_bits": "0x4f80",
+      "sha256": "f781311003ccb6b72f3b608a3a294084ff51f30d72b772a0586b2bb25356ca9b"
+    },
+    "mtp.2.markov_head.head.weight": {
+      "source": "/mnt/models/dsv41-flash-exl3/drafter-code-k7/model-00046-of-00048.safetensors",
+      "shape": [
+        129280,
+        256
+      ],
+      "bf16_max_magnitude_bits": "0x4086",
+      "required_max_magnitude_bits": "0x4f80",
+      "sha256": "3e5f34ef184d9afef3f39634dda2eb7e4d600185c362f20b5308cfa78e2cc403"
+    }
+  },
+  "detail": {
+    "image": "sha256:66bd73a4e721b3968ccd4af699ea6dc14dacf2bd8b94dbf06d45f5018eef1bcf",
+    "tested_release_sha256": "af9ed59415381fef80a47a214ec8e9ad41552025a6ae4a168a71698506025f53",
+    "gpu_suite": {
+      "passed": 91,
+      "log_sha256": "81326786549d065d4ddfe3326824d33a9d2a8b8f9409bb387174ac74b191c832",
+      "host_devices": [
+        1,
+        2
+      ],
+      "effective_flags": {
+        "DS4_C1_OUTPUT_CONSENSUS": "1",
+        "DS4_EXPERT_EVICTION": "lfu",
+        "DS4_BATCH_TOPK": "1",
+        "DS4_PROMPT_LOOKUP": "1",
+        "DS4_OUTPUT_LOOKUP": "single",
+        "DS4_ADAPTIVE_LOOKUP": "1",
+        "DS4_LOOKUP_K": "128",
+        "DS4_EXTEND_REPETITION": "1",
+        "DS4_MARKOV_SHORTLIST": "1"
+      }
+    },
+    "starting_service": {
+      "image": "sha256:7d5eb7b2e8b1626a07696c4eaf1b74179e00b5d93ebabb944ac664280c00812e",
+      "serving": {
+        "DS4_C1_OUTPUT_CONSENSUS": "1",
+        "DS4_EXPERT_EVICTION": "lfu",
+        "DS4_BATCH_TOPK": "1",
+        "DS4_PROMPT_LOOKUP": "1",
+        "DS4_OUTPUT_LOOKUP": "single",
+        "DS4_ADAPTIVE_LOOKUP": "1",
+        "DS4_LOOKUP_K": "128"
+      },
+      "timing": "read back after baseline on the same configured release"
+    }
+  }
+}

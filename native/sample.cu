@@ -98,13 +98,63 @@ __global__ void markov_parts(const __nv_bfloat16 *emb,const __nv_bfloat16 *head,
     }
     block_best(w,out+blockIdx.x,nullptr);
 }
+// Approximate only the draft proposal. Each warp rescans the two strongest
+// raw logits in its group with the same rank-256 correction as markov_parts.
+__global__ void markov_shortlist(const __nv_bfloat16 *emb, const __nv_bfloat16 *head,
+        const float *base, int vocab, int seed, const float *prior, Winner *out) {
+    const int source = prior ? int(*prior) : seed;
+    if (source < 0 || source >= vocab) {
+        if (threadIdx.x == 0) out[blockIdx.x] = {0.f, -1};
+        return;
+    }
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int lane = threadIdx.x % 32;
+    const Winner empty{-INFINITY, INT_MAX};
+    Winner raw = empty, corrected = empty;
+    if (id < vocab) {
+        const float score = base[id];
+        raw = {score, isfinite(score) ? id : -1};
+    }
+    float x[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j)
+        x[j] = __bfloat162float(emb[size_t(source) * 256 + j * 32 + lane]);
+    for (int rank = 0; rank < 2; ++rank) {
+        const Winner top = warp_best(raw);
+        const int token = __shfl_sync(0xffffffff, top.id, 0);
+        if (token < 0) {
+            corrected = {0.f, -1};
+            break;
+        }
+        if (token == INT_MAX) break;
+        float sum = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j)
+            sum = fmaf(x[j], __bfloat162float(head[size_t(token)*256 + j*32 + lane]), sum);
+        for (int d = 16; d; d /= 2) sum += __shfl_down_sync(0xffffffff, sum, d);
+        if (!lane) {
+            const float v = top.value + sum;
+            corrected = best(corrected, {v, isfinite(v) ? token : -1});
+        }
+        if (id == token) raw = empty;
+    }
+    block_best(corrected, out + blockIdx.x, nullptr);
+}
 extern "C" int ds4_markov(int device,const void *emb,const void *head,const float *base,
-        float *scratch,float *ids,int seed,int rows,int vocab) {
+        float *scratch,float *ids,int seed,int rows,int vocab,int shortlist) {
     auto e=cudaSetDevice(device); if (e!=cudaSuccess) return e;
-    int parts=(vocab+63)/64;
+    const int entries = shortlist ? 256 : 64;
+    const int parts = (vocab + entries - 1) / entries;
     for(int i=0;i<rows;++i) {
-        markov_parts<<<parts,256>>>((const __nv_bfloat16*)emb,(const __nv_bfloat16*)head,
-            base+size_t(i)*vocab,vocab,seed,i ? ids+i-1 : nullptr,(Winner*)scratch);
+        const auto *embedding = static_cast<const __nv_bfloat16*>(emb);
+        const auto *weights = static_cast<const __nv_bfloat16*>(head);
+        const float *row = base + size_t(i) * vocab;
+        const float *prior = i ? ids + i - 1 : nullptr;
+        auto *partial = reinterpret_cast<Winner*>(scratch);
+        if (shortlist)
+            markov_shortlist<<<parts,256>>>(embedding, weights, row, vocab, seed, prior, partial);
+        else
+            markov_parts<<<parts,256>>>(embedding, weights, row, vocab, seed, prior, partial);
         e=cudaGetLastError(); if (e!=cudaSuccess) return e;
         finish_parts<<<1,256>>>((Winner*)scratch,parts,ids+i);
         e=cudaGetLastError(); if (e!=cudaSuccess) return e;

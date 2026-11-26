@@ -38,6 +38,7 @@ extern "C" {
         seed: i32,
         rows: i32,
         vocab: i32,
+        shortlist: i32,
     ) -> i32;
     fn ds_upload(
         dev: c_int,
@@ -100,6 +101,15 @@ fn checked(code: c_int) -> Result<()> {
         unsafe { CStr::from_ptr(ds_dense_error()) }.to_string_lossy()
     );
     Ok(())
+}
+// A skipped correction must never hide a nonfinite score. BF16 magnitudes
+// <= 2^32 bound the rank-256 dot by 2^72, well below one ULP at f32::MAX.
+fn bounded_markov_table(bytes: &[u8]) -> bool {
+    let (values, remainder) = bytes.as_chunks::<2>();
+    remainder.is_empty()
+        && values
+            .iter()
+            .all(|&b| (u16::from_le_bytes(b) & 0x7fff) <= 0x4f80)
 }
 pub fn packed_dense() -> bool {
     std::env::var_os("DS4_PACKED_DENSE").is_some_and(|v| v == "1")
@@ -183,6 +193,7 @@ pub struct Runtime {
     pub(crate) target_prefill: bool,
     prefill_tiles: i32,
     verification_tiles: i32,
+    markov_shortlist: bool,
     packed: bool,
     parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
@@ -224,6 +235,11 @@ impl Runtime {
             target_prefill: false,
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
+            markov_shortlist: match std::env::var("DS4_MARKOV_SHORTLIST").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => anyhow::bail!("DS4_MARKOV_SHORTLIST must be 0 or 1"),
+            },
             packed: packed_dense(),
             parallel: None,
             pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
@@ -371,6 +387,10 @@ impl Runtime {
                 w.dtype == "BF16" && w.shape == [rows, cols],
                 "invalid BF16 table {name}"
             );
+            if self.markov_shortlist && !bounded_markov_table(w.data) {
+                eprintln!("Markov shortlist disabled for out-of-range table {name}");
+                self.markov_shortlist = false;
+            }
             self.moe_cache.reserve(self.device, w.data.len())?;
             let mut raw = ptr::null_mut();
             checked(unsafe {
@@ -470,7 +490,8 @@ impl Runtime {
         );
         let emb = self.raw_bf16("mtp.2.markov_head.embed.weight", VOCAB, 256)?;
         let head = self.raw_bf16("mtp.2.markov_head.head.weight", VOCAB, 256)?;
-        let mut tmp = self.buffer(VOCAB.div_ceil(64) * 2)?;
+        let entries = if self.markov_shortlist { 256 } else { 64 };
+        let mut tmp = self.buffer(VOCAB.div_ceil(entries) * 2)?;
         let mut ids = self.buffer(rows)?;
         let e = unsafe {
             ds4_markov(
@@ -483,6 +504,7 @@ impl Runtime {
                 seed as i32,
                 rows as i32,
                 VOCAB as i32,
+                self.markov_shortlist.into(),
             )
         };
         ensure!(e == 0, "CUDA Markov selection failed ({e})");
@@ -729,6 +751,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn markov_shortlist_requires_bounded_finite_bf16_tables() {
+        let bytes = |bits: &[u16]| {
+            bits.iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        assert!(!bounded_markov_table(&[0]));
+        assert!(bounded_markov_table(&bytes(&[
+            0, 0x8000, 0x0001, 0x4f80, 0xcf80
+        ])));
+        for bits in [0x4f81, 0xcf81, 0x7f80, 0xff80, 0x7fc1, 0xffc1] {
+            assert!(!bounded_markov_table(&bytes(&[0x3f80, bits])));
+        }
+    }
+
+    #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an inference GPU"]
     fn failed_request_allocation_leaves_next_cuda_launch_clean() -> Result<()> {
         unsafe extern "C" {
@@ -907,44 +945,43 @@ mod tests {
         }
         let e = upload(emb.as_ptr().cast(), cols, 256, 1)?;
         let h = upload(head.as_ptr().cast(), cols, 256, 1)?;
-        assert_eq!(
-            unsafe {
-                ds4_markov(
-                    dev,
-                    e.ptr,
-                    h.ptr,
-                    scores.ptr.cast(),
-                    tmp.ptr.cast(),
-                    ids.ptr.cast(),
-                    4,
-                    3,
-                    cols as i32,
-                )
-            },
-            0
-        );
-        read(&mut host)?;
-        assert_eq!(host, [33., 512., 9.]);
-        x[1] = f32::INFINITY;
+        let run_markov = |scores: &Matrix, shortlist: i32, seed: i32| -> Result<[f32; 3]> {
+            let mut result = [0.; 3];
+            assert_eq!(
+                unsafe {
+                    ds4_markov(
+                        dev,
+                        e.ptr,
+                        h.ptr,
+                        scores.ptr.cast(),
+                        tmp.ptr.cast(),
+                        ids.ptr.cast(),
+                        seed,
+                        3,
+                        cols as i32,
+                        shortlist,
+                    )
+                },
+                0
+            );
+            read(&mut result)?;
+            Ok(result)
+        };
+        assert_eq!(run_markov(&scores, 0, 4)?, [33., 512., 9.]);
+        // The raw scores tie. Token 9 is pruned, but 33 and the tail token 512 survive.
+        assert_eq!(run_markov(&scores, 1, 4)?, [33., 512., 0.]);
+        x[cols * 2 + 9] = 1.;
         scores = as_f32(&x)?;
-        assert_eq!(
-            unsafe {
-                ds4_markov(
-                    dev,
-                    e.ptr,
-                    h.ptr,
-                    scores.ptr.cast(),
-                    tmp.ptr.cast(),
-                    ids.ptr.cast(),
-                    4,
-                    3,
-                    cols as i32,
-                )
-            },
-            0
-        );
-        read(&mut host)?;
-        assert_eq!(host, [-1.; 3]);
+        assert_eq!(run_markov(&scores, 1, 4)?, [33., 512., 9.]);
+        assert_eq!(run_markov(&scores, 1, -1)?, [-1.; 3]);
+        for (index, value) in [(15, f32::NEG_INFINITY), (516, f32::NAN), (1, f32::INFINITY)] {
+            x[index] = value;
+            scores = as_f32(&x)?;
+            for shortlist in [0, 1] {
+                assert_eq!(run_markov(&scores, shortlist, 4)?, [-1.; 3]);
+            }
+            x[index] = 0.;
+        }
         let n = 4096;
         let mut logits = [0., 3f32.ln()].repeat(n);
         logits[0] = f32::NAN;
