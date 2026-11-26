@@ -61,3 +61,7 @@ Tagged the stable engine and serving image before changing the CUDA scorer. Redu
 ## Expert uploads and draft limits at 404k
 
 Six 512-token coding clients delivered 260–264 aggregate tok/s on the 375 W checkpoint. A maximum draft length of five measured 258, and a confidence threshold of 0.65 measured 261. Neither improved delivery against both controls. The next experiments target repeated expert uploads (2.78–2.82 GiB/s during six-way decode), host copies during warm prefix admission, and the routed expert projection kernel. [Ranked experiments, GPU timelines and controls](NEXT-OPTIMIZATIONS.md)
+
+## Frequency-based expert eviction at 375 W
+
+The local checkpoint tag `checkpoint-2026-11-26-before-expert-cache` marks the start of this experiment. At the same slot budget, LFU reduced median six-client expert uploads from 2,676 to 1,191 per warm 404k coding wave. The live candidate delivered 278.1 tok/s at 512 output tokens per client and 300.0 and 297.0 tok/s in two independently controlled 768-token runs. The normal service uses the LRU checkpoint. [Full-window gates, rates, replay evidence and opt-in launch](EXPERT-CACHE-EXPERIMENT.md)

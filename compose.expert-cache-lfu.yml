@@ -1,0 +1,5 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:expert-cache-policy-3209b98
+    environment:
+      DS4_EXPERT_EVICTION: lfu
