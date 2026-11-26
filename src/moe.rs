@@ -1,5 +1,5 @@
 //! DeepSeek V4.1 Flash text MoE. Weights stay mmap-backed on the host until an
-//! expert is actually selected. Slots are reused in LRU order on each GPU.
+//! expert is actually selected. Each GPU independently selects reusable slots.
 use anyhow::{bail, ensure, Context, Result};
 use rayon::prelude::*;
 use std::{
@@ -147,7 +147,7 @@ impl MoeCache {
         let missing = bytes.saturating_add(64 << 20).saturating_sub(free);
         let to_remove = missing.div_ceil(SLOT_BYTES).min(cache.slots.len());
         for _ in 0..to_remove {
-            let slot = cache.evict_oldest()?;
+            let slot = cache.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(device, slot as *mut c_void) };
         }
         Ok(())
@@ -170,6 +170,14 @@ impl Layer {
 }
 
 type Key = (Layer, usize);
+const EXPERT_KEYS: usize = 40 * EXPERTS + 3 * DRAFT_EXPERTS;
+
+fn frequency_index((layer, expert): Key) -> usize {
+    match layer {
+        Layer::Backbone(n) => n * EXPERTS + expert,
+        Layer::Draft(n) => 40 * EXPERTS + n * DRAFT_EXPERTS + expert,
+    }
+}
 fn switch(name: &str, default: bool) -> Result<bool> {
     match std::env::var(name).as_deref() {
         Err(std::env::VarError::NotPresent) => Ok(default),
@@ -237,6 +245,7 @@ struct DeviceCache {
     limit: usize,
     slots: HashMap<Key, (usize, u64)>,
     lru: BTreeSet<(u64, Key)>,
+    frequencies: Option<Box<[u64]>>,
     clock: u64,
     scratch: usize,
     scratch_bytes: usize,
@@ -269,6 +278,11 @@ impl DeviceCache {
             limit,
             slots: HashMap::new(),
             lru: BTreeSet::new(),
+            frequencies: match std::env::var("DS4_EXPERT_EVICTION").as_deref() {
+                Err(std::env::VarError::NotPresent) | Ok("lru") => None,
+                Ok("lfu") => Some(vec![0; EXPERT_KEYS].into_boxed_slice()),
+                _ => bail!("DS4_EXPERT_EVICTION must be lru or lfu"),
+            },
             clock: 0,
             scratch: 0,
             scratch_bytes: 0,
@@ -289,8 +303,18 @@ impl DeviceCache {
         })
     }
 
-    fn evict_oldest(&mut self) -> Result<usize> {
-        let (_, key) = self.lru.pop_first().context("empty expert cache")?;
+    fn evict_slot(&mut self, group_start: u64) -> Result<usize> {
+        let key = if let Some(frequencies) = &self.frequencies {
+            // Already acquired slots are still referenced by this physical CUDA group.
+            self.slots
+                .iter()
+                .filter(|(_, (_, last))| *last <= group_start)
+                .min_by_key(|(key, (_, last))| (frequencies[frequency_index(**key)], *last))
+                .map(|(key, _)| *key)
+                .context("no evictable expert slot")?
+        } else {
+            self.lru.pop_first().context("empty expert cache")?.1
+        };
         Ok(self.slots.remove(&key).context("missing LRU slot")?.0)
     }
 
@@ -306,7 +330,7 @@ impl DeviceCache {
         // another allocation consumes the reserve, later groups shrink again.
         let capacity = Self::available_slots(self.slots.len(), free, self.limit);
         while self.slots.len() > capacity {
-            let slot = self.evict_oldest()?;
+            let slot = self.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
         }
         Ok(capacity)
@@ -330,13 +354,24 @@ impl DeviceCache {
 
     fn touch(&mut self, key: Key, stamp: u64) -> Option<usize> {
         let (slot, age) = self.slots.get_mut(&key)?;
-        self.lru.remove(&(*age, key));
+        if let Some(frequencies) = &mut self.frequencies {
+            let frequency = &mut frequencies[frequency_index(key)];
+            *frequency = frequency.saturating_add(1);
+        } else {
+            self.lru.remove(&(*age, key));
+            self.lru.insert((stamp, key));
+        }
         *age = stamp;
-        self.lru.insert((stamp, key));
         Some(*slot)
     }
 
-    fn acquire(&mut self, weights: &Weights, key: Key, capacity: usize) -> Result<usize> {
+    fn acquire(
+        &mut self,
+        weights: &Weights,
+        key: Key,
+        capacity: usize,
+        group_start: u64,
+    ) -> Result<usize> {
         self.clock += 1;
         let stamp = self.clock;
         if let Some(slot) = self.touch(key, stamp) {
@@ -345,7 +380,7 @@ impl DeviceCache {
         // Check all sizes before passing mmap pointers over FFI.
         let parts = checkpoint_parts(weights, key)?;
         let slot = if self.slots.len() >= capacity {
-            self.evict_oldest()?
+            self.evict_slot(group_start)?
         } else {
             let mut slot = ptr::null_mut();
             cuda(unsafe { ds_moe_alloc(&mut slot) })?;
@@ -363,7 +398,12 @@ impl DeviceCache {
         }
         self.uploads += 1;
         self.slots.insert(key, (slot, stamp));
-        self.lru.insert((stamp, key));
+        if let Some(frequencies) = &mut self.frequencies {
+            let frequency = &mut frequencies[frequency_index(key)];
+            *frequency = frequency.saturating_add(1);
+        } else {
+            self.lru.insert((stamp, key));
+        }
         Ok(slot)
     }
 }
@@ -529,11 +569,12 @@ impl Dispatch<'_> {
     ) -> Result<()> {
         let mut jobs = Vec::new();
         let mut rows = Vec::with_capacity(routes.len());
+        let group_start = device.clock;
         let mut begin = 0;
         while begin < routes.len() {
             let expert = routes[begin].expert;
             let count = routes[begin..].partition_point(|r| r.expert == expert);
-            let slot = device.acquire(self.weights, (self.layer, expert), capacity)?;
+            let slot = device.acquire(self.weights, (self.layer, expert), capacity, group_start)?;
             for start in (begin..begin + count).step_by(16) {
                 jobs.push(Job {
                     expert: slot,
@@ -937,6 +978,7 @@ mod tests {
     #[test]
     fn cached_hits_protect_their_slot_during_eviction() {
         let mut cache = DeviceCache::new(0).unwrap();
+        cache.frequencies = None;
         // Null entries need no CUDA allocation. Exercise the same ordering
         // that protects experts collected for a pending group kernel.
         for i in 0..3 {
@@ -944,10 +986,38 @@ mod tests {
             cache.lru.insert((i as u64, (Backbone(2), i)));
         }
         assert_eq!(cache.touch((Backbone(2), 0), 3), Some(0));
-        cache.evict_oldest().unwrap();
+        cache.evict_slot(u64::MAX).unwrap();
         assert!(!cache.slots.contains_key(&(Backbone(2), 1)));
         assert!(cache.slots.contains_key(&(Backbone(2), 0)));
         assert!(cache.slots.contains_key(&(Backbone(2), 2)));
+    }
+
+    #[test]
+    fn lfu_preserves_group_slots_and_breaks_frequency_ties_by_recency() {
+        let mut cache = DeviceCache::new(0).unwrap();
+        let keys = [
+            (Backbone(39), 383),
+            (Layer::Draft(0), 0),
+            (Layer::Draft(2), 127),
+        ];
+        let mut frequency = vec![0; EXPERT_KEYS].into_boxed_slice();
+        for (i, key) in keys.iter().copied().enumerate() {
+            cache.slots.insert(key, (0, i as u64 + 1));
+            frequency[frequency_index(key)] = [8, 8, 1][i];
+        }
+        cache.frequencies = Some(frequency);
+        assert_eq!(cache.touch(keys[2], 4), Some(0));
+        cache.evict_slot(3).unwrap();
+        assert!(!cache.slots.contains_key(&keys[0]));
+        assert!(cache.slots.contains_key(&keys[2]));
+        cache.evict_slot(u64::MAX).unwrap();
+        assert!(!cache.slots.contains_key(&keys[2]));
+        assert_eq!(
+            cache.frequencies.as_ref().unwrap()[frequency_index(keys[2])],
+            2
+        );
+        assert!(cache.evict_slot(0).is_err());
+        assert_eq!(cache.slots.len(), 1);
     }
 
     #[test]
@@ -964,12 +1034,11 @@ mod tests {
         let root = std::env::var("DS4_TEST_PACK")
             .unwrap_or_else(|_| "/mnt/models/dsv41-flash-exl3".into());
         let weights = Weights::open(std::path::Path::new(&root))?;
-        let mut cache = DeviceCache::new(device)?;
         let x = (0..HIDDEN)
             .map(|i| (i as f32 * 0.3).sin())
             .collect::<Vec<_>>();
         let run = |cache: &mut DeviceCache, expert| -> Result<Vec<f32>> {
-            let slot = cache.acquire(&weights, (Backbone(0), expert), 2)?;
+            let slot = cache.acquire(&weights, (Backbone(0), expert), 2, u64::MAX)?;
             let mut y = vec![0.; HIDDEN];
             let job = Job {
                 expert: slot,
@@ -993,17 +1062,25 @@ mod tests {
             cuda(status)?;
             Ok(y)
         };
-        let first = run(&mut cache, 0)?;
-        let second = run(&mut cache, 1)?;
-        let first_slot = cache.slots[&(Backbone(0), 0)].0;
-        let second_slot = cache.slots[&(Backbone(0), 1)].0;
-        assert_eq!(first, run(&mut cache, 0)?);
-        let _ = run(&mut cache, 2)?;
-        assert!(!cache.slots.contains_key(&(Backbone(0), 1)));
-        assert_eq!(cache.slots[&(Backbone(0), 2)].0, second_slot);
-        assert_eq!(second, run(&mut cache, 1)?);
-        assert_eq!(cache.slots[&(Backbone(0), 1)].0, first_slot);
-        assert_eq!(cache.slots.len(), 2);
+        for lfu in [false, true] {
+            let mut cache = DeviceCache::new(device)?;
+            cache.frequencies = lfu.then(|| vec![0; EXPERT_KEYS].into_boxed_slice());
+            let first = run(&mut cache, 0)?;
+            let second = run(&mut cache, 1)?;
+            let first_slot = cache.slots[&(Backbone(0), 0)].0;
+            let second_slot = cache.slots[&(Backbone(0), 1)].0;
+            assert_eq!(first, run(&mut cache, 0)?);
+            let _ = run(&mut cache, 2)?;
+            assert!(!cache.slots.contains_key(&(Backbone(0), 1)));
+            assert_eq!(cache.slots[&(Backbone(0), 2)].0, second_slot);
+            assert_eq!(second, run(&mut cache, 1)?);
+            let expected = if lfu { second_slot } else { first_slot };
+            assert_eq!(cache.slots[&(Backbone(0), 1)].0, expected);
+            assert!(cache
+                .slots
+                .contains_key(&(Backbone(0), if lfu { 0 } else { 2 })));
+            assert_eq!(cache.slots.len(), 2);
+        }
         Ok(())
     }
 

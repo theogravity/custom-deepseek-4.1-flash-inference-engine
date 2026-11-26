@@ -47,6 +47,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_SWAP_RAM_MIB`, `DS4_SWAP_DISK_MIB` | 49152, 131072 | On-demand host RAM and NVMe budgets for suspended live requests |
 | `DS4_TIMING_RESTORES` | 0 | Set to 1 at launch to log one JSON event per completed target KV restore, including timings for each GPU and cache tier |
 | `DS4_BATCH_DRAFT` | 1 | Evaluate the learned drafter for multiple ready requests together |
+| `DS4_EXPERT_EVICTION` | lru | Select `lfu` to keep frequently used experts on each card. Counts span the server process lifetime. Ties use least-recent access. |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
