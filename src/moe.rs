@@ -57,6 +57,23 @@ unsafe extern "C" {
     fn ds_moe_peer_begin(link: *mut *mut c_void, primary: i32, peer: i32) -> i32;
     fn ds_moe_peer_end(link: *mut c_void) -> i32;
     fn ds_moe_peer_free(link: *mut c_void);
+    fn ds_moe_peer_capacity(link: *mut c_void) -> usize;
+    fn ds_moe_peer_stage(
+        link: *mut c_void,
+        x: *const f32,
+        nx: usize,
+        rows: usize,
+        peer_x: *mut *mut f32,
+        peer_output: *mut *mut f32,
+    ) -> i32;
+    fn ds_moe_peer_collect(
+        link: *mut c_void,
+        peer_output: *const f32,
+        compact: *mut f32,
+        destinations: *const i32,
+        rows: i32,
+        weighted: *mut f32,
+    ) -> i32;
     fn ds_moe_shared_swiglu(gate: *mut f32, up: *const f32, count: usize) -> i32;
     fn ds_moe_finish(routed: *const f32, shared_out: *mut f32, count: usize, top_k: i32) -> i32;
     fn ds_moe_run_dev(
@@ -230,6 +247,8 @@ struct DeviceCache {
     inline_metadata: bool,
     fused: bool,
     parallel: bool,
+    parallel_draft: bool,
+    staged: bool,
     peer_link: *mut c_void,
     metrics: bool,
 }
@@ -258,6 +277,8 @@ impl DeviceCache {
             inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
             fused: switch("DS4_MOE_FUSED", false)?,
             parallel: switch("DS4_EXPERT_PARALLEL", false)?,
+            parallel_draft: switch("DS4_EXPERT_PARALLEL_DRAFT", false)?,
+            staged: switch("DS4_EXPERT_STAGED", true)?,
             peer_link: ptr::null_mut(),
             metrics: switch("DS4_MOE_STATS", false)?,
         })
@@ -461,6 +482,12 @@ fn shared(rt: &mut Runtime, base: &str, x: &Dev, batch: usize) -> Result<Dev> {
     rt.linear_dev(&format!("{base}.shared_experts.w2.weight"), &gate, batch, 1)
 }
 
+#[derive(Clone, Copy)]
+struct PeerBuffers {
+    x: *mut f32,
+    output: *mut f32,
+}
+
 struct Dispatch<'a> {
     weights: &'a Weights,
     layer: Layer,
@@ -476,6 +503,7 @@ impl Dispatch<'_> {
         routes: &[Route],
         capacity: usize,
         splits: i32,
+        staged: Option<PeerBuffers>,
     ) -> Result<()> {
         let mut jobs = Vec::new();
         let mut rows = Vec::with_capacity(routes.len());
@@ -495,7 +523,12 @@ impl Dispatch<'_> {
                 rows.push(RoutedRow {
                     expert: slot,
                     token: route.token.try_into()?,
-                    output: (route.token * self.top_k + route.rank).try_into()?,
+                    output: if staged.is_some() {
+                        rows.len()
+                    } else {
+                        route.token * self.top_k + route.rank
+                    }
+                    .try_into()?,
                     weight: half::f16::from_f32(route.weight).to_f32(),
                 });
             }
@@ -510,8 +543,8 @@ impl Dispatch<'_> {
                 jobs.len() as i32,
                 rows.as_ptr(),
                 rows.len() as i32,
-                self.x.as_ptr(),
-                self.weighted.as_mut_ptr(),
+                staged.map_or(self.x.as_ptr(), |p| p.x.cast_const()),
+                staged.map_or_else(|| self.weighted.as_mut_ptr(), |p| p.output),
                 i32::from(matches!(self.layer, Layer::Draft(_))),
                 splits,
                 device.inline_metadata.into(),
@@ -547,6 +580,8 @@ struct Placement {
     capacity: usize,
     queried: usize,
     uploads_before: usize,
+    staged: Option<PeerBuffers>,
+    completed_rows: usize,
 }
 
 impl Placement {
@@ -569,11 +604,13 @@ impl Placement {
             },
             queried: usize::from(query),
             uploads_before: cache.uploads,
+            staged: None,
+            completed_rows: 0,
         })
     }
 
     fn run(
-        &self,
+        &mut self,
         cache: &mut MoeCache,
         dispatch: &mut Dispatch<'_>,
         mut rows: &[Route],
@@ -589,7 +626,12 @@ impl Placement {
         let device = cache.device(self.device)?;
         while !rows.is_empty() {
             let (n, _) = group_shape(rows, self.capacity);
-            dispatch.run_group(device, &rows[..n], self.capacity, splits)?;
+            let staged = self.staged.map(|p| PeerBuffers {
+                x: p.x,
+                output: unsafe { p.output.add(self.completed_rows * HIDDEN) },
+            });
+            dispatch.run_group(device, &rows[..n], self.capacity, splits, staged)?;
+            self.completed_rows += n;
             rows = &rows[n..];
         }
         Ok(())
@@ -621,7 +663,8 @@ fn forward<const E: usize, const K: usize>(
     let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
     let peer_id = rt.peer_device();
     let cache = rt.moe_cache.device(rt.device)?;
-    let parallel = cache.parallel;
+    let parallel = cache.parallel && (matches!(layer, Layer::Backbone(_)) || cache.parallel_draft);
+    let stage_copy = parallel && cache.staged;
     let peer_work = if parallel {
         Some(PeerWork::begin(cache, peer_id)?)
     } else {
@@ -659,19 +702,48 @@ fn forward<const E: usize, const K: usize>(
     } else {
         (&routes, &[])
     };
+    let mut compact = if stage_copy && !remote.is_empty() {
+        Some(rt.buffer(remote.len() * HIDDEN)?)
+    } else {
+        None
+    };
     let device = rt.moe_cache.device(rt.device)?;
-    let primary = Placement::prepare(device, layer, local, false)?;
+    let mut primary = Placement::prepare(device, layer, local, false)?;
     let report = device.metrics;
     // A user's slot limit also sets the logical group boundary. Splitting a
     // physical partition further for VRAM pressure does not change split-K.
     let max_experts = MAX_GROUP_EXPERTS.min(device.limit);
-    let peer = if parallel {
-        Some(Placement::prepare(
-            rt.moe_cache.device(peer_id)?,
-            layer,
-            remote,
-            true,
-        )?)
+    let mut peer = if let Some(work) = &peer_work {
+        let buffers = if compact.is_some() {
+            let required = x.len() + remote.len() * HIDDEN;
+            let allocated = unsafe { ds_moe_peer_capacity(work.0) };
+            if required > allocated {
+                cuda(unsafe { cudaSetDevice(peer_id) })?;
+                rt.moe_cache
+                    .reserve(peer_id, (required - allocated) * size_of::<f32>())?;
+            }
+            let mut buffers = PeerBuffers {
+                x: ptr::null_mut(),
+                output: ptr::null_mut(),
+            };
+            cuda(unsafe {
+                ds_moe_peer_stage(
+                    work.0,
+                    x.as_ptr(),
+                    x.len(),
+                    remote.len(),
+                    &mut buffers.x,
+                    &mut buffers.output,
+                )
+            })?;
+            Some(buffers)
+        } else {
+            None
+        };
+        // Staging already occupies its physical bytes before sizing expert slots.
+        let mut placement = Placement::prepare(rt.moe_cache.device(peer_id)?, layer, remote, true)?;
+        placement.staged = buffers;
+        Some(placement)
     } else {
         None
     };
@@ -686,7 +758,7 @@ fn forward<const E: usize, const K: usize>(
     while begin < routes.len() {
         let (count, jobs) = group_shape(&routes[begin..], max_experts);
         let splits = split_count(jobs, rt.verification && matches!(layer, Layer::Backbone(_)));
-        let nr = if let Some(peer) = &peer {
+        let nr = if let Some(peer) = &mut peer {
             let n = routes[begin..begin + count]
                 .iter()
                 .filter(|r| r.expert % 2 != 0)
@@ -715,7 +787,26 @@ fn forward<const E: usize, const K: usize>(
         begin += count;
     }
     if let Some(work) = peer_work {
+        let link = work.0;
         work.finish()?;
+        if let (Some(compact), Some(buffers)) =
+            (compact.as_mut(), peer.as_ref().and_then(|p| p.staged))
+        {
+            let destinations: Vec<i32> = remote
+                .iter()
+                .map(|r| (r.token * K + r.rank) as i32)
+                .collect();
+            cuda(unsafe {
+                ds_moe_peer_collect(
+                    link,
+                    buffers.output,
+                    compact.as_mut_ptr(),
+                    destinations.as_ptr(),
+                    remote.len().try_into()?,
+                    weighted.as_mut_ptr(),
+                )
+            })?;
+        }
     }
     cuda(unsafe {
         ds_moe_finish(
@@ -905,27 +996,30 @@ mod tests {
             } else {
                 39
             })?;
-            let x = rt.to_device(&input)?;
+            let xs = [rt.to_device(&input[..HIDDEN])?, rt.to_device(&input)?];
             rt.verification = matches!(layer, Layer::Backbone(_));
-            let mut baseline = None;
-            for parallel in [false, true] {
+            let mut baseline = vec![];
+            for (parallel, staged) in [(false, false), (true, false), (true, true)] {
                 rt.moe_cache = MoeCache::default();
                 let cache = rt.moe_cache.device(rt.device)?;
                 cache.parallel = parallel;
+                cache.parallel_draft = true;
+                cache.staged = staged;
                 cache.fused = true;
                 cache.limit = 2; // force slot reuse while remote kernels hold the old data
                 let peer = rt.peer_device();
                 rt.moe_cache.device(peer)?.limit = 2;
-                for _ in 0..2 {
+                for (index, x) in [&xs[0], &xs[1], &xs[1]].into_iter().enumerate() {
+                    let batch = x.len() / HIDDEN;
                     let y = match layer {
-                        Layer::Backbone(n) => forward_dev(&mut rt, n, &x, batch)?,
-                        Layer::Draft(n) => draft_forward(&mut rt, n, &x, batch)?,
+                        Layer::Backbone(n) => forward_dev(&mut rt, n, x, batch)?,
+                        Layer::Draft(n) => draft_forward(&mut rt, n, x, batch)?,
                     };
                     let actual: Vec<_> = rt.to_host(&y)?.into_iter().map(f32::to_bits).collect();
-                    if let Some(expected) = &baseline {
-                        assert_eq!(&actual, expected);
+                    if parallel {
+                        assert_eq!(actual, baseline[index]);
                     } else {
-                        baseline = Some(actual);
+                        baseline.push(actual);
                     }
                 }
                 if parallel {

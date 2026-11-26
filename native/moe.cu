@@ -507,6 +507,8 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
 struct PeerEvents {
     int primary, peer;
     cudaEvent_t ready = nullptr, done = nullptr;
+    float *staging = nullptr;
+    size_t capacity = 0;
 };
 
 extern "C" void ds_moe_peer_free(PeerEvents *p) {
@@ -514,9 +516,11 @@ extern "C" void ds_moe_peer_free(PeerEvents *p) {
     int old;
     if (cudaGetDevice(&old) == cudaSuccess) {
         cudaSetDevice(p->primary);
+        if (p->staging) cudaStreamSynchronize(nullptr); // retire the return DMA
         if (p->ready) cudaEventDestroy(p->ready);
         cudaSetDevice(p->peer);
         if (p->done) cudaEventDestroy(p->done);
+        if (p->staging) cudaFree(p->staging);
         cudaSetDevice(old);
     }
     delete p;
@@ -560,4 +564,50 @@ extern "C" int ds_moe_peer_end(PeerEvents *p) {
         cudaSetDevice(p->primary);
     }
     return int(status);
+}
+
+extern "C" size_t ds_moe_peer_capacity(const PeerEvents *p) { return p->capacity; }
+
+extern "C" int ds_moe_peer_stage(PeerEvents *p, const float *input, size_t nx,
+                                  size_t rows, float **peer_x, float **peer_output) {
+    struct Restore { int dev; ~Restore() { cudaSetDevice(dev); } } restore{p->primary};
+    CHECK(cudaSetDevice(p->peer));
+    size_t size = nx + rows * H;
+    if (p->capacity < size) {
+        if (p->staging) {
+            // The ready event also follows the previous return DMA on primary.
+            CHECK(cudaStreamSynchronize(nullptr));
+            CHECK(cudaFree(p->staging));
+        }
+        p->staging = nullptr;
+        p->capacity = 0;
+        CHECK(cudaMalloc(&p->staging, size * sizeof(float)));
+        p->capacity = size;
+    }
+    // The peer stream already waits on the primary activation's ready event.
+    CHECK(cudaMemcpyPeerAsync(p->staging, p->peer, input, p->primary, nx * sizeof(float)));
+    *peer_x = p->staging;
+    *peer_output = p->staging + nx;
+    return 0;
+}
+
+struct Destinations { int index[256]; };
+__global__ void scatter_peer(const __grid_constant__ Destinations rows, const float *compact, float *weighted) {
+    size_t c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c < H) weighted[size_t(rows.index[blockIdx.y]) * H + c] = compact[size_t(blockIdx.y) * H + c];
+}
+
+extern "C" int ds_moe_peer_collect(PeerEvents *p, const float *peer_output, float *compact,
+                                    const int *ids, int rows, float *weighted) {
+    CHECK(cudaSetDevice(p->primary));
+    // ds_moe_peer_end has made every peer result visible to the primary stream.
+    CHECK(cudaMemcpyPeerAsync(compact, p->primary, peer_output, p->peer, size_t(rows) * H * sizeof(float)));
+    for (int begin = 0; begin < rows; begin += 256) {
+        int count = std::min(256, rows-begin);
+        Destinations targets{};
+        std::memcpy(targets.index, ids + begin, count*sizeof(int));
+        scatter_peer<<<dim3((H+255)/256,count),256>>>(targets, compact + size_t(begin)*H, weighted);
+        CHECK(cudaGetLastError());
+    }
+    return 0;
 }
