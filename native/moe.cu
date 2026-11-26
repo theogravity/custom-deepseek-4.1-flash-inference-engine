@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <vector>
 
 struct Job {
@@ -27,7 +28,8 @@ constexpr int H = 5120, I = 2304;
 constexpr size_t TRELLIS = size_t(H) * I * 3 / 8;
 constexpr size_t EXPERT = 3 * (TRELLIS + (H + I) * sizeof(half));
 constexpr float HAD_SCALE = 0.08838834764831845f;
-enum Projection { Gate = 0, Up = 1, Down = 2 };
+// Physical projection order follows the checkpoint's contiguous w1, w2, w3.
+enum Projection { Gate = 0, Down = 1, Up = 2 };
 __device__ const half *suh(const char *expert, int projection) {
     return reinterpret_cast<const half *>(expert + 3 * TRELLIS) + projection * (H + I);
 }
@@ -238,6 +240,30 @@ void launch_projection(const Job *jobs, const RoutedRow *routes, int n_jobs, int
     rotate_output<projection>
         <<<dim3((N + 511) / 512, rows), 128>>>(routes, partial, dst, rows, splits);
 }
+// Small decode and verification descriptors fit in the kernel parameter block.
+// The CUDA launch copies this trivially-copyable argument before returning, so
+// the CPU can release its vectors and queue later kernels immediately.
+template <int capacity>
+struct Descriptors {
+    Job jobs[capacity];
+    RoutedRow routes[capacity];
+};
+template <int capacity>
+__global__ void write_descriptors(const __grid_constant__ Descriptors<capacity> plan,
+                                  int njobs, int rows, Job *jobs, RoutedRow *routes) {
+    int i = threadIdx.x;
+    if (i < njobs) jobs[i] = plan.jobs[i];
+    if (i < rows) routes[i] = plan.routes[i];
+}
+template <int capacity>
+void stage_descriptors(const Job *jobs, int njobs, const RoutedRow *routes, int rows,
+                       Job *dst_jobs, RoutedRow *dst_routes) {
+    Descriptors<capacity> plan{};
+    std::memcpy(plan.jobs, jobs, njobs * sizeof(Job));
+    std::memcpy(plan.routes, routes, rows * sizeof(RoutedRow));
+    write_descriptors<<<1, capacity>>>(plan, njobs, rows, dst_jobs, dst_routes);
+}
+
 template <bool mcg>
 void launch_ffn(Job *device_jobs, RoutedRow *device_rows, int n_jobs, int rows, int splits,
                 const float *x, half *rotated, float *partial, float *gate, float *up, float *weighted) {
@@ -267,20 +293,57 @@ extern "C" void ds_moe_free(int device, void *allocation) {
     cudaSetDevice(old);
 }
 
-// Packed order: three trellises then per-projection input and output scales.
-extern "C" int ds_moe_upload(char *slot, const void *const *parts) {
+// The public part array is w1/w3/w2, followed by each matching scale pair.
+// Safetensors groups the three trellises and all six scales in w1/w2/w3 order.
+// Coalesce adjacent extents only; independently allocated inputs work too.
+extern "C" int ds_moe_upload_parts(char *slot, const void *const *parts, int coalesce) {
+    constexpr int indices[] = {0, 2, 1, 3, 4, 7, 8, 5, 6};
+    constexpr size_t sizes[] = {TRELLIS, TRELLIS, TRELLIS, H*2, I*2, I*2, H*2, H*2, I*2};
     size_t offset = 0;
-    for (int p = 0; p < 9; ++p) {
-        size_t bytes = TRELLIS;
-        if (p >= 3) {
-            int projection = (p - 3) / 2;
-            bool input = (p - 3) % 2 == 0;
-            bytes = sizeof(half) * ((projection == Down) == input ? I : H);
-        }
-        CHECK(cudaMemcpy(slot + offset, parts[p], bytes, cudaMemcpyHostToDevice));
+    for (int p = 0; p < 9;) {
+        const void *src = parts[indices[p]];
+        size_t bytes = sizes[p++];
+        while (coalesce && p < 9 &&
+               reinterpret_cast<uintptr_t>(src) + bytes == reinterpret_cast<uintptr_t>(parts[indices[p]]))
+            bytes += sizes[p++];
+        CHECK(cudaMemcpy(slot + offset, src, bytes, cudaMemcpyHostToDevice));
         offset += bytes;
     }
     return 0;
+}
+
+extern "C" int ds_moe_upload(char *slot, const void *const *parts) {
+    return ds_moe_upload_parts(slot, parts, 1);
+}
+
+// Queue the small router read before launching the shared expert branch. The
+// host then waits just for these logits and ranks them during the shared GEMMs.
+extern "C" int ds_moe_router_start(float **host, size_t *capacity, cudaEvent_t *ready,
+                                   const float *logits, size_t count) {
+    if (!*ready) CHECK(cudaEventCreateWithFlags(ready, cudaEventDisableTiming));
+    if (*capacity < count) {
+        if (*host) {
+            CHECK(cudaEventSynchronize(*ready));
+            CHECK(cudaFreeHost(*host));
+            *host = nullptr;
+            *capacity = 0;
+        }
+        CHECK(cudaMallocHost(host, count * sizeof(float)));
+        *capacity = count;
+    }
+    CHECK(cudaMemcpyAsync(*host, logits, count * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaEventRecord(*ready));
+    return 0;
+}
+extern "C" int ds_moe_router_wait(cudaEvent_t ready) { return int(cudaEventSynchronize(ready)); }
+extern "C" void ds_moe_router_free(int device, float *host, cudaEvent_t ready) {
+    if (!ready && !host) return;
+    int old;
+    if (cudaGetDevice(&old) != cudaSuccess || cudaSetDevice(device) != cudaSuccess) return;
+    if (ready) cudaEventSynchronize(ready);
+    if (host) cudaFreeHost(host);
+    if (ready) cudaEventDestroy(ready);
+    cudaSetDevice(old);
 }
 
 extern "C" int ds_moe_shared_swiglu(float *gate, const float *up, size_t count) {
@@ -302,7 +365,7 @@ extern "C" int ds_moe_finish(const float *routed, float *shared_out, size_t coun
 // group also uses the default stream, including uploads into reused slots.
 extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *jobs, int n_jobs,
                               const RoutedRow *routes, int rows, const float *x, float *weighted,
-                              int mcg, int verify) {
+                              int mcg, int verify, int inline_metadata) {
     // Verifying several positions must use the same K-reduction boundaries as
     // serial decoding, even if the block touches 32 or more distinct experts.
     int splits = verify || n_jobs < 32 ? 8 : 2;
@@ -331,8 +394,16 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
     base += rotated_size;
     Job *device_jobs = reinterpret_cast<Job *>(base);
     auto device_rows = reinterpret_cast<RoutedRow *>(base + jobs_size);
-    CHECK(cudaMemcpy(device_jobs, jobs, jobs_size, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(device_rows, routes, size_t(rows) * sizeof(RoutedRow), cudaMemcpyHostToDevice));
+    if (inline_metadata && rows <= 64) {
+        if (rows <= 8)
+            stage_descriptors<8>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
+        else
+            stage_descriptors<64>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
+        CHECK(cudaGetLastError());
+    } else {
+        CHECK(cudaMemcpy(device_jobs, jobs, jobs_size, cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(device_rows, routes, size_t(rows) * sizeof(RoutedRow), cudaMemcpyHostToDevice));
+    }
     if (mcg)
         launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
     else
@@ -355,7 +426,7 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
     CHECK(cudaMalloc(&io.ptr, 2 * count * sizeof(float)));
     CHECK(cudaMemcpy(io.ptr, x, count * sizeof(float), cudaMemcpyHostToDevice));
     int code = ds_moe_run_dev(scratch, scratch_bytes, jobs, n_jobs, routes.data(), rows,
-                              io.ptr, io.ptr + count, 0, 0);
+                              io.ptr, io.ptr + count, 0, 0, 1);
     if (code)
         return code;
     return int(cudaMemcpy(y, io.ptr + count, count * sizeof(float), cudaMemcpyDeviceToHost));

@@ -125,7 +125,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
     lib.ds_moe_upload.argtypes = [ptr, C.POINTER(ptr)]
     lib.ds_moe_free.argtypes = [C.c_int, ptr]
     lib.ds_moe_run_dev.argtypes = [C.POINTER(ptr), C.POINTER(C.c_size_t), C.POINTER(Job),
-                                   C.c_int, C.POINTER(RoutedRow), C.c_int, ptr, ptr, C.c_int, C.c_int]
+                                   C.c_int, C.POINTER(RoutedRow), C.c_int, ptr, ptr, C.c_int, C.c_int, C.c_int]
     lib.ds_moe_finish.argtypes = [ptr, ptr, C.c_size_t, C.c_int]
     lib.ds_moe_shared_swiglu.argtypes = [ptr, ptr, C.c_size_t]
     runtime.cudaMalloc.argtypes = [C.POINTER(ptr), C.c_size_t]
@@ -195,7 +195,7 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
             with ExitStack() as stack:
                 weighted = upload(stack, output)
                 check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), (Job * len(jobs))(*jobs),
-                                         len(jobs), rows, n, upload(stack, inputs), weighted, mcg, 0))
+                                         len(jobs), rows, n, upload(stack, inputs), weighted, mcg, 0, 1))
                 download(weighted, output)
                 if n > 1:
                     top_k = 3 if mcg else 6
@@ -226,14 +226,14 @@ def compare(lib, runtime, device, x, expected, experts, mcg):
                 rows = (RoutedRow * n)(*(RoutedRow(slabs[i % 2], i % 2, i, .5) for i in range(n)))
                 jobs = (Job * n)(*(Job(slabs[i % 2], i, 1) for i in range(n)))
                 check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), jobs, n,
-                                         rows, n, inp, dst, 0, 1))
+                                         rows, n, inp, dst, 0, 1, 1))
                 download(dst, output)
                 for i in range(2):
                     row = RoutedRow(slabs[i], i, 0, .5)
                     job = Job(slabs[i], 0, 1)
                     decode = np.empty_like(inputs[:1])
                     check(lib.ds_moe_run_dev(C.byref(scratch), C.byref(size), C.byref(job), 1,
-                                             C.byref(row), 1, inp, dst, 0, 0))
+                                             C.byref(row), 1, inp, dst, 0, 0, 0))
                     download(dst, decode)
                     np.testing.assert_array_equal(output[i::2], np.broadcast_to(decode, output[i::2].shape))
     finally:

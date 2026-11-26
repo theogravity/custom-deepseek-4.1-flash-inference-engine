@@ -41,7 +41,17 @@ unsafe extern "C" {
     fn ds_moe_error(error: i32) -> *const c_char;
     fn ds_moe_free_bytes(bytes: *mut usize) -> i32;
     fn ds_moe_alloc(slot: *mut *mut c_void) -> i32;
-    fn ds_moe_upload(slot: *mut c_void, parts: *const *const c_void) -> i32;
+    fn ds_moe_upload_parts(slot: *mut c_void, parts: *const *const c_void, coalesce: i32) -> i32;
+    fn ds_moe_router_start(
+        host: *mut *mut f32,
+        capacity: *mut usize,
+        ready: *mut *mut c_void,
+        logits: *const f32,
+        count: usize,
+    ) -> i32;
+    fn ds_moe_router_wait(ready: *mut c_void) -> i32;
+    fn ds_moe_router_free(device: i32, host: *mut f32, ready: *mut c_void);
+
     fn ds_moe_free(device: i32, slot: *mut c_void);
     fn ds_moe_shared_swiglu(gate: *mut f32, up: *const f32, count: usize) -> i32;
     fn ds_moe_finish(routed: *const f32, shared_out: *mut f32, count: usize, top_k: i32) -> i32;
@@ -56,6 +66,7 @@ unsafe extern "C" {
         weighted: *mut f32,
         mcg: i32,
         verify: i32,
+        inline_metadata: i32,
     ) -> i32;
     #[cfg(test)]
     fn ds_moe_run(
@@ -81,15 +92,33 @@ fn cuda(code: i32) -> Result<()> {
 #[derive(Default)]
 pub struct MoeCache {
     devices: HashMap<i32, DeviceCache>,
+    metrics: Metrics,
+}
+
+#[derive(Default)]
+struct Metrics {
+    routes: usize,
+    unique: usize,
+    uploads: usize,
+    capacity_queries: usize,
 }
 
 impl MoeCache {
+    fn device(&mut self, device: i32) -> Result<&mut DeviceCache> {
+        Ok(match self.devices.entry(device) {
+            std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => v.insert(DeviceCache::new(device)?),
+        })
+    }
     /// Make room before an uncached dense projection uploads its resident
     /// weight and conversion buffers. Freeing a slot waits for pending uses.
     pub fn reserve(&mut self, device: i32, bytes: usize) -> Result<()> {
         let Some(cache) = self.devices.get_mut(&device) else {
             return Ok(());
         };
+        if cache.slots.is_empty() {
+            return Ok(());
+        }
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(&mut free) })?;
         let missing = bytes.saturating_add(64 << 20).saturating_sub(free);
@@ -118,6 +147,45 @@ impl Layer {
 }
 
 type Key = (Layer, usize);
+fn switch(name: &str, default: bool) -> Result<bool> {
+    match std::env::var(name).as_deref() {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Ok("0") => Ok(false),
+        Ok("1") => Ok(true),
+        _ => bail!("{name} must be 0 or 1"),
+    }
+}
+
+#[derive(Default)]
+struct RouterRead {
+    host: *mut f32,
+    capacity: usize,
+    ready: *mut c_void,
+}
+
+impl RouterRead {
+    fn start(&mut self, logits: &Dev) -> Result<()> {
+        cuda(unsafe {
+            ds_moe_router_start(
+                &mut self.host,
+                &mut self.capacity,
+                &mut self.ready,
+                logits.as_ptr(),
+                logits.len(),
+            )
+        })
+    }
+
+    fn scores(&self, len: usize) -> Result<&[f32]> {
+        ensure!(
+            len <= self.capacity && !self.host.is_null(),
+            "uninitialized router read"
+        );
+        cuda(unsafe { ds_moe_router_wait(self.ready) })?;
+        Ok(unsafe { std::slice::from_raw_parts(self.host, len) })
+    }
+}
+
 struct DeviceCache {
     device: i32,
     limit: usize,
@@ -126,6 +194,13 @@ struct DeviceCache {
     clock: u64,
     scratch: usize,
     scratch_bytes: usize,
+    router: RouterRead,
+    uploads: usize,
+    overlap_router: bool,
+    cached_capacity: bool,
+    packed_upload: bool,
+    inline_metadata: bool,
+    metrics: bool,
 }
 
 impl DeviceCache {
@@ -144,6 +219,13 @@ impl DeviceCache {
             clock: 0,
             scratch: 0,
             scratch_bytes: 0,
+            router: RouterRead::default(),
+            uploads: 0,
+            overlap_router: switch("DS4_MOE_OVERLAP_ROUTER", true)?,
+            cached_capacity: switch("DS4_MOE_CACHED_CAPACITY", true)?,
+            packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
+            inline_metadata: switch("DS4_MOE_INLINE_METADATA", true)?,
+            metrics: switch("DS4_MOE_STATS", false)?,
         })
     }
 
@@ -170,6 +252,22 @@ impl DeviceCache {
         Ok(capacity)
     }
 
+    fn can_reuse_capacity(&self, layer: Layer, routes: &[Route]) -> bool {
+        // Even in the most expensive split (8) and with one job per row, this
+        // group needs no new device allocation. External VRAM consumers cannot
+        // change that. A miss or larger scratch request uses a fresh query.
+        let max_rows = routes.len().min(MAX_GROUP_ROWS);
+        let row_bytes = (8 * HIDDEN + 2 * INTER) * size_of::<f32>()
+            + HIDDEN * size_of::<half::f16>()
+            + size_of::<Job>()
+            + size_of::<RoutedRow>();
+        self.cached_capacity
+            && self.scratch_bytes >= max_rows * row_bytes
+            && routes
+                .chunk_by(|a, b| a.expert == b.expert)
+                .all(|group| self.slots.contains_key(&(layer, group[0].expert)))
+    }
+
     fn touch(&mut self, key: Key, stamp: u64) -> Option<usize> {
         let (slot, age) = self.slots.get_mut(&key)?;
         self.lru.remove(&(*age, key));
@@ -193,10 +291,17 @@ impl DeviceCache {
             cuda(unsafe { ds_moe_alloc(&mut slot) })?;
             slot as usize
         };
-        if let Err(e) = cuda(unsafe { ds_moe_upload(slot as *mut c_void, parts.as_ptr()) }) {
+        if let Err(e) = cuda(unsafe {
+            ds_moe_upload_parts(
+                slot as *mut c_void,
+                parts.as_ptr(),
+                self.packed_upload.into(),
+            )
+        }) {
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
             return Err(e);
         }
+        self.uploads += 1;
         self.slots.insert(key, (slot, stamp));
         self.lru.insert((stamp, key));
         Ok(slot)
@@ -205,6 +310,7 @@ impl DeviceCache {
 
 impl Drop for DeviceCache {
     fn drop(&mut self) {
+        unsafe { ds_moe_router_free(self.device, self.router.host, self.router.ready) };
         for &(slot, _) in self.slots.values() {
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
         }
@@ -370,6 +476,7 @@ fn run_group<const K: usize>(
             weighted.as_mut_ptr(),
             i32::from(matches!(layer, Layer::Draft(_))),
             i32::from(rt.verification && matches!(layer, Layer::Backbone(_))),
+            device.inline_metadata.into(),
         )
     };
     device.scratch = scratch as usize;
@@ -400,18 +507,33 @@ fn forward<const E: usize, const K: usize>(
     let bias = rt.weights.vector(&format!("{base}.gate.bias"))?;
     // Only router logits visit the CPU, which computes the checkpoint's top-k
     // and chooses mmap-backed expert weights for the GPU slot cache.
-    let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch)?;
-    let mut shared_out = shared(rt, &base, x, batch)?;
+    let cache = rt.moe_cache.device(rt.device)?;
+    let (routes, mut shared_out) = if cache.overlap_router {
+        cache.router.start(&logits)?;
+        let shared_out = shared(rt, &base, x, batch)?;
+        let read = &rt.moe_cache.device(rt.device)?.router;
+        (
+            routes::<E, K>(read.scores(logits.len())?, &bias, batch)?,
+            shared_out,
+        )
+    } else {
+        let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch)?;
+        (routes, shared(rt, &base, x, batch)?)
+    };
     ensure!(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
     );
     let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
-    let device = match rt.moe_cache.devices.entry(rt.device) {
-        std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
-        std::collections::hash_map::Entry::Vacant(v) => v.insert(DeviceCache::new(rt.device)?),
+    let device = rt.moe_cache.device(rt.device)?;
+    let reuse = device.can_reuse_capacity(layer, &routes);
+    let capacity = if reuse {
+        device.slots.len()
+    } else {
+        device.capacity()?
     };
-    let capacity = device.capacity()?;
+    let uploads_before = device.uploads;
+    let report = device.metrics;
     let max_experts = capacity.min(MAX_GROUP_EXPERTS);
     let mut begin = 0;
     while begin < routes.len() {
@@ -437,6 +559,26 @@ fn forward<const E: usize, const K: usize>(
             K as i32,
         )
     })?;
+    if report {
+        let uploads = rt.moe_cache.device(rt.device)?.uploads - uploads_before;
+        let m = &mut rt.moe_cache.metrics;
+        if matches!(layer, Layer::Backbone(0) | Layer::Draft(0)) {
+            *m = Metrics::default();
+        }
+        m.routes += routes.len();
+        m.unique += routes.chunk_by(|a, b| a.expert == b.expert).count();
+        m.uploads += uploads;
+        m.capacity_queries += usize::from(!reuse);
+        if matches!(layer, Layer::Backbone(39) | Layer::Draft(2)) {
+            let kind = match layer {
+                Layer::Backbone(_) if rt.verification => "verify",
+                Layer::Backbone(_) => "target",
+                Layer::Draft(_) => "draft",
+            };
+            eprintln!("moe pass={kind} rows={batch} routes={} unique_layer_experts={} expert_uploads={} expert_h2d_bytes={} capacity_queries={}",
+                      m.routes, m.unique, m.uploads, m.uploads * SLOT_BYTES, m.capacity_queries);
+        }
+    }
     Ok(shared_out)
 }
 
@@ -453,6 +595,25 @@ mod tests {
         );
         assert_eq!(DeviceCache::available_slots(5, 8192 << 20, 10), 10);
         assert_eq!(DeviceCache::available_slots(0, 0, 10), 1);
+    }
+
+    #[test]
+    fn cached_capacity_needs_both_resident_experts_and_sufficient_scratch() {
+        let mut cache = DeviceCache::new(0).unwrap();
+        let layer = Backbone(0);
+        let routes = [Route {
+            expert: 0,
+            token: 0,
+            rank: 0,
+            weight: 1.,
+        }];
+        cache.cached_capacity = true;
+        cache.scratch_bytes = usize::MAX;
+        assert!(!cache.can_reuse_capacity(layer, &routes));
+        cache.slots.insert((layer, 0), (0, 1));
+        assert!(cache.can_reuse_capacity(layer, &routes));
+        cache.scratch_bytes = 0;
+        assert!(!cache.can_reuse_capacity(layer, &routes));
     }
 
     #[test]
