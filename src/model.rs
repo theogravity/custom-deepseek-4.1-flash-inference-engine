@@ -289,9 +289,10 @@ impl Model {
             }
             let n = self.chunk.min(input.len() - pos);
             let last = pos + n == input.len();
-            let target =
-                self.forward(&mut cache, &ids, pos, n, usize::from(last), draft.is_some())?;
-            if let Some(draft) = draft.as_mut() {
+            // Only the drafter's final sliding window survives the prefill.
+            let observe = draft.is_some() && pos + n > input.len().saturating_sub(128);
+            let target = self.forward(&mut cache, &ids, pos, n, usize::from(last), observe)?;
+            if let Some(draft) = draft.as_mut().filter(|_| observe) {
                 draft.observe(
                     &mut self.rt,
                     target
