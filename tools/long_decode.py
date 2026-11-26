@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from statistics import median
 import threading
-from time import monotonic, sleep
+from time import monotonic, sleep, time_ns
 from types import SimpleNamespace
 
 from six_streams import PROMPTS, api_keys, chat_ids, check_output, id_digest, load_tokenizer, payload, query, stream
@@ -111,6 +111,7 @@ def main():
         before = query(args.base, "/metrics", key)
         if before["logical_active"]:
             raise RuntimeError("another request is active")
+        start_wall_us = time_ns() // 1000
         start = monotonic()
         with ThreadPoolExecutor(args.clients) as pool:
             futures = [pool.submit(stream, stream_args, key, msg, receipts, gate, i)
@@ -148,7 +149,8 @@ def main():
         for row in rows:
             for k in ("first", "last", "end"):
                 row[k+"_s"] = row.pop(k) - start
-        print(json.dumps(dict(wave=wave, warmup=not wave, aggregate_decode_tok_s=rate,
+        print(json.dumps(dict(wave=wave, warmup=not wave, start_wall_us=start_wall_us,
+              end_wall_us=time_ns() // 1000, aggregate_decode_tok_s=rate,
               wall_tok_s=wall_rate, seconds=elapsed, resident_decode=steady, first_response_spread_s=first_spread, decode_span_s=span, overlap_s=overlap, delta=delta, rows=rows)), flush=True)
     print(json.dumps(dict(clients=args.clients, workload=args.workload, output=args.output,
           seed=frozen["seed"], prompts=proofs, expected_reused_tokens=expected_reuse, chunk_size=args.chunk_size,

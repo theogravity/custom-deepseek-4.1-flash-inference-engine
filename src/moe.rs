@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::{c_char, c_void, CStr},
+    io::{BufWriter, Write},
     ptr,
 };
 
@@ -254,6 +255,8 @@ struct DeviceCache {
     staged: bool,
     peer_link: *mut c_void,
     metrics: bool,
+    trace: Option<BufWriter<std::fs::File>>,
+    traced_groups: usize,
 }
 
 impl DeviceCache {
@@ -286,6 +289,13 @@ impl DeviceCache {
             staged: switch("DS4_EXPERT_STAGED", true)?,
             peer_link: ptr::null_mut(),
             metrics: switch("DS4_MOE_STATS", false)?,
+            traced_groups: 0,
+            trace: std::env::var_os("DS4_EXPERT_TRACE_DIR")
+                .map(|dir| {
+                    let path = std::path::PathBuf::from(dir).join(format!("gpu-{device}.bin"));
+                    std::fs::File::create_new(path).map(BufWriter::new)
+                })
+                .transpose()?,
         })
     }
 
@@ -529,11 +539,26 @@ impl Dispatch<'_> {
     ) -> Result<()> {
         let mut jobs = Vec::new();
         let mut rows = Vec::with_capacity(routes.len());
+        let mut keys = [0u16; MAX_GROUP_EXPERTS];
+        let mut count_keys = 0;
+        let group_resident = device.slots.len();
+        let timestamp_us = if device.trace.is_some() {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_micros() as u64
+        } else {
+            0
+        };
         let mut begin = 0;
         while begin < routes.len() {
             let expert = routes[begin].expert;
             let count = routes[begin..].partition_point(|r| r.expert == expert);
+            let uploads = device.uploads;
             let slot = device.acquire(self.weights, (self.layer, expert), capacity)?;
+            if device.trace.is_some() {
+                keys[count_keys] = expert as u16 | (u16::from(device.uploads != uploads) << 15);
+                count_keys += 1;
+            }
             for start in (begin..begin + count).step_by(16) {
                 jobs.push(Job {
                     expert: slot,
@@ -555,6 +580,21 @@ impl Dispatch<'_> {
                 });
             }
             begin += count;
+        }
+        if let Some(trace) = &mut device.trace {
+            let layer = match self.layer {
+                Layer::Backbone(n) => n,
+                Layer::Draft(n) => 40 + n,
+            };
+            trace.write_all(&timestamp_us.to_le_bytes())?;
+            trace.write_all(&(group_resident as u16).to_le_bytes())?;
+            trace.write_all(&(capacity as u16).to_le_bytes())?;
+            trace.write_all(&[layer as u8, count_keys as u8])?;
+            for key in &keys[..count_keys] {
+                trace.write_all(&key.to_le_bytes())?;
+            }
+            trace.flush()?;
+            device.traced_groups += 1;
         }
         let mut scratch = device.scratch as *mut c_void;
         let status = unsafe {
@@ -869,6 +909,16 @@ fn forward<const E: usize, const K: usize>(
             };
             eprintln!("moe pass={kind} rows={batch} routes={} unique_layer_experts={} expert_uploads={} expert_h2d_bytes={} capacity_queries={}",
                       m.routes, m.unique, m.uploads, m.uploads * SLOT_BYTES, m.capacity_queries);
+        }
+    }
+    if matches!(layer, Layer::Backbone(39) | Layer::Draft(2)) {
+        for (id, cache) in &rt.moe_cache.devices {
+            if cache.trace.is_some() {
+                eprintln!(
+                    "expert_trace device={id} groups={} accesses={} uploads={}",
+                    cache.traced_groups, cache.clock, cache.uploads
+                );
+            }
         }
     }
     Ok(shared_out)
