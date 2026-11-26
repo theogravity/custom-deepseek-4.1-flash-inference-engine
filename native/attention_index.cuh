@@ -63,12 +63,22 @@ inline bool wide_index_sort(int stride, int rows) {
     return stride >= 8192 && (rows <= 2 || stride >= int64_t(rows) * 8192);
 }
 inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long long *input,
-        unsigned long long *output,int stride,int rows,const int *offsets) {
+        unsigned long long *output,int stride,int rows,const int *offsets,int keep) {
     if (!wide_index_sort(stride,rows)) return cub::DeviceSegmentedRadixSort::SortKeysDescending(
         work,bytes,input,output,rows*stride,rows,offsets,offsets ? offsets+1 : nullptr);
     for(int t=0;t<(work ? rows : 1);++t) {
-        auto e=cub::DeviceRadixSort::SortKeysDescending(work,bytes,input ? input+size_t(t)*stride : nullptr,
-            output ? output+size_t(t)*stride : nullptr,stride);
+        auto in = input ? input + size_t(t) * stride : nullptr;
+        auto out = output ? output + size_t(t) * stride : nullptr;
+        cudaError_t e;
+#if __has_include(<cub/device/device_topk.cuh>)
+        // Rank keys include the index as a tie breaker. Masked keys are all zero.
+        // chronological_ids sorts the selected IDs independently of their order here.
+        auto env = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
+                                           cuda::execution::output_ordering::unsorted);
+        e = cub::DeviceTopK::MaxKeys(work, bytes, in, out, stride, std::min(stride, keep), env);
+#else
+        e = cub::DeviceRadixSort::SortKeysDescending(work, bytes, in, out, stride);
+#endif
         if (e!=cudaSuccess) return e;
     }
     return cudaSuccess;
@@ -85,9 +95,11 @@ struct IndexWorkspace {
         sorted=l.slice<unsigned long long>(count);
         offsets=l.slice<int>(rows+1);
         temp_bytes=0;
-        for(int stride : {width,(width+index_block-1)/index_block}) {
+        for (int stage = 0; stage < 2; ++stage) {
+            int stride = stage == 0 ? width : (width + index_block - 1) / index_block;
+            int keep = stage == 0 ? top : candidate_limit;
             size_t size=0;
-            auto e=sort_index_rows(nullptr,size,nullptr,nullptr,stride,rows,nullptr);
+            auto e=sort_index_rows(nullptr,size,nullptr,nullptr,stride,rows,nullptr,keep);
             if(e!=cudaSuccess)return e;
             temp_bytes=std::max(temp_bytes,size);
         }

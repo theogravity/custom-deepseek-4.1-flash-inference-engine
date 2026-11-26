@@ -375,15 +375,17 @@ mod tests {
                 ));
             }
             let mut pending = Vec::new();
-            for (batch, prefill, tiles) in [
+            let mut shapes = vec![
                 (1usize, false, 1),
                 (8, false, 1),
-                (33, true, 2),
-                (64, true, 4),
-                (129, true, 4),
+                (129, true, 1),
                 (129, false, 1),
                 (3, false, 1),
-            ] {
+            ];
+            if mode == 4 {
+                shapes.extend([(33, true, 2), (64, true, 4), (129, true, 4)]);
+            }
+            for (batch, prefill, tiles) in shapes {
                 for (owner, (full, shards)) in matrices.iter().enumerate() {
                     rt.layer(if owner == 0 { 0 } else { 20 })?;
                     let input: Vec<_> = (0..batch * cols).map(|_| next()).collect();

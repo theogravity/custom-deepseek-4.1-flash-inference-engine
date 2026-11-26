@@ -2,6 +2,9 @@
 #include <cub/block/block_radix_sort.cuh>
 #include <cub/device/device_segmented_radix_sort.cuh>
 #include <cub/device/device_radix_sort.cuh>
+#if __has_include(<cub/device/device_topk.cuh>)
+#include <cub/device/device_topk.cuh>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <algorithm>
@@ -467,25 +470,25 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     TRY(cudaGetLastError());
     launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores);
     TRY(cudaGetLastError());
-    auto sort=[&](int stride)->cudaError_t {
+    auto select=[&](int stride, int keep)->cudaError_t {
         if (!wide_index_sort(stride,rows)) {
             index_bounds<<<(rows+block)/block,block>>>(offsets,stride,rows);
             auto e=cudaGetLastError();
             if (e!=cudaSuccess) return e;
         }
         size_t available=s.temp_bytes;
-        return sort_index_rows(work+s.temp,available,rank,sorted,stride,rows,offsets);
+        return sort_index_rows(work+s.temp,available,rank,sorted,stride,rows,offsets,keep);
     };
     rank_positions<<<grid,block>>>(scores,ids,rank,width);
     TRY(cudaGetLastError());
-    TRY(sort(width));
+    TRY(select(width,top));
     chronological_ids<top><<<rows,block>>>(sorted,width,picks);
     TRY(cudaGetLastError());
     if(out_blocks) {
         int count=(width+index_block-1)/index_block;
         rank_blocks<<<dim3((count+block-1)/block,rows),block>>>(scores,rank,width,pos,ratio);
         TRY(cudaGetLastError());
-        TRY(sort(count));
+        TRY(select(count,candidate_limit));
         chronological_ids<candidate_limit><<<rows,block>>>(sorted,count,out_blocks);
         TRY(cudaGetLastError());
     }
