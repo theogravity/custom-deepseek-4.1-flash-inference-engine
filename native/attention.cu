@@ -416,7 +416,7 @@ extern "C" int ds4_attn_sparse_fast(int dev, void *scratch, const float *queries
 }
 
 extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const float *queries,
-        const float *weights, const int *ids, int width, int batch, float *out, int packed_scores) {
+        const float *weights, const int *ids, int width, int batch, float *out, int packed_scores, int contiguous_ids) {
     TRY(cudaSetDevice(dev));
     auto *b = static_cast<Buffer *>(scratch);
     Layout l;
@@ -426,7 +426,7 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
     if (ids) TRY(cudaMemcpy(at<int>(b,io),ids,ns*4,cudaMemcpyHostToDevice));
     auto *keys = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
     launch_index_scores(packed_scores,keys,queries,weights,ids ? at<int>(b,io) : nullptr,
-                        width,batch,at<float>(b,so));
+                        width,batch,at<float>(b,so),contiguous_ids);
     TRY(cudaGetLastError());
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
     return 0;
@@ -470,7 +470,7 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     dim3 grid((width+block-1)/block,rows);
     index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
     TRY(cudaGetLastError());
-    launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores);
+    launch_index_scores(packed_scores,packed,queries,weights,ids,width,rows,scores,candidates == nullptr);
     TRY(cudaGetLastError());
     auto select=[&](int stride, int keep)->cudaError_t {
         if (use_tiled_selection(stride,rows,keep)) {

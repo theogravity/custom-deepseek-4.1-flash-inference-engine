@@ -153,6 +153,7 @@ unsafe extern "C" {
         batch: i32,
         out: *mut f32,
         packed_scores: i32,
+        contiguous_ids: i32,
     ) -> i32;
 }
 
@@ -1300,6 +1301,7 @@ fn select(
                     rows as i32,
                     scores.as_mut_ptr(),
                     i32::from(packed_index()),
+                    i32::from(!filtering),
                 )
             },
             "scoring compressed index keys",
@@ -2291,9 +2293,24 @@ mod tests {
                     }
                 })
                 .collect();
-            for candidates in [ptr::null(), ids.as_ptr()] {
+            let causal: Vec<i32> = (0..rows * width)
+                .map(|i| {
+                    let (row, col) = (i / width, i % width);
+                    if col < width.saturating_sub(rows - 1 - row) {
+                        col as i32
+                    } else {
+                        -1
+                    }
+                })
+                .collect();
+            for (candidates, contiguous, active_rows) in [
+                (ptr::null(), true, rows),
+                (causal.as_ptr(), true, rows),
+                (causal.as_ptr(), true, rows - 1),
+                (ids.as_ptr(), false, rows),
+            ] {
                 let score = |mode| -> Result<Vec<u32>> {
-                    let mut out = vec![0f32; rows * width];
+                    let mut out = vec![0f32; active_rows * width];
                     cuda_ok(
                         unsafe {
                             ds4_attn_scores(
@@ -2304,9 +2321,10 @@ mod tests {
                                 w.data(),
                                 candidates,
                                 width as i32,
-                                rows as i32,
+                                active_rows as i32,
                                 out.as_mut_ptr(),
                                 mode,
+                                i32::from(contiguous),
                             )
                         },
                         "checking packed index score bits",
@@ -2748,6 +2766,7 @@ mod tests {
                             n as i32,
                             scores.as_mut_ptr(),
                             0,
+                            1,
                         )
                     },
                     "index benchmark baseline",
