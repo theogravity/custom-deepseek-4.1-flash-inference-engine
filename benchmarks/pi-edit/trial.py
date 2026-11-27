@@ -1,7 +1,7 @@
 import re, stat, hashlib, http.server, json, os, shutil, socketserver, subprocess as sp, sys, tempfile, threading, time
 from pathlib import Path
 from urllib.request import urlopen, Request
-from setup import box, p, release, launcher
+from setup import box, p, release, launcher, node_runtime
 
 model='DeepSeek V4.1 Flash'
 prompt='Fix the Go compose flag parser in this checkout. It should accept --flag=value as well as --flag value, quoted values with spaces and environment expansion. Match complete option tokens only, and ignore flag-like text inside another quoted value. Preserve the integer helper and the public behavior covered by the existing tests. Inspect the source, run the failing tests, edit the implementation, run the tests again and report the result. Leave the supplied tests intact.'
@@ -64,6 +64,7 @@ def task(key,instance,state,thinking_override=None):
  with tempfile.TemporaryDirectory(prefix='pi-task-') as tmp:
   stage=Path(tmp);work=stage/'work';shutil.copytree(p/'fixture',work)
   copycache(stage/'cache');settings=stage/'pi';settings.mkdir()
+  node=node_runtime()
   cfg,thinking,extension=launcher()
   if thinking_override is not None:thinking=thinking_override
   (stage/'launcher.mjs').write_bytes(extension)
@@ -72,11 +73,13 @@ def task(key,instance,state,thinking_override=None):
   with UnixServer(str(socket),Handler) as server:
    server.key=key;server.rows=state['turns'];server.work=work;server.observed={};server.session_id=digest(str(instance).encode())[:16]
    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-   args=box()+['--bind',str(settings),'/pi','--setenv','PI_CODING_AGENT_DIR','/pi','--setenv','PI_TELEMETRY','0','--setenv','MODEL_CLI_PI_API_KEY','placeholder','--setenv','MODEL_CLI_PI_CONFIG',json.dumps(cfg),'--ro-bind',str(stage/'launcher.mjs'),'/launcher.mjs','--bind',str(work),'/work','--bind',str(stage/'cache'),'/cache','--ro-bind',str(Path(os.environ.get('PI_NODE_BINARY') or shutil.which('node') or 'node').resolve(strict=True)),'/node','--ro-bind',str(release),'/release','--ro-bind',str(socket),'/upstream.sock','--','/bin/sh','-c','socat TCP4-LISTEN:8180,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/upstream.sock & exec /node /release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"','pi','--extension','/launcher.mjs','--provider',cfg['provider'],'--model',model,'--offline','--no-session','--no-mcp','--no-skills','--no-extensions','--no-context-files','--thinking',thinking,'--tools','read,bash,edit,write','--mode','json','--print',prompt]
+   args=box()+['--bind',str(settings),'/pi','--setenv','PI_CODING_AGENT_DIR','/pi','--setenv','PI_TELEMETRY','0','--setenv','MODEL_CLI_PI_API_KEY','placeholder','--setenv','MODEL_CLI_PI_CONFIG',json.dumps(cfg),'--ro-bind',str(stage/'launcher.mjs'),'/launcher.mjs','--bind',str(work),'/work','--bind',str(stage/'cache'),'/cache','--ro-bind',str(node),'/node','--ro-bind',str(release),'/release','--ro-bind',str(socket),'/upstream.sock','--','/bin/sh','-c','socat TCP4-LISTEN:8180,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/upstream.sock & exec /node /release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"','pi','--extension','/launcher.mjs','--provider',cfg['provider'],'--model',model,'--offline','--no-session','--no-mcp','--no-skills','--no-extensions','--no-context-files','--thinking',thinking,'--tools','read,bash,edit,write','--mode','json','--print',prompt]
    state['phase']='client'; started=time.perf_counter()
    try:r=sp.run(args,stdin=sp.DEVNULL,capture_output=True,timeout=240)
    finally:wall=time.perf_counter()-started;state['wall_s']=wall;server.shutdown();thread.join()
   state['phase']='transcript';events=[json.loads(l) for l in r.stdout.splitlines() if l.startswith(b'{')]
+  if r.returncode and not server.rows:
+   raise RuntimeError(f'Pi exited with code {r.returncode} before sending its first inference request')
   tools=[];by_id={};final_finish=None
   for e in events:
    if e.get('type')=='tool_execution_start':

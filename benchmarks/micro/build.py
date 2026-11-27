@@ -15,7 +15,7 @@ EXPERIMENTS = {
     "c1-20261126-wide-micro": ("experiment/c1-wide-ranking", None),
     "decode-attention-topk-20261126-micro": ("experiment/decode-attention-topk", None),
     "decode-paired-index-20261126-micro": ("experiment/decode-paired-index", None),
-    "decode-paired-index-20261126-cross-row-micro": ("experiment/decode-paired-index", None),
+    "decode-paired-index-20261126-cross-row-micro": ("754d14583391755f53d5a96b3441cf833e94c262", None),
     "decode-round2-20261126-head-micro": ("experiment/c2-head-rows", None),
     "decode-round2-20261126-markov-micro": ("experiment/c2-markov-shortlist", None),
 }

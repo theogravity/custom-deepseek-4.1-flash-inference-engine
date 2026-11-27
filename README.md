@@ -24,9 +24,10 @@ The current coding profile was benchmarked at **375 W per inference GPU** and a 
 Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.
 
 ```sh
-hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --local-dir /mnt/models/dsv41-flash-exl3
+hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --revision 451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae --local-dir /mnt/models/dsv41-flash-exl3
 cargo build --release --locked
 docker build -t ds4-flash-rs:agent-coding-20261126 .
+export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
 docker compose -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
 curl -fsS http://127.0.0.1:8001/health

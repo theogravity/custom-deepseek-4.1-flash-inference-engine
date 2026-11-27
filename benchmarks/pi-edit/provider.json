@@ -1,0 +1,47 @@
+{
+  "config": {
+    "connection": {
+      "api": "openai-completions",
+      "apiKey": "$MODEL_CLI_PI_API_KEY",
+      "baseUrl": "http://127.0.0.1:8180/v1",
+      "models": [
+        {
+          "compat": {
+            "maxTokensField": "max_tokens",
+            "requiresReasoningContentOnAssistantMessages": true,
+            "supportsDeveloperRole": false,
+            "supportsStore": false,
+            "supportsStrictMode": false,
+            "thinkingFormat": "deepseek"
+          },
+          "contextWindow": 524288,
+          "cost": {
+            "cacheRead": 0.018,
+            "cacheWrite": 0,
+            "input": 0.051,
+            "output": 0.5670000000000001
+          },
+          "id": "DeepSeek V4.1 Flash",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxTokens": 64000,
+          "name": "DeepSeek V4.1 Flash (EXL3 3bpw, TP2, 512k ctx, 6 seqs, DSpark, CPU experts, LMCache)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "high": "high",
+            "low": "low",
+            "medium": "high",
+            "minimal": "low",
+            "xhigh": "max"
+          }
+        }
+      ]
+    },
+    "deepseek": true,
+    "direct": true,
+    "provider": "model-cli-direct-dsv41-flash-exl3"
+  },
+  "thinking": "xhigh"
+}
