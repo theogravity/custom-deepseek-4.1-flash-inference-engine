@@ -90,6 +90,7 @@ pub struct PrefixCache {
     dir: Option<PathBuf>,
     ram: VecDeque<(Key, Bytes)>,
     ram_bytes: usize,
+    bulk_keys: bool,
 }
 impl PrefixCache {
     pub fn new(root: &Path, chunk: usize, capacity: usize) -> Result<Self> {
@@ -141,6 +142,11 @@ impl PrefixCache {
             dir,
             ram: VecDeque::new(),
             ram_bytes: 0,
+            bulk_keys: match std::env::var("DS4_BULK_PREFIX_KEYS").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => anyhow::bail!("DS4_BULK_PREFIX_KEYS must be 0 or 1"),
+            },
         };
         if let Some(dir) = &out.dir {
             if let Err(e) = Self::lock_dir(dir).and_then(|_lock| out.trim_disk(0)) {
@@ -167,16 +173,46 @@ impl PrefixCache {
         f.lock()?;
         Ok(f)
     }
+    // Checkpoint keys use 32-bit token IDs in little-endian wire order.
+    // Feed complete SHA blocks at once without depending on host endianness.
+    fn update_tokens(state: &mut Sha256, tokens: &[u32]) {
+        let mut bytes = [0u8; 256];
+        for group in tokens.chunks(64) {
+            for (dst, id) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(group) {
+                dst.copy_from_slice(&id.to_le_bytes());
+            }
+            state.update(&bytes[..4 * group.len()]);
+        }
+    }
+
+    fn key_at(&self, tokens: &[u32], pos: usize, span: usize) -> Result<Key> {
+        if !self.bulk_keys {
+            return Ok(self
+                .keys(tokens, pos, span)?
+                .last()
+                .context("empty prefix cache key")?
+                .1);
+        }
+        ensure!(
+            pos > 0
+                && self.chunk > 0
+                && pos.is_multiple_of(self.chunk)
+                && pos <= tokens.len()
+                && pos <= self.capacity
+                && (1..=128).contains(&span),
+            "invalid prefix boundary"
+        );
+        let mut state = self.identity.clone();
+        state.update((span as u32).to_le_bytes());
+        Self::update_tokens(&mut state, &tokens[..pos]);
+        Ok(state.finalize().into())
+    }
     fn draft_key(&self, tokens: &[u32], pos: usize, span: usize) -> Result<Key> {
         ensure!(
             pos > 0 && pos.is_multiple_of(self.chunk),
             "invalid drafter cache boundary"
         );
-        let base = self
-            .keys(tokens, pos, span)?
-            .last()
-            .context("empty drafter cache key")?
-            .1;
+        let base = self.key_at(tokens, pos, span)?;
         let mut h = Sha256::new();
         h.update(self.draft_identity);
         h.update(base);
@@ -252,8 +288,12 @@ impl PrefixCache {
         state.update((span as u32).to_le_bytes());
         let mut output = Vec::with_capacity(pos / self.chunk);
         for (i, chunk) in tokens[..pos].chunks_exact(self.chunk).enumerate() {
-            for x in chunk {
-                state.update(x.to_le_bytes());
+            if self.bulk_keys {
+                Self::update_tokens(&mut state, chunk);
+            } else {
+                for x in chunk {
+                    state.update(x.to_le_bytes());
+                }
             }
             output.push(((i + 1) * self.chunk, state.clone().finalize().into()));
         }
@@ -382,7 +422,26 @@ impl PrefixCache {
             return Ok(None);
         }
         let mut timing = Host::start("prefix");
-        for (pos, key) in self.keys(tokens, max_pos, span)?.into_iter().rev() {
+        // Warm agent turns commonly reproduce the last possible boundary.
+        // A miss must still search every eligible RAM and disk entry.
+        let fast_hit = if self.bulk_keys
+            && !self.ram.is_empty()
+            && max_pos > 0
+            && max_pos.is_multiple_of(self.chunk)
+        {
+            let key = self.key_at(tokens, max_pos, span)?;
+            self.ram
+                .iter()
+                .any(|(k, _)| *k == key)
+                .then_some((max_pos, key))
+        } else {
+            None
+        };
+        let candidates = match fast_hit {
+            Some(hit) => vec![hit],
+            None => self.keys(tokens, max_pos, span)?,
+        };
+        for (pos, key) in candidates.into_iter().rev() {
             if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
                 let entry = self.ram.remove(i).unwrap();
                 let state = Self::decode_target(&entry.1, pos, Tier::Ram, &mut timing)?;
@@ -433,11 +492,7 @@ impl PrefixCache {
             pos > 0 && pos.is_multiple_of(self.chunk),
             "invalid prefill boundary"
         );
-        let key = self
-            .keys(tokens, pos, span)?
-            .last()
-            .context("empty prefix cache key")?
-            .1;
+        let key = self.key_at(tokens, pos, span)?;
         if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
             if ram_only {
                 // Keep the target ahead of unrelated entries when its drafter
@@ -487,6 +542,37 @@ impl PrefixCache {
 mod tests {
     use super::*;
     #[test]
+    fn bulk_keys_preserve_existing_target_and_drafter_namespaces() -> Result<()> {
+        let ids: Vec<_> = (0..521u32).map(|i| i.wrapping_mul(0x9e37_79b9)).collect();
+        for chunk in [1, 3, 64, 128] {
+            let mut cache = PrefixCache {
+                identity: Sha256::new(),
+                draft_identity: [7; 32],
+                chunk,
+                capacity: ids.len(),
+                ram_limit: 0,
+                disk_limit: 0,
+                dir: None,
+                ram: VecDeque::new(),
+                ram_bytes: 0,
+                bulk_keys: false,
+            };
+            for span in [1, 39, 128] {
+                cache.bulk_keys = false;
+                let old = cache.keys(&ids, ids.len(), span)?;
+                let last = old.last().unwrap().0;
+                let draft = cache.draft_key(&ids, last, span)?;
+                cache.bulk_keys = true;
+                assert_eq!(cache.keys(&ids, ids.len(), span)?, old);
+                for (n, key) in old {
+                    assert_eq!(cache.key_at(&ids, n, span)?, key);
+                }
+                assert_eq!(cache.draft_key(&ids, last, span)?, draft);
+            }
+        }
+        Ok(())
+    }
+    #[test]
     fn checkpoint_and_tokenizer_bind_prefixes_to_their_target() -> Result<()> {
         let d = tempfile::tempdir()?;
         for (name, data) in [
@@ -523,6 +609,7 @@ mod tests {
             dir: Some(d.path().into()),
             ram: VecDeque::new(),
             ram_bytes: 0,
+            bulk_keys: true,
         };
         let mut cache = make();
         // Position 1 contains one row in every window and pending pairs for
@@ -591,6 +678,7 @@ mod tests {
             dir: Some(dir.path().into()),
             ram: VecDeque::new(),
             ram_bytes: 0,
+            bulk_keys: true,
         };
         let mut cache = make();
         cache.write_draft(&[1], 1, 128, &payload(1), false)?;
