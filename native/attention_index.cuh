@@ -140,21 +140,45 @@ struct PositionRanks {
     }
 };
 
-template<class Ranks>
-__global__ void sample_threshold(Ranks rank, int width,
+constexpr int sample_parts = 8;
+constexpr int keep_sample = 128;
+constexpr int large_sample_width = sample_size * sample_parts * (2 * top) / keep_sample;
+
+// Sparse winners in very wide rows are poorly resolved by 2048 samples.
+// Merge the high ranks of eight disjoint samples. No true sample winner can
+// fall outside its part's best 128 when the global target is at most 128.
+template<int Parts, class Ranks>
+__global__ void sample_threshold(Ranks rank, int width, unsigned long long *partial,
         unsigned long long *thresholds, int *counts) {
     using Sort = cub::BlockRadixSort<unsigned long long, block, sample_size / block>;
     __shared__ typename Sort::TempStorage storage;
     unsigned long long values[sample_size / block];
-    const size_t row = size_t(blockIdx.x) * width;
-    for (int i = 0; i < sample_size / block; ++i) {
-        int index = i * block + threadIdx.x;
-        values[i] = rank(row + (size_t(index)*width + width/2) / sample_size);
+    const size_t row = size_t(blockIdx.y) * width;
+    for (int i=0;i<sample_size/block;++i) {
+        int index = (i*block + threadIdx.x)*Parts + blockIdx.x;
+        values[i]=rank(row+(size_t(index)*width + width/2)/(sample_size*Parts));
     }
     Sort(storage).SortDescendingBlockedToStriped(values);
-    const int wanted = max(0, sample_size * (2*top) / width - 1);
-    if (threadIdx.x == wanted % block) thresholds[blockIdx.x] = values[wanted / block];
-    if (!threadIdx.x) counts[blockIdx.x] = 0;
+    if constexpr (Parts==1) {
+        int wanted = max(0,sample_size*(2*top)/width-1);
+        if (threadIdx.x==wanted%block) thresholds[blockIdx.y]=values[wanted/block];
+        if (!threadIdx.x) counts[blockIdx.y]=0;
+    } else {
+        if (threadIdx.x<keep_sample) partial[row+blockIdx.x*keep_sample+threadIdx.x]=values[0];
+    }
+}
+
+__global__ void merge_thresholds(const unsigned long long *partial,int width,
+        unsigned long long *thresholds,int *counts) {
+    constexpr int items=sample_parts*keep_sample/block;
+    using Sort=cub::BlockRadixSort<unsigned long long,block,items>;
+    __shared__ typename Sort::TempStorage storage;
+    unsigned long long v[items];
+    for (int i=0;i<items;++i) v[i]=partial[size_t(blockIdx.x)*width+i*block+threadIdx.x];
+    Sort(storage).SortDescendingBlockedToStriped(v);
+    int wanted=max(0,sample_parts*sample_size*(2*top)/width-1);
+    if (threadIdx.x==wanted%block) thresholds[blockIdx.x]=v[wanted/block];
+    if (!threadIdx.x) counts[blockIdx.x]=0;
 }
 
 template<class Ranks>
@@ -208,7 +232,13 @@ __global__ void materialize_rescue_ranks(PositionRanks ranks, unsigned long long
 template<class Ranks>
 inline cudaError_t sampled_selection(Ranks source, unsigned long long *input, unsigned long long *output,
         unsigned long long *temp, int width, int rows, unsigned long long *thresholds, int *counts) {
-    sample_threshold<<<rows,block>>>(source,width,thresholds,counts);
+    if (width>=large_sample_width) {
+        sample_threshold<sample_parts><<<dim3(sample_parts,rows),block>>>(source,width,output,thresholds,counts);
+        auto rc=cudaGetLastError(); if (rc!=cudaSuccess) return rc;
+        merge_thresholds<<<rows,block>>>(output,width,thresholds,counts);
+    } else {
+        sample_threshold<1><<<dim3(1,rows),block>>>(source,width,nullptr,thresholds,counts);
+    }
     auto rc = cudaGetLastError(); if (rc!=cudaSuccess) return rc;
     collect_above_threshold<<<dim3((width+block*4-1)/(block*4),rows),block>>>(source,output,width,thresholds,counts);
     rc=cudaGetLastError(); if (rc!=cudaSuccess) return rc;

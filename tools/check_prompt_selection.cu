@@ -45,8 +45,9 @@ void run_case(int rows, int width, bool stress) {
             start[id] = valid ? host_rank(score,id) : 0;
         }
         if (stress && (row%5==1 || row%5==2)) {
-            for (int i=0;i<sample_size;++i) {
-                int id = (size_t(i)*width + width/2)/sample_size;
+            int sampled = sample_size * (width>=large_sample_width ? sample_parts : 1);
+            for (int i=0;i<sampled;++i) {
+                int id = (size_t(i)*width + width/2)/sampled;
                 start[id] = host_rank(row%5==1 ? INFINITY : -INFINITY,id);
             }
         }
