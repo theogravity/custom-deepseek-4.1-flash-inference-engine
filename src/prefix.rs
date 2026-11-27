@@ -63,7 +63,9 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
     if crate::attention::flash_prefill() {
         h.update(b"FlashInfer 946200de SM120 DSV4 MG prompt attention v1");
     }
-    if crate::attention::prefill_index_fp8() {
+    if crate::attention::prefill_batched_mqa() {
+        h.update(b"SM120 batched MQA prompt index v1");
+    } else if crate::attention::prefill_index_fp8() {
         h.update(b"SM120 prompt index E4M3 MMA v1");
     } else if crate::attention::prefill_index_mma() {
         h.update(b"SM120 prompt index BF16 MMA v1");

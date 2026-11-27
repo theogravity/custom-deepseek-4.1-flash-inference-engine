@@ -154,10 +154,13 @@ __device__ __forceinline__ void index_fp8_mma(unsigned a0, unsigned a1, unsigned
                  : "r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1));
 }
 
-template<bool TryFp8>
+template<bool TryFp8, bool IncompatibleOnly = false>
 __global__ void score_mma_keys(const uint8_t *keys, const float *queries,
         const float *weights, const int *ids, int width, float *scores, const IndexFp8Query *packed) {
     const int t = blockIdx.y, warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    if constexpr (IncompatibleOnly) {
+        if (packed[t].compatible) return;
+    }
     // Arrange query pairs in the order of MMA's B registers. All warps
     // then load contiguous words for each 8-head, 16-feature fragment.
     __shared__ unsigned q[4][8][2][32];
@@ -243,16 +246,27 @@ __global__ void score_mma_keys(const uint8_t *keys, const float *queries,
     }
 }
 
+#include "attention_mqa.cuh"
+
 cudaError_t launch_index_scores(int mode, const uint8_t *keys, const float *queries,
-        const float *weights, const int *ids, int width, int rows, float *scores, IndexFp8Query *packed = nullptr) {
-    if (mode == 2 || mode == 3) {
+        const float *weights, const int *ids, int width, int rows, float *scores, IndexFp8Query *packed, bool dense_keys) {
+    if (mode >= 2) {
         constexpr int slots = mma_warps * mma_tiles * 16;
         dim3 grid((width + slots - 1) / slots, rows);
-        if (mode == 3 && packed) {
+        if (mode >= 3 && packed) {
             prepare_index_fp8<<<rows,ih*32>>>(queries,packed);
             auto rc = cudaGetLastError();
             if (rc != cudaSuccess) return rc;
-            score_mma_keys<true><<<grid,mma_warps*32>>>(keys,queries,weights,ids,width,scores,packed);
+            if (mode == 4 && dense_keys && rows >= 2) {
+                constexpr int key_span = mqa_keys * mqa_key_tiles;
+                dim3 mqa_grid((width+key_span-1)/key_span, (rows+mqa_queries-1)/mqa_queries);
+                score_batched_mqa<<<mqa_grid,mma_warps*32>>>(keys,packed,weights,ids,width,rows,scores);
+                rc = cudaGetLastError();
+                if (rc != cudaSuccess) return rc;
+                score_mma_keys<false,true><<<grid,mma_warps*32>>>(keys,queries,weights,ids,width,scores,packed);
+            } else {
+                score_mma_keys<true><<<grid,mma_warps*32>>>(keys,queries,weights,ids,width,scores,packed);
+            }
         } else {
             score_mma_keys<false><<<grid,mma_warps*32>>>(keys,queries,weights,ids,width,scores,nullptr);
         }

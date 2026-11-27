@@ -1438,7 +1438,7 @@ fn select(
         let mode = index_score_mode(rt.target_prefill);
         let mut bytes =
             (rows * width * size_of::<f32>()).next_multiple_of(256) * (1 + usize::from(filtering));
-        if mode == 3 {
+        if mode >= 3 {
             bytes += unsafe { ds4_attn_fp8_query_bytes(rows as i32) };
         }
         let work = scratch(rt, bytes)?;
@@ -1493,9 +1493,16 @@ pub(crate) fn prefill_index_fp8() -> bool {
     *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_INDEX_FP8").is_some_and(|v| v == "1"))
 }
 
+pub(crate) fn prefill_batched_mqa() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_BATCHED_MQA").is_some_and(|v| v == "1"))
+}
+
 fn index_score_mode(target_prefill: bool) -> i32 {
     static PACKED: OnceLock<bool> = OnceLock::new();
-    if target_prefill && prefill_index_fp8() {
+    if target_prefill && prefill_batched_mqa() {
+        4
+    } else if target_prefill && prefill_index_fp8() {
         3
     } else if target_prefill && prefill_index_mma() {
         2
@@ -2775,6 +2782,7 @@ mod tests {
                 // These FP32 queries do not round-trip through one E4M3
                 // group scale per head. Every fallback bit must match BF16 MMA.
                 assert_eq!(score(2)?, score(3)?, "FP8 fallback width={width}");
+                assert_eq!(score(2)?, score(4)?, "batched MQA fallback width={width}");
             }
         }
         Ok(())
@@ -2842,6 +2850,15 @@ mod tests {
                     Ok(out)
                 };
                 let reference = score(0)?;
+                let fp8 = score(3)?;
+                let batched = score(4)?;
+                for (i, (single, grouped)) in fp8.iter().zip(&batched).enumerate() {
+                    assert_eq!(
+                        single.to_bits(),
+                        grouped.to_bits(),
+                        "batched MQA width={width} slot={i}"
+                    );
+                }
                 for mode in [2, 3] {
                     let actual = score(mode)?;
                     for (i, (&a, &b)) in actual.iter().zip(&reference).enumerate() {
@@ -2900,6 +2917,7 @@ mod tests {
             Ok(out)
         };
         let result = score(3)?;
+        assert_eq!(result, score(4)?);
         assert!(result.iter().all(|s| s.is_finite()));
         assert_eq!(result[0], 7. * 2f32.powi(118));
         assert_eq!(result, score(2)?);
@@ -2966,7 +2984,7 @@ mod tests {
             "sizing close-cutoff scratch",
         )?;
         let scratch = upload(dev, &vec![0xffu8; bytes])?;
-        for mode in [1, 2, 3] {
+        for mode in [1, 2, 3, 4] {
             let picks = upload(dev, &vec![-9i32; rows * TOP])?;
             let mut actual = vec![f32::NAN; width * rows];
             cuda_ok(
@@ -3047,7 +3065,8 @@ mod tests {
         assert_eq!(host, [0, -1, 0, -1, 0, 1]);
         check_index_ranking(device, 1)?;
         check_index_ranking(device, 2)?;
-        check_index_ranking(device, 3)
+        check_index_ranking(device, 3)?;
+        check_index_ranking(device, 4)
     }
 
     fn check_index_ranking(device: i32, score_mode: i32) -> Result<()> {
@@ -3562,7 +3581,7 @@ mod tests {
                 Ok((selected, candidates))
             };
             let (expected, expected_blocks) = reference()?;
-            for mode in [1, 2, 3] {
+            for mode in [1, 2, 3, 4] {
                 // Poison both outputs so an omitted write by the second
                 // scorer cannot inherit a passing result from the first.
                 picks.write(&vec![-9i32; n * TOP])?;
@@ -3597,6 +3616,7 @@ mod tests {
             let packed_us = time_gpu(&run, 1)?;
             let mma_us = time_gpu(&run, 2)?;
             let fp8_us = time_gpu(&run, 3)?;
+            let mqa_us = time_gpu(&run, 4)?;
             if pos >= TOP_BLOCKS * BLOCK {
                 let filtered_width = (TOP_BLOCKS * BLOCK) as i32;
                 let mut bytes = 0;
@@ -3649,7 +3669,7 @@ mod tests {
             }
             let host_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
             eprintln!(
-                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us mma={mma_us:.1}us fp8={fp8_us:.1}us CPU-rank={host_us:.1}us",
+                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us mma={mma_us:.1}us fp8={fp8_us:.1}us batched-mqa={mqa_us:.1}us CPU-rank={host_us:.1}us",
                 bytes
             );
         }

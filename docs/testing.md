@@ -56,3 +56,12 @@ export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noh
 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 DS4_TEST_DEVICE=0 \
   cargo test --release pool_pairs -- --ignored --test-threads=1 --nocapture
 ```
+```
+
+### Batched SM120 MQA prompt scoring
+
+`DS4_PREFILL_BATCHED_MQA=1` scores four adjacent prompt queries against each 128-key tile. Eight warps share the tile's keys across queries. The adapter reads the native 132-byte key records directly and retains the engine's ordered FP32 head reduction. Filtered candidates and single rows use the single-query scorer. A query that cannot round-trip through scaled E4M3 uses BF16. The option has its own prefix namespace.
+
+The port follows the installed DeepGEMM `sm120_fp8_mqa_logits<32,128,false,4,128,2,3,188,128,256,float>` scheduling and MMA geometry. The reference header in vLLM image `sha256:3689a42b8a151bf85d72d03b733ec6f353dba5936ff2558b577687c4f5908aa0` has SHA-256 `6f6dbf1158c2e5571bb90835a673f74cfc64f4c28e22a0f3f77ce73c554d702c`. The native build compiles the adapter with nvcc and has no runtime dependency on DeepGEMM. [DeepGEMM license](../THIRD_PARTY_NOTICES.md)
+
+Run the `cuda_index` fixtures above. They compare every MQA score bit against single-query E4M3 on quantized random data, check BF16 fallback, masked candidates, signed cutoffs and exact ties, and print complete top-k selection timings for both implementations.
