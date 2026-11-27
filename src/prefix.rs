@@ -57,6 +57,9 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
     if crate::model::bounded_replay()? {
         h.update(b"bounded decoder tail with full source KV v2");
     }
+    if crate::attention::prefill_gpu_pool_pairs() {
+        h.update(b"resident two-token CUDA compressor pooling v1");
+    }
     if crate::attention::flash_prefill() {
         h.update(b"FlashInfer 946200de SM120 DSV4 MG prompt attention v1");
     }

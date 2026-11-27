@@ -46,3 +46,13 @@ docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/pro
 CUDA_VISIBLE_DEVICES=<inference-gpu-uuid> DS4_TEST_DEVICE=0 \
   cargo test --release cuda_index -- --ignored --test-threads=1 --nocapture
 ```
+
+### Resident ratio-two compressor pooling
+
+`DS4_PREFILL_GPU_POOL_PAIRS=1` computes two-token gate-weighted pooling on the inference GPU during resident target prompt evaluation. At odd chunk boundaries the engine keeps the unpaired projected KV and gate row in the snapshot format. Verification uses the host pooling and capture path. The opt-in prefix namespace accounts for CPU and CUDA exponential rounding.
+
+```bash
+DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 DS4_PREFILL_GPU_POOL_PAIRS=1 \
+  CUDA_VISIBLE_DEVICES=<first-inference-uuid>,<second-inference-uuid> DS4_TEST_DEVICE=0 \
+  cargo test --release pool_pairs -- --ignored --test-threads=1 --nocapture
+```

@@ -56,6 +56,14 @@ unsafe extern "C" {
     fn ds4_attn_capacity(buf: *mut c_void) -> usize;
     fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
     fn ds4_attn_prepare_tail(dev: i32, cache: *mut c_void, old: usize, bytes: usize) -> i32;
+    fn ds4_attn_pool_pairs(
+        dev: i32,
+        kv: *const f32,
+        gates: *const f32,
+        carry: *const f32,
+        pairs: i32,
+        out: *mut f32,
+    ) -> i32;
     fn ds4_attn_normalize_raw(dev: i32, x: *mut f32, g: *const f32, n: i32) -> i32;
     fn ds4_attn_pack_compressed(
         dev: i32,
@@ -1013,6 +1021,66 @@ fn pool_pairs(
     pooled
 }
 
+pub(crate) fn prefill_gpu_pool_pairs() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("DS4_PREFILL_GPU_POOL_PAIRS").is_some_and(|v| v == "1"))
+}
+
+fn pair_span(src: &Source, pos: usize, batch: usize) -> Result<(usize, bool)> {
+    let carry = pos % 2;
+    require_state!(
+        batch > 0 && src.pending_kv.len() == carry * DIM && src.pending_gate.len() == carry * DIM,
+        "inconsistent pending compressor row at {pos}"
+    );
+    Ok(((carry + batch) / 2, (carry + batch) % 2 != 0))
+}
+
+fn device_pool_pairs(
+    rt: &mut Runtime,
+    src: &Source,
+    kv: &Dev,
+    gates: &Dev,
+    pos: usize,
+    batch: usize,
+) -> Result<(Option<Dev>, PendingPairs)> {
+    let (pairs, has_tail) = pair_span(src, pos, batch)?;
+    let pooled = if pairs != 0 {
+        let carry = if src.pending_kv.is_empty() {
+            None
+        } else {
+            Some(rt.to_device(&[src.pending_kv.as_slice(), src.pending_gate.as_slice()].concat())?)
+        };
+        let mut pooled = rt.buffer(pairs * DIM)?;
+        cuda_ok(
+            unsafe {
+                ds4_attn_pool_pairs(
+                    rt.device,
+                    kv.as_ptr(),
+                    gates.as_ptr(),
+                    carry.as_ref().map_or(ptr::null(), Dev::as_ptr),
+                    pairs as i32,
+                    pooled.as_mut_ptr(),
+                )
+            },
+            "pooling resident compressor pairs",
+        )?;
+        Some(pooled)
+    } else {
+        None
+    };
+    let pending = if has_tail {
+        let last = (batch - 1) * DIM;
+        PendingPairs {
+            kv: rt.to_host_range(kv, last, DIM)?,
+            gates: rt.to_host_range(gates, last, DIM)?,
+        }
+    } else {
+        PendingPairs::default()
+    };
+    Ok((pooled, pending))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_source(
     rt: &mut Runtime,
@@ -1038,6 +1106,25 @@ fn append_source(
         rt.to_host(&kv)?
     } else {
         let gates = project(rt, prefix, "compressor.wgate", x, batch, DIM, 1)?;
+        if ratio == 2
+            && resident
+            && rt.target_prefill
+            && !rt.verification
+            && verify.is_none()
+            && prefill_gpu_pool_pairs()
+        {
+            let (pooled, pending) = device_pool_pairs(rt, src, &kv, &gates, pos, batch)?;
+            drop((gates, kv));
+            if let Some(latent) = pooled {
+                let n = latent.len() / DIM;
+                append_resident(rt, src, prefix, latent, pos, n, ratio)?;
+            }
+            // A snapshot or verification can reuse the original projected
+            // orphan. Publish it only after the complete pair append succeeds.
+            src.pending_kv = pending.kv;
+            src.pending_gate = pending.gates;
+            return Ok(());
+        }
         let kv = rt.to_host(&kv)?;
         let gates = rt.to_host(&gates)?;
         if let Some(mark) = verify {
@@ -2220,6 +2307,105 @@ mod tests {
     }
 
     #[test]
+    fn pair_plan_honors_the_saved_orphan() -> Result<()> {
+        let mut src = Source::default();
+        assert_eq!(pair_span(&src, 0, 1)?, (0, true));
+        assert_eq!(pair_span(&src, 12, 4)?, (2, false));
+        assert!(pair_span(&src, 13, 4).is_err());
+        src.pending_kv.resize(DIM, 1.);
+        assert!(pair_span(&src, 13, 4).is_err());
+        src.pending_gate.resize(DIM, 0.);
+        assert_eq!(pair_span(&src, 13, 4)?, (2, true));
+        assert_eq!(pair_span(&src, 13, 1)?, (1, false));
+        assert!(pair_span(&src, 14, 2).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_pool_pairs_matches_cpu_weighted_values_and_packed_bytes() -> Result<()> {
+        let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let kv: Vec<_> = (0..37 * DIM)
+            .map(|j| ((j * 1117 % 4991) as f32 - 2451.) / 117.)
+            .collect();
+        let gates: Vec<_> = (0..kv.len())
+            .map(|j| match j % 6 {
+                0 => 0.,
+                1 => -170.,
+                2 => 80.,
+                _ => ((j * 313 % 619) as f32 - 311.) / 43.,
+            })
+            .collect();
+        let kd = upload(dev, &kv)?;
+        let gd = upload(dev, &gates)?;
+        let mut src = Source::default();
+        let mut actual_all = Vec::new();
+        let mut expected_all = Vec::new();
+        let mut pos = 0;
+        let mut max_error = 0f32;
+        for n in [1, 4, 3, 9, 2, 5, 13] {
+            let (pairs, tail) = pair_span(&src, pos, n)?;
+            let carry = if src.pending_kv.is_empty() {
+                None
+            } else {
+                Some(upload(
+                    dev,
+                    &[src.pending_kv.as_slice(), src.pending_gate.as_slice()].concat(),
+                )?)
+            };
+            let expected = pool_pairs(
+                &kv[pos * DIM..(pos + n) * DIM],
+                &gates[pos * DIM..(pos + n) * DIM],
+                &mut src.pending_kv,
+                &mut src.pending_gate,
+            );
+            assert_eq!(expected.len(), pairs * DIM);
+            if pairs != 0 {
+                let out = upload(dev, &vec![f32::NAN; pairs * DIM])?;
+                cuda_ok(
+                    unsafe {
+                        ds4_attn_pool_pairs(
+                            dev,
+                            kd.data::<f32>().add(pos * DIM),
+                            gd.data::<f32>().add(pos * DIM),
+                            carry.as_ref().map_or(ptr::null(), |b| b.data()),
+                            pairs as i32,
+                            out.data(),
+                        )
+                    },
+                    "GPU pooling fixture",
+                )?;
+                let mut got = vec![0f32; pairs * DIM];
+                read(&out, &mut got)?;
+                for (&actual, &reference) in got.iter().zip(&expected) {
+                    let error = (actual - reference).abs();
+                    assert!(error <= 1e-5, "pooled value {actual} vs {reference}");
+                    max_error = max_error.max(error);
+                }
+                actual_all.extend(got);
+                expected_all.extend(expected);
+            }
+            pos += n;
+            if tail {
+                assert_eq!(src.pending_kv, kv[(pos - 1) * DIM..pos * DIM]);
+                assert_eq!(src.pending_gate, gates[(pos - 1) * DIM..pos * DIM]);
+            } else {
+                assert!(src.pending_kv.is_empty() && src.pending_gate.is_empty());
+            }
+        }
+        let (mut bytes, mut expected) = (vec![], vec![]);
+        pack_values(&actual_all, &mut bytes);
+        pack_values(&expected_all, &mut expected);
+        assert_eq!(bytes, expected);
+        eprintln!(
+            "{} CPU/GPU pooled features, max absolute error {max_error:e}, {} packed bytes",
+            actual_all.len(),
+            bytes.len()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pooling_across_unaligned_chunks_is_identical_to_prefill() {
         let x: Vec<_> = (0..DIM * 9)
             .map(|i| ((i * 711 % 881) as f32) / 97. - 4.)
@@ -3191,6 +3377,75 @@ mod tests {
                     assert_eq!(cp.pending[&owner].gates, gp.pending[&owner].gates);
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK, DS4_PREFILL_GPU_POOL_PAIRS=1 and both inference GPUs"]
+    fn cuda_checkpoint_prefill_pool_pairs_preserves_cache_and_orphans() -> Result<()> {
+        ensure!(
+            prefill_gpu_pool_pairs(),
+            "enable DS4_PREFILL_GPU_POOL_PAIRS"
+        );
+        ensure!(
+            std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
+            "mask the two inference GPUs"
+        );
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        let owner = 2;
+        rt.layer(owner)?;
+        rt.target_prefill = true;
+        let (mut cpu, mut gpu) = (Source::default(), Source::default());
+        let mut pos = 0;
+        for n in [4, 1, 3, 9, 2, 1] {
+            let x: Vec<_> = (pos * HIDDEN..(pos + n) * HIDDEN)
+                .map(|i| b16((i as f32 * 0.1369).cos()))
+                .collect();
+            let x = rt.to_device(&x)?;
+            // Verification must retain the original host pooling/capture path.
+            let mut mark = Verification {
+                pos,
+                batch: n,
+                pending: HashMap::new(),
+            };
+            append_source(
+                &mut rt,
+                &mut cpu,
+                "layers.2.attn",
+                &x,
+                pos,
+                n,
+                2,
+                owner,
+                Some(&mut mark),
+                true,
+            )?;
+            assert!(mark.pending.contains_key(&owner));
+            append_source(
+                &mut rt,
+                &mut gpu,
+                "layers.2.attn",
+                &x,
+                pos,
+                n,
+                2,
+                owner,
+                None,
+                true,
+            )?;
+            for (a, b) in [(&gpu.keys, &cpu.keys), (&gpu.values, &cpu.values)] {
+                let (mut got, mut expected) = (Vec::new(), Vec::new());
+                a.append_snapshot(&mut got)?;
+                b.append_snapshot(&mut expected)?;
+                assert_eq!(got, expected, "packed checkpoint bytes at {pos}+{n}");
+            }
+            assert_eq!(gpu.pending_kv, cpu.pending_kv);
+            assert_eq!(gpu.pending_gate, cpu.pending_gate);
+            pos += n;
         }
         Ok(())
     }

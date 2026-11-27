@@ -135,6 +135,26 @@ __global__ void transform_heads(float *data, __nv_bfloat16 *window, const float2
     }
 }
 
+// Two-token compressor softmax, independent for every feature. Carry holds
+// [KV, gate] of the preceding unpaired row, when present. The elementary
+// FP32 operations follow pool_pairs exactly; round exp from FP64 to avoid
+// extra approximation in CUDA's single-precision expf implementation.
+__global__ void pool_pair_rows(const float *kv, const float *gate, const float *carry, float *out) {
+    int pair = blockIdx.x;
+    int second = 2 * pair + (carry ? 0 : 1);
+    const float *right = kv + size_t(second)*dim, *gr = gate + size_t(second)*dim;
+    const float *left = second ? right-dim : carry;
+    const float *gl = second ? gr-dim : carry+dim;
+    for (int j = threadIdx.x; j < dim; j += blockDim.x) {
+        float m = fmaxf(gl[j], gr[j]);
+        float da = __fsub_rn(gl[j],m), db = __fsub_rn(gr[j],m);
+        float a = da == 0.f ? 1.f : __double2float_rn(exp(double(da)));
+        float b = db == 0.f ? 1.f : __double2float_rn(exp(double(db)));
+        float num = __fadd_rn(__fmul_rn(left[j],a),__fmul_rn(right[j],b));
+        out[size_t(pair)*dim+j] = __fdiv_rn(num,__fadd_rn(a,b));
+    }
+}
+
 // Match the checkpoint's record layout. One warp quantizes a 128-column
 // index key or a 64-column non-rotary key/value group.
 __global__ void pack_compressor(const float *values,const float *keys,uint8_t *value_bytes,uint8_t *key_bytes) {
@@ -554,6 +574,12 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     return 0;
 }
 
+extern "C" int ds4_attn_pool_pairs(int dev, const float *kv, const float *gates,
+                                   const float *carry, int pairs, float *out) {
+    TRY(cudaSetDevice(dev));
+    pool_pair_rows<<<pairs,256>>>(kv,gates,carry,out);
+    return cudaGetLastError();
+}
 extern "C" int ds4_attn_normalize_raw(int dev, float *x, const float *g, int n) {
     TRY(cudaSetDevice(dev));
     normalize_rows<false><<<n,block,dim*sizeof(float)>>>(x,g,dim);
