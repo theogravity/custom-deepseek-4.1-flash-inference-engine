@@ -1,8 +1,8 @@
 // Each peer runs full, unchanged index tiles in its own default stream.
-// The existing MoE event link fences producer reads and returned owner outputs.
+// The existing MoE event link makes owner keys/queries visible to the peer.
+// The checked join covers both peer-written IDs and every owner-buffer read.
 struct PeerEvents;
 extern "C" int ds_moe_peer_begin(PeerEvents **link, int primary, int peer);
-extern "C" int ds_moe_peer_end(PeerEvents *link);
 extern "C" void ds_moe_peer_free(PeerEvents *link);
 
 namespace {
@@ -23,7 +23,7 @@ struct PeerIndexCache {
     IndexMirror mirrors[3]{};
     uint64_t clock=0, uploaded=0, tiles=0;
     uint8_t *stage=nullptr;
-    size_t stage_capacity=0, query_offset=0, weights_offset=0, picks_offset=0;
+    size_t stage_capacity=0, query_offset=0, weights_offset=0;
     IndexMirror *current=nullptr;
     bool active=false;
 
@@ -46,9 +46,7 @@ struct IndexOwnerGuard {
     ~IndexOwnerGuard(){ cudaSetDevice(owner); }
 };
 size_t peer_stage_bytes(size_t workspace,int rows) {
-    // The native selection scratch is already padded to 256 bytes. All three
-    // tensors have a whole number of 128-byte cache lines per query row.
-    return peer_index_round(workspace+size_t(rows)*(ih*idim*sizeof(float)+ih*sizeof(float)+top*sizeof(int)));
+    return peer_index_round(workspace+size_t(rows)*ih*(idim+1)*sizeof(float));
 }
 int optional_peer_status(cudaError_t status) {
     if (status==cudaErrorMemoryAllocation || status==cudaErrorPeerAccessUnsupported || status==cudaErrorTooManyPeers) {
@@ -64,6 +62,14 @@ int discard_mirror(IndexMirror &m) {
     }
     m=IndexMirror{};
     return 0;
+}
+// Pull each peer tile's two input tensors once. Re-reading weights from
+// remote memory inside each score CTA costs far more than a coalesced copy.
+__global__ void stage_index_inputs(const uint4 *query,const uint4 *weights,
+        uint4 *peer_query,uint4 *peer_weights,int n) {
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if (i<n*ih*idim/4) peer_query[i]=query[i];
+    if (i<n*ih/4) peer_weights[i]=weights[i];
 }
 }  // namespace
 
@@ -95,7 +101,12 @@ extern "C" size_t ds4_index_peer_growth(PeerIndexCache *p,uint64_t id,size_t key
 
 extern "C" int ds4_index_peer_finish(PeerIndexCache *p) {
     if (!p || !p->active) return 0;
-    int rc=ds_moe_peer_end(p->events);
+    // The owner may immediately free a key, query or output allocation when
+    // this returns. cudaFree on the owner need not retire a peer's UVA reads.
+    IndexOwnerGuard guard{p->owner};
+    auto status=cudaSetDevice(p->peer);
+    if (status==cudaSuccess) status=cudaStreamSynchronize(nullptr);
+    int rc=int(status);
     p->active=false;
     if (rc && p->current) p->current->valid=0;
     p->current=nullptr;
@@ -138,7 +149,6 @@ extern "C" int ds4_index_peer_begin(PeerIndexCache *p,uint64_t id,const void *ow
     if (selected->valid>keys) selected->valid=0;
     p->query_offset=work;
     p->weights_offset=work+size_t(rows)*ih*idim*sizeof(float);
-    p->picks_offset=p->weights_offset+size_t(rows)*ih*sizeof(float);
     int rc=ds_moe_peer_begin(&p->events,p->owner,p->peer);
     if (rc) return optional_peer_status(static_cast<cudaError_t>(rc));
     p->active=true;
@@ -168,14 +178,11 @@ extern "C" int ds4_index_peer_tile(PeerIndexCache *p,const float *query,const fl
     TRY(cudaSetDevice(p->peer));
     auto *q=reinterpret_cast<float *>(p->stage+p->query_offset);
     auto *w=reinterpret_cast<float *>(p->stage+p->weights_offset);
-    auto *ids=reinterpret_cast<int *>(p->stage+p->picks_offset);
-    auto status=cudaMemcpyPeerAsync(q,p->peer,query,p->owner,size_t(rows)*ih*idim*4,nullptr);
-    if (status==cudaSuccess) status=cudaMemcpyPeerAsync(w,p->peer,weights,p->owner,size_t(rows)*ih*4,nullptr);
-    if (status!=cudaSuccess) return optional_peer_status(status);
-    int rc=select_index_data(p->peer,p->stage,p->current->data,q,w,nullptr,width,pos,ratio,rows,ids,nullptr,mode);
+    stage_index_inputs<<<(rows*ih*idim/4+255)/256,256>>>(reinterpret_cast<const uint4 *>(query),
+        reinterpret_cast<const uint4 *>(weights),reinterpret_cast<uint4 *>(q),reinterpret_cast<uint4 *>(w),rows);
+    TRY(cudaGetLastError());
+    int rc=select_index_data(p->peer,p->stage,p->current->data,q,w,nullptr,width,pos,ratio,rows,picks,nullptr,mode);
     if (rc) return optional_peer_status(static_cast<cudaError_t>(rc));
-    status=cudaMemcpyPeerAsync(picks,p->owner,ids,p->peer,size_t(rows)*top*4,nullptr);
-    if (status!=cudaSuccess) return optional_peer_status(status);
     ++p->tiles;
     return 0;
 }

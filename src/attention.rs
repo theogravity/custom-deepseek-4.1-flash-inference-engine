@@ -3602,8 +3602,25 @@ mod tests {
         const N: usize = 384;
         for owner in [0, 1] {
             rt.layer(if owner == 0 { 0 } else { 20 })?;
-            let q = rt.to_device(&vec![1.; N * INDEX_HEADS * INDEX_DIM])?;
-            let w = rt.to_device(&vec![1.; N * INDEX_HEADS])?;
+            let mut queries = vec![0.; N * INDEX_HEADS * INDEX_DIM];
+            let mut weights = vec![0.; N * INDEX_HEADS];
+            let mut winner_groups = Vec::new();
+            for row in 0..N {
+                // Both heads identify different key groups. The active head
+                // and its coordinate vary across rows and across tile offsets.
+                let dims = [
+                    (row + 3 * (row / 13)) % 16,
+                    16 + (5 * row + 3 * (row / 11)) % 16,
+                ];
+                for (head, &dim) in dims.iter().enumerate() {
+                    queries[(row * INDEX_HEADS + head) * INDEX_DIM + dim] = 1.;
+                }
+                let head = usize::from(row % 7 >= 3);
+                weights[row * INDEX_HEADS + head] = 1.;
+                winner_groups.push(dims[head] as i32);
+            }
+            let q = rt.to_device(&queries)?;
+            let w = rt.to_device(&weights)?;
             let picks = upload(owner, &vec![-9i32; N * TOP])?;
             let keys = GpuBuffer::new(owner)?;
             let pool = rt.index_pool(1 - owner);
@@ -3619,7 +3636,7 @@ mod tests {
                 identity.packed.for_append().resize(width * INDEX_BYTES, 0);
                 let mut data = vec![0u8; width * INDEX_BYTES];
                 for (id, row) in data.chunks_exact_mut(INDEX_BYTES).enumerate() {
-                    row[0] = 0x38;
+                    row[id % 32] = 0x38;
                     let weight = if pass < 2 {
                         id % 8191
                     } else {
@@ -3651,7 +3668,9 @@ mod tests {
                     both.push(ids);
                 }
                 assert_eq!(both[0], both[1], "owner={owner} pass={pass}");
-                assert!(both[0].iter().all(|&id| id >= 0));
+                for (ids, &group) in both[0].chunks_exact(TOP).zip(&winner_groups) {
+                    assert!(ids.iter().all(|&id| id >= 0 && id % 32 == group));
+                }
                 if pass == 2 {
                     assert_ne!(both[0], previous);
                 }
@@ -3672,6 +3691,7 @@ mod tests {
             }
             // Drop a later peer tile after one real DMA and kernel have been
             // submitted. The owner rejoins before recomputing the failed tile.
+            picks.write(&vec![-9i32; N * TOP])?;
             peer_index::UNAVAILABLE_AFTER.with(|f| f.set(Some(1)));
             device_select(
                 &mut rt,

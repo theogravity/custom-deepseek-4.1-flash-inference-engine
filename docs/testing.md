@@ -80,7 +80,7 @@ done
 
 ### Two-GPU prompt index search
 
-`DS4_TP2_INDEX=1` alternates whole query tiles between both GPUs for contiguous target-prefill searches before layer 20. A search needs at least 128 query rows, 16,384 source positions and two tiles. Each rank runs the original tile geometry and returns chronological top-512 IDs to the layer owner. Each GPU can retain up to three peer index mirrors and a transfer workspace, capped at 256 MiB total and shared across sessions. VRAM pressure can reclaim these allocations. Restoring or truncating a session invalidates its key identity. Limited peer access or an optional allocation failure uses the owner path.
+`DS4_TP2_INDEX=1` alternates whole query tiles between both GPUs for contiguous target-prefill searches before layer 20. A search needs at least 128 query rows, 16,384 source positions and two tiles. Each rank runs the original tile geometry. The peer pulls query and weight rows into local scratch with a coalesced kernel, writes chronological top-512 IDs to the layer owner, and retires its stream before caller buffers can be released. Each GPU can retain up to three peer index mirrors and a transfer workspace, capped at 256 MiB total and shared across sessions. VRAM pressure can reclaim these allocations. Restoring or truncating a session invalidates its key identity. Limited peer access or an optional allocation failure uses the owner path.
 
 The GPU test compares both rank directions, append-only mirror copies, truncation, eviction and the memory-cap fallback.
 
