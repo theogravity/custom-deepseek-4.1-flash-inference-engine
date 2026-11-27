@@ -219,6 +219,14 @@ extern "C" int ds_copy_f32(int device, float *dst, const float *src, size_t n,
                   to_host == 1 ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice));
   return 0;
 }
+// The implicit peer copy orders both devices' prior and subsequent work.
+// Source allocations can reenter their default-stream pool as soon as it returns.
+extern "C" int ds_copy_peer_f32(int dst_dev, float *dst, int src_dev,
+                                const float *src, size_t n) {
+  CUDA(cudaSetDevice(dst_dev));
+  CUDA(cudaMemcpyPeer(dst, dst_dev, src, src_dev, n * sizeof(float)));
+  return 0;
+}
 __global__ void round_bf16(float *data, size_t n) {
   size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < n)

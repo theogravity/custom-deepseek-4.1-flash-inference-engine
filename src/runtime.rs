@@ -51,6 +51,13 @@ extern "C" {
     fn ds_alloc_f32(dev: c_int, out: *mut *mut f32, len: usize) -> c_int;
     fn ds_copy_f32(dev: c_int, dst: *mut f32, src: *const f32, len: usize, to_host: c_int)
         -> c_int;
+    fn ds_copy_peer_f32(
+        dst_dev: i32,
+        dst: *mut f32,
+        src_dev: i32,
+        src: *const f32,
+        len: usize,
+    ) -> i32;
     fn ds_dense_growth(
         ctx: *mut c_void,
         rows: i32,
@@ -211,6 +218,7 @@ pub struct Runtime {
     pub(crate) attention_scratch: crate::attention::Workspace,
     pub verification: bool,
     pub(crate) target_prefill: bool,
+    peer_prefill_boundary: bool,
     prefill_tiles: i32,
     verification_tiles: i32,
     head_row_tiles: bool,
@@ -278,6 +286,11 @@ impl Runtime {
             attention_scratch: Default::default(),
             verification: false,
             target_prefill: false,
+            peer_prefill_boundary: match std::env::var("DS4_TP2_PEER_BOUNDARY").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => anyhow::bail!("DS4_TP2_PEER_BOUNDARY must be 0 or 1"),
+            },
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
             head_row_tiles: match std::env::var("DS4_HEAD_ROW_TILES").as_deref() {
@@ -362,6 +375,25 @@ impl Runtime {
         })?;
         Ok(out)
     }
+    pub(crate) fn move_activation(&mut self, input: Dev) -> Result<Dev> {
+        if self.target_prefill && self.peer_prefill_boundary {
+            let mut out = self.buffer(input.len())?;
+            checked(unsafe {
+                ds_copy_peer_f32(
+                    self.device,
+                    out.as_mut_ptr(),
+                    input.device(),
+                    input.as_ptr(),
+                    input.len(),
+                )
+            })?;
+            Ok(out)
+        } else {
+            let host = self.to_host(&input)?;
+            self.to_device(&host)
+        }
+    }
+
     pub fn to_host(&self, input: &Dev) -> Result<Vec<f32>> {
         self.to_host_range(input, 0, input.len())
     }
@@ -820,6 +852,36 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
+    fn peer_boundary_copies_residual_bits_before_source_pool_reuse() -> Result<()> {
+        let mut rt = Runtime::open(Path::new(&std::env::var("DS4_TEST_PACK")?), [0, 1])?;
+        rt.peer_prefill_boundary = true;
+        rt.target_prefill = true;
+        let bits = [0x80000000, 0x7fc00123, 0xff800000, 0x3f800001, 0];
+        let values: Vec<_> = bits
+            .iter()
+            .copied()
+            .map(f32::from_bits)
+            .cycle()
+            .take(262145)
+            .collect();
+        for (home, other) in [(0, 20), (20, 0)] {
+            rt.layer(home)?;
+            let input = rt.to_device(&values)?;
+            rt.layer(other)?;
+            let out = rt.move_activation(input)?;
+            rt.layer(home)?;
+            let _reuse = rt.to_device(&vec![0.; values.len()])?;
+            let actual = rt.to_host(&out)?;
+            assert!(actual
+                .iter()
+                .zip(&values)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
+        Ok(())
     }
 
     #[test]

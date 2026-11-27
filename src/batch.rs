@@ -168,11 +168,9 @@ impl Model {
             }
             let stem = format!("layers.{layer}");
             if layer == 20 {
-                let host_h = self.rt.to_host(&h)?;
-                let host_mix = self.rt.to_host(&mix)?;
                 self.rt.layer(layer)?;
-                h = self.rt.to_device(&host_h)?;
-                mix = self.rt.to_device(&host_mix)?;
+                h = self.rt.move_activation(h)?;
+                mix = self.rt.move_activation(mix)?;
             }
             if matches!(layer, 1 | 14) {
                 if let Some(source) = &engram_rows {
