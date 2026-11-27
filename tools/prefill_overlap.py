@@ -20,9 +20,10 @@ class Stream:
     events: list[float]
     done: float
     usage: dict
+    finish: str | None = None
 
 
-def stream(base, key, prompt, limit, ready=None):
+def stream(base, key, prompt, limit, ready=None, timeout=120):
     payload = dict(model=MODEL, temperature=0, stream=True, stream_options={"include_usage": True},
                    max_tokens=limit, messages=[{"role": "user", "content": prompt}])
     req = Request(base.rstrip("/") + "/v1/chat/completions", json.dumps(payload).encode(),
@@ -30,7 +31,7 @@ def stream(base, key, prompt, limit, ready=None):
     started = time.monotonic()
     events = []
     usage, finish, done = None, None, None
-    with urlopen(req, timeout=120) as response:
+    with urlopen(req, timeout=timeout) as response:
         for line in response:
             if not line.startswith(b"data:"):
                 continue
@@ -51,7 +52,7 @@ def stream(base, key, prompt, limit, ready=None):
                         ready.set()
     if not (events and usage and done is not None and finish in ("length", "stop")):
         raise RuntimeError("incomplete coding stream")
-    return Stream(started, events, done, usage)
+    return Stream(started, events, done, usage, finish)
 
 
 def idle(base, key):

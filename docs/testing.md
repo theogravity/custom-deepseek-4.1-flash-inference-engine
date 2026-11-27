@@ -77,3 +77,11 @@ for enabled in 0 1; do
   DS4_PREFILL_SAMPLED_TOPK="$enabled" cargo test --release --locked cuda_index -- --ignored --test-threads=1 --nocapture
 done
 ```
+
+### Six resident 404k-token code reviews
+
+With the candidate profile running on an idle native endpoint, use its API key in `DSV41_API_KEY` or `LITELLM_MASTER_KEY`. Each invocation generates a fresh seed and submits six distinct Python modules concurrently in one pass. The receipt requires six admissions, zero prefix reuse or swapping, completed streams, and a single metrics observation with all six decoding and their full prompt token count resident before the first stream ends. The client samples available host RAM and free GPU memory on physical cards 1 and 2 for localhost runs.
+
+```sh
+python3 tools/six_capacity.py --base http://127.0.0.1:8001 --out six-capacity.json
+```
