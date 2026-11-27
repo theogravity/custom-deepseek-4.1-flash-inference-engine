@@ -1577,7 +1577,7 @@ fn device_select(
                     width as i32,
                     rows as i32,
                     score_mode,
-                    (layer == CANDIDATE_LAYER).into(),
+                    (layer == CANDIDATE_LAYER && !blocks.is_null()).into(),
                     &mut bytes,
                 )
             },
