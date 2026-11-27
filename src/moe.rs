@@ -370,6 +370,8 @@ struct DeviceCache {
     idle_pool: Option<IdlePool>,
     device: i32,
     limit_bytes: usize,
+    #[cfg(feature = "recipe-prefill")]
+    prefill_limit_bytes: Option<usize>,
     slots: HashMap<Key, (usize, u64)>,
     resident_bytes: usize,
     eviction_order: BTreeSet<(u64, u64, Key)>,
@@ -406,17 +408,27 @@ struct DeviceCache {
     metrics: bool,
 }
 
+fn expert_budget_bytes(raw: &str, name: &str) -> Result<usize> {
+    let gib: f64 = raw
+        .parse()
+        .with_context(|| format!("{name} must be a number"))?;
+    ensure!(gib.is_finite() && gib >= 0.0, "invalid {name}");
+    let configured = (gib * 1073741824.0) as usize;
+    Ok(configured.min((configured / SLOT_BYTES).max(1) * SLOT_BYTES))
+}
+
 impl DeviceCache {
     fn new(device: i32) -> Result<Self> {
-        let gib: f64 = std::env::var("DS4_MOE_CACHE_GIB")
-            .unwrap_or_else(|_| "78".to_owned())
-            .parse()
-            .context("DS4_MOE_CACHE_GIB must be a number")?;
-        ensure!(gib.is_finite() && gib >= 0.0, "invalid DS4_MOE_CACHE_GIB");
-        let configured = (gib * 1073741824.0) as usize;
-        // Keep the existing whole-expert budget above one full slot. A smaller
-        // explicit byte limit can forbid even one unsolicited rank upload.
-        let limit_bytes = configured.min((configured / SLOT_BYTES).max(1) * SLOT_BYTES);
+        let limit_bytes = expert_budget_bytes(
+            &std::env::var("DS4_MOE_CACHE_GIB").unwrap_or_else(|_| "78".into()),
+            "DS4_MOE_CACHE_GIB",
+        )?;
+        #[cfg(feature = "recipe-prefill")]
+        let prefill_limit_bytes = match std::env::var("DS4_TP2_PREFILL_EXPERT_GIB") {
+            Ok(raw) => Some(expert_budget_bytes(&raw, "DS4_TP2_PREFILL_EXPERT_GIB")?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(e) => return Err(e.into()),
+        };
         let recipe_prefill = recipe_prefill_enabled()?;
         Ok(Self {
             idle_pool: None,
@@ -435,6 +447,8 @@ impl DeviceCache {
             rank_workspace: tp2::Workspace::default(),
             device,
             limit_bytes,
+            #[cfg(feature = "recipe-prefill")]
+            prefill_limit_bytes,
             slots: HashMap::new(),
             resident_bytes: 0,
             eviction_order: BTreeSet::new(),
@@ -492,14 +506,30 @@ impl DeviceCache {
         (available.min(limit_bytes) / slot_bytes).max(1)
     }
 
+    fn budget_for(&self, slot_bytes: usize) -> usize {
+        #[cfg(feature = "recipe-prefill")]
+        if slot_bytes == RANK_SLOT_BYTES {
+            return self
+                .prefill_limit_bytes
+                .unwrap_or(self.limit_bytes)
+                .min(self.limit_bytes);
+        }
+        let _ = slot_bytes;
+        self.limit_bytes
+    }
+
     fn capacity(&mut self, slot_bytes: usize) -> Result<usize> {
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(self.device, &mut free) })?;
         free = reclaim_rank_headroom(self.device, self.idle_pool.as_ref(), free, slot_bytes)?;
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
-        let capacity =
-            Self::available_slots(self.resident_bytes, free, self.limit_bytes, slot_bytes);
+        let capacity = Self::available_slots(
+            self.resident_bytes,
+            free,
+            self.budget_for(slot_bytes),
+            slot_bytes,
+        );
         while self.resident_bytes > capacity * slot_bytes {
             let (slot, _) = self.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
@@ -1313,6 +1343,29 @@ mod tests {
         assert!(cache.can_reuse_capacity(layer, &routes));
         cache.scratch_bytes = 0;
         assert!(!cache.can_reuse_capacity(layer, &routes));
+    }
+
+    #[cfg(feature = "recipe-prefill")]
+    #[test]
+    fn rank_budget_only_limits_prefill_and_never_exceeds_the_shared_cap() {
+        let mut cache = DeviceCache::new(0).unwrap();
+        cache.limit_bytes = 4 * SLOT_BYTES;
+        for limit in [
+            None,
+            Some(0),
+            Some(RANK_SLOT_BYTES),
+            Some(2 * SLOT_BYTES),
+            Some(8 * SLOT_BYTES),
+        ] {
+            cache.prefill_limit_bytes = limit;
+            assert_eq!(cache.budget_for(SLOT_BYTES), 4 * SLOT_BYTES);
+            assert_eq!(
+                cache.budget_for(RANK_SLOT_BYTES),
+                limit.unwrap_or(4 * SLOT_BYTES).min(4 * SLOT_BYTES)
+            );
+        }
+        assert!(expert_budget_bytes("nan", "test").is_err());
+        assert!(expert_budget_bytes("-1", "test").is_err());
     }
 
     #[test]

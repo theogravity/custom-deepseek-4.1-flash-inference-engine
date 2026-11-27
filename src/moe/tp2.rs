@@ -86,7 +86,7 @@ fn preload_rank(
 ) -> Result<usize> {
     cuda(unsafe { cudaSetDevice(cache.device) })?;
     let result = (|| {
-        let capacity = cache.limit_bytes / RANK_SLOT_BYTES;
+        let capacity = cache.budget_for(RANK_SLOT_BYTES) / RANK_SLOT_BYTES;
         let mut loaded = 0;
         for layer in 0..layers {
             for expert in 0..EXPERTS {
