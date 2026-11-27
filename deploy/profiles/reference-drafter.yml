@@ -1,0 +1,9 @@
+services:
+  dsv41-flash-exl3:
+    environment:
+      DS4_DRAFTER: released
+      DS4_SPEC_K: "5"
+      DS4_PROMPT_LOOKUP: "0"
+      DS4_OUTPUT_LOOKUP: "0"
+      DS4_PREFIX_RAM_MIB: "49152"
+      DS4_PREFIX_DISK_MIB: "131072"

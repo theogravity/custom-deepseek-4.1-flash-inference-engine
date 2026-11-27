@@ -12,6 +12,33 @@ fn main() {
         matches!(arch.as_str(), "sm_120" | "sm_120f" | "sm_120a"),
         "unsupported Blackwell ISA"
     );
+    println!("cargo:rerun-if-env-changed=DS4_RECIPE_DIR");
+    let mut recipe_flags = Vec::new();
+    if env::var_os("CARGO_FEATURE_RECIPE_PREFILL").is_some() {
+        let root = PathBuf::from(
+            env::var_os("DS4_RECIPE_DIR").unwrap_or("/mnt/models/dsv41-flash-exl3/recipe".into()),
+        );
+        let kernel = root.join("kernels/xmoe_do_i8/dof_gemm.cu");
+        let includes = root.join("kernels/xmoe");
+        println!("cargo:rerun-if-changed={}", kernel.display());
+        println!("cargo:rerun-if-changed={}", includes.display());
+        println!("cargo:rerun-if-changed=tools/prepare_recipe_kernel.py");
+        assert!(
+            Command::new("python3")
+                .arg("tools/prepare_recipe_kernel.py")
+                .arg(&kernel)
+                .arg(out.join("diffbot_device.cuh"))
+                .status()
+                .unwrap()
+                .success(),
+            "failed to prepare the pinned Diffbot kernel"
+        );
+        recipe_flags = vec![
+            "-DDS4_RECIPE_PREFILL".into(),
+            format!("-I{}", out.display()),
+            format!("-I{}", includes.display()),
+        ];
+    }
     let mut objects = Vec::new();
     for entry in fs::read_dir("native").unwrap() {
         let path = entry.unwrap().path();
@@ -29,6 +56,23 @@ fn main() {
                     "-fPIC",
                     "-c"
                 ])
+                .args(
+                    if matches!(
+                        path.file_name().and_then(|x| x.to_str()),
+                        Some("moe.cu" | "recipe_prefill.cu")
+                    ) {
+                        &recipe_flags[..]
+                    } else {
+                        &[]
+                    }
+                )
+                .args(
+                    if path.ends_with("recipe_prefill.cu") && !recipe_flags.is_empty() {
+                        &["--expt-relaxed-constexpr", "--use_fast_math"][..]
+                    } else {
+                        &[]
+                    }
+                )
                 .arg(&path)
                 .arg("-o")
                 .arg(&object)

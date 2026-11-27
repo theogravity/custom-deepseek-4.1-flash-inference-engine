@@ -48,6 +48,9 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
         u8::from(crate::attention::fast_attention()),
         u8::from(std::env::var_os("DS4_TP_DENSE").is_some_and(|v| v == "1")),
     ]);
+    if std::env::var_os("DS4_RECIPE_PREFILL").is_some_and(|v| v == "1") {
+        h.update(b"Diffbot S8B hot expert prefill v1");
+    }
     h.update((chunk as u64).to_le_bytes());
     h.update(Sha256::digest(fs::read(root.join("tokenizer.json"))?));
     let config = fs::read(root.join("config.json"))?;

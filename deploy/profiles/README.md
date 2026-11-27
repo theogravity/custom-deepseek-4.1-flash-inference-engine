@@ -14,4 +14,6 @@ Start each profile with the root [compose.yml](../../compose.yml). Add the overl
 | Shared prefixes with LFU | [shared-prefix-lfu.yml](shared-prefix-lfu.yml) | [Shared prefixes](../../benchmarks/reports/shared-prefix.md#full-window-rotation-and-reproduction) |
 | LFU expert cache | [expert-cache-lfu.yml](expert-cache-lfu.yml) | [Expert cache](../../benchmarks/reports/expert-cache.md#running-the-candidate-on-this-workstation) |
 
+For a native comparison using the workstation vLLM drafter and prefix-tier limits, append [reference-drafter.yml](reference-drafter.yml). It selects the released DSpark with five proposals, disables source and output lookup, and sets the native prefix tiers to 48 GiB RAM and 128 GiB disk. The [recipe-prefill.yml](recipe-prefill.yml) overlay selects the optional S8B build and 128-token physical prefill chunks. [Local reference, build and controls](../../benchmarks/reports/local-vllm-prefill.md)
+
 On the workstation, pass `--env-file ../models/.env` to Compose from the checkout next to the stack's `models/` directory. For a fresh clone, follow the [build and launch instructions](../../README.md#build-and-serve-from-a-fresh-clone).

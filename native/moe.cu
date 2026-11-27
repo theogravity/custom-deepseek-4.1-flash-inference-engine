@@ -11,18 +11,7 @@
 #include <new>
 #include <vector>
 
-struct Job {
-    const char *expert;
-    int begin, count;
-};
-
-// The output row encodes both the token and its reduction position. Production
-// assigns consecutive top-k output rows per token, ordered by expert index.
-struct RoutedRow {
-    const char *expert;
-    int token, output;
-    float weight;
-};
+#include "moe_types.cuh"
 
 namespace {
 constexpr int H = 5120, I = 2304;
@@ -464,6 +453,15 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
     // Verifying several positions must use the same K-reduction boundaries as
     // serial decoding, even if the block touches 32 or more distinct experts.
     if (splits != 2 && splits != 8) return int(cudaErrorInvalidValue);
+    if (n_jobs <= 0 || n_jobs > rows) return int(cudaErrorInvalidValue);
+    if (fused == 3) {
+#ifdef DS4_RECIPE_PREFILL
+        if (mcg) return int(cudaErrorInvalidValue);
+        return ds_recipe_group(scratch, scratch_bytes, jobs, n_jobs, routes, rows, x, weighted);
+#else
+        return int(cudaErrorNotSupported);
+#endif
+    }
     size_t partial_size = size_t(rows) * H * splits * sizeof(float);
     size_t inter_size = size_t(rows) * I * sizeof(float);
     size_t rotated_size = size_t(rows) * H * sizeof(half);

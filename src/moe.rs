@@ -178,6 +178,15 @@ fn frequency_index((layer, expert): Key) -> usize {
         Layer::Draft(n) => 40 * EXPERTS + n * DRAFT_EXPERTS + expert,
     }
 }
+pub(crate) fn recipe_prefill_enabled() -> Result<bool> {
+    let enabled = switch("DS4_RECIPE_PREFILL", false)?;
+    ensure!(
+        !enabled || cfg!(feature = "recipe-prefill"),
+        "DS4_RECIPE_PREFILL requires the recipe-prefill build feature"
+    );
+    Ok(enabled)
+}
+
 fn switch(name: &str, default: bool) -> Result<bool> {
     match std::env::var(name).as_deref() {
         Err(std::env::VarError::NotPresent) => Ok(default),
@@ -256,6 +265,7 @@ struct DeviceCache {
     cached_capacity: bool,
     packed_upload: bool,
     inline_metadata: bool,
+    recipe_prefill: bool,
     fused: bool,
     packed_decode: bool,
     parallel: bool,
@@ -273,7 +283,9 @@ impl DeviceCache {
             .context("DS4_MOE_CACHE_GIB must be a number")?;
         ensure!(gib.is_finite() && gib >= 0.0, "invalid DS4_MOE_CACHE_GIB");
         let limit = (((gib * 1073741824.0) as usize) / SLOT_BYTES).max(1);
+        let recipe_prefill = recipe_prefill_enabled()?;
         Ok(Self {
+            recipe_prefill,
             device,
             limit,
             slots: HashMap::new(),
@@ -556,6 +568,7 @@ struct Dispatch<'a> {
     x: &'a Dev,
     weighted: &'a mut Dev,
     top_k: usize,
+    recipe_eligible: bool,
 }
 
 impl Dispatch<'_> {
@@ -569,17 +582,19 @@ impl Dispatch<'_> {
     ) -> Result<()> {
         let mut jobs = Vec::new();
         let mut rows = Vec::with_capacity(routes.len());
+        let recipe = self.recipe_eligible && device.recipe_prefill;
+        let job_size = if recipe { 128 } else { 16 };
         let group_start = device.clock;
         let mut begin = 0;
         while begin < routes.len() {
             let expert = routes[begin].expert;
             let count = routes[begin..].partition_point(|r| r.expert == expert);
             let slot = device.acquire(self.weights, (self.layer, expert), capacity, group_start)?;
-            for start in (begin..begin + count).step_by(16) {
+            for start in (begin..begin + count).step_by(job_size) {
                 jobs.push(Job {
                     expert: slot,
                     begin: start as i32,
-                    count: (begin + count - start).min(16) as i32,
+                    count: (begin + count - start).min(job_size) as i32,
                 });
             }
             for route in &routes[begin..begin + count] {
@@ -611,7 +626,9 @@ impl Dispatch<'_> {
                 i32::from(matches!(self.layer, Layer::Draft(_))),
                 splits,
                 device.inline_metadata.into(),
-                if device.fused {
+                if recipe {
+                    3
+                } else if device.fused {
                     1 + i32::from(device.packed_decode)
                 } else {
                     0
@@ -822,6 +839,7 @@ fn forward<const E: usize, const K: usize>(
         x,
         weighted: &mut weighted,
         top_k: K,
+        recipe_eligible: rt.target_prefill && batch >= 128 && matches!(layer, Layer::Backbone(_)),
     };
     let (mut begin, mut ni, mut pi) = (0, 0, 0);
     while begin < routes.len() {

@@ -201,6 +201,7 @@ impl Runtime {
             devices[0] != devices[1],
             "two distinct CUDA devices required"
         );
+        crate::moe::recipe_prefill_enabled()?;
         let mut weights = Weights::open(path)?;
         match std::env::var("DS4_DRAFTER").as_deref() {
             Ok("code") => weights.overlay_mtp(&path.join("drafter-code-k7"))?,

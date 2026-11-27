@@ -1,5 +1,7 @@
 # Benchmarks
 
+[Same-host cold TTFT against the installed vLLM image](reports/local-vllm-prefill.md) covers the released DSpark drafter and the optional pack S8B expert kernel.
+
 | What do you want to measure? | Reports |
 |---|---|
 | Cold-prefill experiments | [First-output latency, GPU trace and cache-state parity](reports/cold-prefill-optimization.md) |

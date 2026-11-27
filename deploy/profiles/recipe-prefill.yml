@@ -1,0 +1,6 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:recipe-prefill-20261126
+    environment:
+      DS4_RECIPE_PREFILL: "${DS4_RECIPE_PREFILL:-1}"
+    command: ["serve", "--bind", "0.0.0.0:8001", "--max-context", "524288", "--chunk-size", "128"]

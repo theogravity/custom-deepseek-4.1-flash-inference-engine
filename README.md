@@ -27,16 +27,18 @@ On six different follow-ups to a warm 404k-token conversation, median time to fi
 
 Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At six clients, dividing 583 by six gives about 97 tok/s per client over the longest decode interval. Individual streams finish at different times. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM figure is one warm second pass at 600 W. The concurrent coding profile lets each client draft repeated patterns from its own verified output. In the separate matched four- and six-client runs, every measured stream reproduced the control’s visible code and reasoning. [Concurrent decoding experiment](benchmarks/reports/concurrent-repetition.md) · [Original headline comparison](benchmarks/reports/headline-reference.md)
 
-| Published input tokens | Native input tokens | vLLM cold TTFT | Native cold TTFT | Native / vLLM time |
-|---:|---:|---:|---:|---:|
-| 15,826 | 15,858 | 1.4 s | 23.14 s | 16.5× |
-| 60,046 | 60,017 | 5 s | 60.9 s | 12.2× |
-| 195,600 | 195,702 | 15.7 s | 204.77 s | 13.0× |
-| 505,214 | 505,143 | 41.6 s | 601.78 s | 14.5× |
+### Cold first output on the same workstation
 
-The native cold-prefill rows above were measured on the previous coding profile. Cold time to first output (TTFT) ends at the first reasoning or visible text. The GPU power limit for the published cold-prefill runs was unrecorded. Each native row used one fresh prompt and restored zero prefix tokens. The six-client ~404k run was stopped during cold prefill. Its completion time and retrieval result are unmeasured, and the cache repeat was skipped. [Methodology and raw results](benchmarks/reports/headline-reference.md)
+Both servers used identical rendered prompt tokens, the released DSpark drafter with five proposals, and 375 W per GPU. Each row is one single-client request with zero cached tokens after a separate process warm-up. The native run used deferred decoder work and 64-token physical prefill chunks.
 
-An opt-in cold-prefill change reduced native time to first output at 60k to **43.61 s**, versus 60.83 s and 63.99 s with the change disabled in the same image. [Cold-prefill controls and local vLLM configuration](benchmarks/reports/cold-prefill-optimization.md)
+| Input tokens | Installed vLLM TP2 | Native Rust/CUDA | Native / vLLM time |
+|---:|---:|---:|---:|
+| 15,864 | 2.91 s | 11.78 s | 4.05× |
+| 60,013 | 8.07 s | 38.91 s | 4.82× |
+| 195,803 | 20.62 s | 159.69 s | 7.74× |
+| 505,000 | 52.92 s | 438.09 s | 8.28× |
+
+The installed vLLM profile uses an 8,192-token scheduling budget and TP2 within each layer. The measured native release still puts 20 backbone layers on each GPU. Matching the local vLLM settings and performance is the [native TP2 target](docs/engine.md#native-tp2-target). [Same-host measurements and model-kernel experiment](benchmarks/reports/local-vllm-prefill.md) · [Original published cold-prefill comparison](benchmarks/reports/headline-reference.md#single-client-cold-prefill)
 
 ## Build and serve from a fresh clone
 

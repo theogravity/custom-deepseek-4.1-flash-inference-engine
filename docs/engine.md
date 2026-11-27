@@ -2,6 +2,20 @@
 
 The 40-layer target runs in two consecutive stages. Attention, hidden states, shared projections and the vocabulary head stay on the owning GPU. Target expert batches run across both cards. Decode and prompt batches of up to 128 rows use staged peer transfers. Wider prompt batches use direct peer access. Six routed experts are selected per layer. The CUDA kernels multiply the checkpoint's 3-bit EXL3 trellises and packed MXFP8 dense weights in place. The int4 Engram tables are memory-mapped on the host. Expert slots grow on demand and give back VRAM for temporary buffers and attention state.
 
+## Native TP2 target
+
+The target architecture shards work within each transformer layer across both RTX PRO 6000 cards. For example, each rank owns 32 of 64 attention heads and 1,152 of the 2,304 routed-expert intermediate channels. The two ranks compute the gate/up projections on their output shards and the down projection on their input shards, then reduce the partial outputs. The current release above uses two successive backbone stages. Its optional output-row split for selected dense matrices covers only part of this design.
+
+| Serving property | Minimum or reference setting |
+|---|---|
+| Prefill scheduling | 8,192 input tokens per iteration across ready requests, including a single long prompt. Internal kernel tiles can be smaller. |
+| Context and concurrency | 524,288 tokens per request, six concurrent sessions. The installed vLLM engine reported 2,769,546 GPU KV tokens, enough for six 404k sessions. The native workload target also includes six full resident windows (3,145,728 logical tokens) before live rotation. The vLLM pool alone covers 5.28 full windows. |
+| KV and offload | FP8 KV reference, 64-token vLLM blocks, 11 GiB per rank. Compare usable token capacity and latency. Preserve live request rotation and RAM/disk prefix tiers when GPU residency is exhausted. Reference prefix budgets are 48 GiB RAM and 128 GiB disk. |
+| Drafter and inputs | Released DSpark with five proposals for comparisons. Match the pack, rendered token IDs, sampling and hardware settings. Report coding-specific draft policies separately. |
+| Performance | Meet or improve single-client cold first output at 16k, 60k, 196k and 505k on the same machine, and aggregate 1/4/6-client agentic coding decode. Preserve verified model output and the six-session long-context capability. |
+
+The two-rank layout and 8,192-token scheduler are development targets. The installed vLLM image supplies the baseline. [Measured settings and cold first-output times](../benchmarks/reports/local-vllm-prefill.md)
+
 The deployed profile uses the code-tuned DSpark drafter with up to seven proposals. It reads the three MTP shards from the pack's `drafter-code-k7` overlay and checks their tensor names, shapes and types. The released DSpark weights in the main checkpoint are also supported. A learned confidence head can shorten a draft when later positions are unlikely to match. When an edit copies text from the input, prompt lookup can propose up to 128 source tokens. The target scores the proposals, commits the matching prefix and supplies the next token. Speculative output is streamed to the client as it is verified.
 
 | Setting | Deployed value | Purpose |
@@ -22,6 +36,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_C1_OUTPUT_CONSENSUS` | 1 in the selected overlay | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. The concurrent mode is selected independently by `DS4_OUTPUT_LOOKUP=repeated`. |
 | `DS4_EXTEND_REPETITION` | 1 in the selected overlay | Extend strongly supported repetition proposals to two periods and up to 96 tokens for a single client and for concurrent clients using `repeated`. |
 | `DS4_HEAD_ROW_TILES` | 1 in the selected overlay | Reuse vocabulary-head weights across multiple eight-row tiles during target verification. |
+| `DS4_RECIPE_PREFILL` | 0 | Use the model pack’s S8B expert kernel for target prefill batches of at least 128 tokens. Requires the `recipe-prefill` Cargo feature. [Build and comparison](../benchmarks/reports/local-vllm-prefill.md) |
 | `DS4_PREFILL_DECODER_PRUNE` | 0 | Set to 1 to defer the 19 local decoder layers on prompt chunks whose state will expire before the next reusable prefix or output. [Cold-prefill measurements](../benchmarks/reports/cold-prefill-optimization.md) |
 | `DS4_PREFILL_MX_TILES`, `DS4_VERIFY_MX_TILES` | 4, 4 | Number of packed projection tiles per block during prompt ingestion and multi-token target verification |
 | `DS4_PARALLEL_PREFILL_ROUTER` | 1 | Select routed experts across prompt rows using the CPU worker pool |

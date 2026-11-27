@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[features]
+recipe-prefill = []
+
 [dependencies]
 anyhow = "1"
 bytes = "1"
