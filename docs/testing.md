@@ -77,3 +77,15 @@ for enabled in 0 1; do
   DS4_PREFILL_SAMPLED_TOPK="$enabled" cargo test --release --locked cuda_index -- --ignored --test-threads=1 --nocapture
 done
 ```
+
+### Two-GPU prompt index search
+
+`DS4_TP2_INDEX=1` alternates whole query tiles between both GPUs for contiguous target-prefill searches before layer 20. A search needs at least 128 query rows, 16,384 source positions and two tiles. Each rank runs the original tile geometry and returns chronological top-512 IDs to the layer owner. Each GPU can retain up to three peer index mirrors and a transfer workspace, capped at 256 MiB total and shared across sessions. VRAM pressure can reclaim these allocations. Restoring or truncating a session invalidates its key identity. Limited peer access or an optional allocation failure uses the owner path.
+
+The GPU test compares both rank directions, append-only mirror copies, truncation, eviction and the memory-cap fallback.
+
+```bash
+export CUDA_VISIBLE_DEVICES="$(nvidia-smi -i 1,2 --query-gpu=uuid --format=csv,noheader | paste -sd,)"
+DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 DS4_TP2_INDEX=1 DS4_PREFILL_INDEX_FP8=1 DS4_PREFILL_SAMPLED_TOPK=1 \
+  cargo test --release --locked cuda_peer_index -- --ignored --nocapture --test-threads=1
+```

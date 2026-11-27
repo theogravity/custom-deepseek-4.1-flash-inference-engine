@@ -1,5 +1,7 @@
 //! DeepSeek V4.1 Flash latent attention. The checkpoint shares compressed KV and
 //! index keys at layers 2/8/14/20, while every backbone layer owns its window.
+#[path = "attention_peer_index.rs"]
+pub(crate) mod peer_index;
 #[path = "attention_snapshot.rs"]
 mod snapshot;
 
@@ -355,6 +357,7 @@ impl PackedRows {
 
 #[derive(Default)]
 struct Rows {
+    peer_epoch: u64,
     restored: Option<RestoredPart>,
     initial_bytes: usize,
     max_bytes: usize,
@@ -363,6 +366,14 @@ struct Rows {
     devices: HashMap<i32, (GpuBuffer, usize)>,
 }
 impl Rows {
+    fn peer_identity(&mut self) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        if self.peer_epoch == 0 {
+            self.peer_epoch = NEXT.fetch_add(1, Ordering::Relaxed);
+        }
+        self.peer_epoch
+    }
     // Reserve the known prefill once, including at most one verification block
     // beyond it. Long generation still grows on demand up to the request limit.
     fn plan(&mut self, prompt: usize, limit: usize, ratio: usize, stride: usize) {
@@ -419,6 +430,9 @@ impl Rows {
         self.packed = PackedRows::default();
     }
     fn truncate(&mut self, bytes: usize) {
+        if bytes < self.len() {
+            self.peer_epoch = 0;
+        }
         self.packed.truncate(bytes);
         for (_, uploaded) in self.devices.values_mut() {
             *uploaded = (*uploaded).min(bytes);
@@ -1390,12 +1404,23 @@ fn select(
         },
         "rotating and quantizing index queries",
     )?;
-    let keys = state
+    let keys = &mut state
         .sources
         .get_mut(&owner)
         .ok_or_else(|| state_error("missing index key source"))?
-        .keys
-        .on(rt.device, Some(&mut rt.moe_cache))?;
+        .keys;
+    let peer_id = if gpu
+        && rt.tp_index
+        && rt.target_prefill
+        && layer < CANDIDATE_LAYER
+        && n >= 128
+        && max_len >= 16384
+    {
+        keys.peer_identity()
+    } else {
+        0
+    };
+    let keys = keys.on(rt.device, Some(&mut rt.moe_cache))?;
     if gpu {
         let picks = state
             .picks
@@ -1406,7 +1431,7 @@ fn select(
             .as_mut()
             .map_or(ptr::null_mut(), |v| v.data::<i32>());
         return device_select(
-            rt, layer, pos, n, ratio, max_len, keys, &q, &w, blocks, picks,
+            rt, layer, pos, n, ratio, max_len, keys, &q, &w, blocks, picks, peer_id,
         );
     }
     // Tile host scores to keep long-context prefill scratch bounded. After layer
@@ -1549,6 +1574,7 @@ fn device_select(
     w: &Dev,
     blocks: *mut i32,
     picks: &GpuBuffer,
+    peer_id: u64,
 ) -> Result<()> {
     let block_span = TOP_BLOCKS * BLOCK;
     // Layers after 20 use its candidate blocks only when the individual row
@@ -1600,7 +1626,34 @@ fn device_select(
     // belongs to this call until the last launch and is then recyclable by
     // the next operation on that stream.
     let mut work = rt.buffer(workspace_bytes.div_ceil(4))?;
-    for (t, rows, width, filtered, score_mode) in tiles {
+    let remote = if peer_id != 0 && tiles.len() >= 2 {
+        peer_index::Scan::begin(
+            rt,
+            peer_id,
+            keys,
+            max_len,
+            workspace_bytes,
+            tiles.iter().map(|v| v.1).max().unwrap(),
+        )?
+    } else {
+        None
+    };
+    for (i, (t, rows, width, filtered, score_mode)) in tiles.into_iter().enumerate() {
+        if let Some(peer) = remote.as_ref().filter(|_| i % 2 == 1) {
+            unsafe {
+                peer.tile(
+                    q.as_ptr().add(t * INDEX_HEADS * INDEX_DIM),
+                    w.as_ptr().add(t * INDEX_HEADS),
+                    width,
+                    pos + t,
+                    ratio,
+                    rows,
+                    picks.data::<i32>().add(t * TOP),
+                    score_mode,
+                )?;
+            }
+            continue;
+        }
         cuda_ok(
             unsafe {
                 let b = if blocks.is_null() || !(filtered || layer == CANDIDATE_LAYER) {
@@ -1630,6 +1683,9 @@ fn device_select(
             },
             "ranking index keys on GPU",
         )?;
+    }
+    if let Some(peer) = remote {
+        peer.finish()?;
     }
     Ok(())
 }
@@ -3519,6 +3575,108 @@ mod tests {
             assert_eq!(gpu.pending_kv, cpu.pending_kv);
             assert_eq!(gpu.pending_gate, cpu.pending_gate);
             pos += n;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn changed_key_history_receives_a_new_peer_identity() {
+        let mut rows = Rows::default();
+        rows.packed.for_append().resize(4 * INDEX_BYTES, 0);
+        let id = rows.peer_identity();
+        rows.truncate(4 * INDEX_BYTES);
+        assert_eq!(id, rows.peer_identity());
+        rows.truncate(INDEX_BYTES);
+        assert_ne!(id, rows.peer_identity());
+        assert_ne!(rows.peer_identity(), Rows::default().peer_identity());
+    }
+
+    #[test]
+    #[ignore = "needs DS4_TEST_PACK and two peer-accessible inference GPUs"]
+    fn cuda_peer_index_matches_local_tiles_and_handles_changed_history() -> Result<()> {
+        let path = std::env::var("DS4_TEST_PACK")?;
+        let mut rt = Runtime::open(std::path::Path::new(&path), [0, 1])?;
+        rt.target_prefill = true;
+        const N: usize = 192;
+        for owner in [0, 1] {
+            rt.layer(if owner == 0 { 0 } else { 20 })?;
+            let q = rt.to_device(&vec![1.; N * INDEX_HEADS * INDEX_DIM])?;
+            let w = rt.to_device(&vec![1.; N * INDEX_HEADS])?;
+            let picks = upload(owner, &vec![-9i32; N * TOP])?;
+            let keys = GpuBuffer::new(owner)?;
+            let pool = rt.index_pool(1 - owner);
+            let mut identity = Rows::default();
+            let mut previous = Vec::new();
+            for (pass, width) in [32768, 32896, 32896, 32896].into_iter().enumerate() {
+                if pass == 2 {
+                    identity.truncate(INDEX_BYTES);
+                }
+                if pass == 3 {
+                    pool.lock().unwrap().reclaim(usize::MAX);
+                }
+                identity.packed.for_append().resize(width * INDEX_BYTES, 0);
+                let mut data = vec![0u8; width * INDEX_BYTES];
+                for (id, row) in data.chunks_exact_mut(INDEX_BYTES).enumerate() {
+                    row[0] = 0x38;
+                    let weight = if pass < 2 {
+                        id % 8191
+                    } else {
+                        (width - id) % 8191
+                    } as f32;
+                    row[INDEX_DIM..].copy_from_slice(&weight.to_le_bytes());
+                }
+                keys.write(&data)?;
+                let pos = width - N;
+                let mut both = Vec::new();
+                for epoch in [0, identity.peer_identity()] {
+                    picks.write(&vec![-9i32; N * TOP])?;
+                    device_select(
+                        &mut rt,
+                        2,
+                        pos,
+                        N,
+                        1,
+                        width,
+                        keys.ptr.as_ptr(),
+                        &q,
+                        &w,
+                        ptr::null_mut(),
+                        &picks,
+                        epoch,
+                    )?;
+                    let mut ids = vec![0; N * TOP];
+                    read(&picks, &mut ids)?;
+                    both.push(ids);
+                }
+                assert_eq!(both[0], both[1], "owner={owner} pass={pass}");
+                assert!(both[0].iter().all(|&id| id >= 0));
+                if pass == 2 {
+                    assert_ne!(both[0], previous);
+                }
+                previous = both.remove(0);
+                let pool = pool.lock().unwrap();
+                let cache = pool.peer_index.as_ref().expect("TP2 scan did not run");
+                let (uploads, tiles) = cache.stats();
+                let expected = if pass == 2 {
+                    2 * width * INDEX_BYTES
+                } else {
+                    width * INDEX_BYTES
+                };
+                assert_eq!(
+                    uploads, expected as u64,
+                    "mirror transfer owner={owner} pass={pass}"
+                );
+                assert!(tiles > 0 && cache.bytes() <= 256 << 20);
+            }
+            assert!(peer_index::Scan::begin(
+                &mut rt,
+                identity.peer_identity(),
+                keys.ptr.as_ptr(),
+                4 << 20,
+                48 << 20,
+                N
+            )?
+            .is_none());
         }
         Ok(())
     }

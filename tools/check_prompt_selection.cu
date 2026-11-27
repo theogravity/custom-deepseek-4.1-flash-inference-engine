@@ -1,6 +1,7 @@
 // Compile this fixture with nvcc on the model workstation. It measures only
 // rank selection and chronological ordering. The Rust index fixture also times
 // key scoring, causal filtering and the candidate-block selection.
+#define DS4_SELECTION_FIXTURE
 #include "../native/attention.cu"
 #include <chrono>
 #include <cstdio>

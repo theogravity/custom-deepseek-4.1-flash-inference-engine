@@ -129,6 +129,7 @@ impl Drop for Allocation {
 }
 #[derive(Default)]
 pub(crate) struct Pool {
+    pub(crate) peer_index: Option<crate::attention::peer_index::Cache>,
     limit: usize,
     idle: Vec<Allocation>,
     elements: usize,
@@ -153,6 +154,12 @@ impl Pool {
             let Some(a) = self.idle.pop() else { break };
             self.elements -= a.capacity;
             reclaimed += a.capacity * 4;
+        }
+        if reclaimed < bytes {
+            if let Some(cache) = self.peer_index.take() {
+                reclaimed += cache.bytes();
+                drop(cache);
+            }
         }
         reclaimed
     }
@@ -218,6 +225,7 @@ pub struct Runtime {
     pub(crate) attention_scratch: crate::attention::Workspace,
     pub verification: bool,
     pub(crate) target_prefill: bool,
+    pub(crate) tp_index: bool,
     peer_prefill_boundary: bool,
     pub(crate) gpu_pair_pool: bool,
     prefill_tiles: i32,
@@ -260,6 +268,11 @@ impl Runtime {
                 _ => anyhow::bail!("{name} must be 1, 2 or 4"),
             }
         };
+        let tp_index = match std::env::var("DS4_TP2_INDEX").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            _ => anyhow::bail!("DS4_TP2_INDEX must be 0 or 1"),
+        };
         let limit = transient_pool_limit(std::env::var("DS4_TRANSIENT_POOL_MIB"))?;
         let pools: HashMap<_, _> = devices
             .into_iter()
@@ -274,12 +287,13 @@ impl Runtime {
             })
             .collect();
         let mut moe_cache = MoeCache::default();
-        if limit > (64 << 20) {
+        if limit > (64 << 20) || tp_index {
             for (&dev, pool) in &pools {
                 moe_cache.reclaimable.insert(dev, Arc::downgrade(pool));
             }
         }
         let mut rt = Self {
+            tp_index,
             weights: Arc::new(weights),
             device: devices[0],
             devices,
@@ -316,6 +330,9 @@ impl Runtime {
             rt.parallel = Some(parallel_dense::ParallelDense::new(devices)?);
         }
         Ok(rt)
+    }
+    pub(crate) fn index_pool(&self, device: i32) -> Arc<Mutex<Pool>> {
+        self.pools[&device].clone()
     }
     pub fn peer_device(&self) -> i32 {
         self.devices[usize::from(self.device == self.devices[0])]
