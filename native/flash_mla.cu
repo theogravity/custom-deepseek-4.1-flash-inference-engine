@@ -1,7 +1,10 @@
 // Framework-independent adapter for FlashInfer's two DSV4 BF16 launchers.
 #include <cuda_runtime.h>
 #include <mutex>
-#define CUDA_CHECK(call) do { cudaError_t rc = (call); if (rc != cudaSuccess) throw rc; } while (0)
+static void check_cuda(cudaError_t status) {
+    if (status != cudaSuccess) throw status;
+}
+#define CUDA_CHECK(call) check_cuda(call)
 #include "flashinfer_launchers.cuh"
 
 extern "C" cudaError_t ds4_flash_launch(const __nv_bfloat16 *q,
