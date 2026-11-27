@@ -222,16 +222,62 @@ extern "C" int ds_recipe_upload_rank(void *storage, size_t capacity, const void 
 // Ordered, bounded bridge between two local device buffers. Host synchronization
 // completes each DMA before the single pinned tile can be reused on either GPU.
 // The final H2D leaves the destination's context current for its consumer.
-extern "C" int ds_recipe_transfer(float *dst, int dst_device, const float *src, int src_device,
-                                  float *host, size_t count) {
-    if (!dst || !src || !host || !count || count > (2u << 20) / sizeof(float))
+namespace {
+constexpr size_t bridge_bytes = 2u << 20;
+
+int transfer_tile(void *dst, int dst_device, const void *src, int src_device, void *host, size_t bytes) {
+    if (!dst || !src || !host || !bytes || bytes > bridge_bytes)
         return int(cudaErrorInvalidValue);
     CHECK(cudaSetDevice(src_device));
-    CHECK(cudaMemcpyAsync(host, src, count * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpyAsync(host, src, bytes, cudaMemcpyDeviceToHost));
     CHECK(cudaStreamSynchronize(nullptr));
     CHECK(cudaSetDevice(dst_device));
-    CHECK(cudaMemcpyAsync(dst, host, count * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyAsync(dst, host, bytes, cudaMemcpyHostToDevice));
     CHECK(cudaStreamSynchronize(nullptr));
+    return 0;
+}
+
+__global__ void pack_input(const float *src, half *dst, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) dst[i] = __float2half_rn(src[i]);
+}
+
+__global__ void expand_input(const half *src, float *dst, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) dst[i] = __half2float(src[i]);
+}
+} // namespace
+
+extern "C" int ds_recipe_transfer(float *dst, int dst_device, const float *src, int src_device,
+                                  float *host, size_t count) {
+    if (count > bridge_bytes / sizeof(float)) return int(cudaErrorInvalidValue);
+    return transfer_tile(dst, dst_device, src, src_device, host, count * sizeof(float));
+}
+
+// The S8B gather casts each selected input to FP16. Moving that cast to the
+// sender cuts the outbound bytes in half; widening on the peer is exact.
+// The two tiles borrow the owner's receive buffer and the peer's still-empty
+// routed-output buffer. Each new H2D follows the previous expand on stream 0.
+extern "C" int ds_recipe_broadcast(const float *src, int owner, float *dst, int peer,
+                                   float *host, half *send, half *receive, size_t count, int packed) {
+    if (!count || !src || !dst || !host || (packed && (!send || !receive)))
+        return int(cudaErrorInvalidValue);
+    const size_t tile = bridge_bytes / (packed ? sizeof(half) : sizeof(float));
+    for (size_t start = 0; start < count; start += tile) {
+        size_t n = std::min(count - start, tile);
+        if (packed) {
+            CHECK(cudaSetDevice(owner));
+            pack_input<<<(n+255)/256,256>>>(src + start, send, n);
+            CHECK(cudaGetLastError());
+            int status = transfer_tile(receive, peer, send, owner, host, n * sizeof(half));
+            if (status) return status;
+            expand_input<<<(n+255)/256,256>>>(receive, dst + start, n);
+            CHECK(cudaGetLastError());
+        } else {
+            int status = transfer_tile(dst + start, peer, src + start, owner, host, n * sizeof(float));
+            if (status) return status;
+        }
+    }
     return 0;
 }
 

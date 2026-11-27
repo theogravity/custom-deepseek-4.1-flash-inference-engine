@@ -31,6 +31,17 @@ unsafe extern "C" {
         start: usize,
         count: usize,
     ) -> i32;
+    fn ds_recipe_broadcast(
+        src: *const f32,
+        owner: i32,
+        dst: *mut f32,
+        peer: i32,
+        bounce: *mut f32,
+        send: *mut c_void,
+        receive: *mut c_void,
+        count: usize,
+        packed: i32,
+    ) -> i32;
     fn ds_recipe_transfer(
         dst: *mut f32,
         dst_device: i32,
@@ -244,18 +255,19 @@ pub(super) fn dispatch(
         };
         let replica = peer_cache.rank_workspace.io as *mut f32;
         let partials = unsafe { replica.add(len) };
-        for start in (0..len).step_by(COPY_FLOATS) {
-            cuda(unsafe {
-                ds_recipe_transfer(
-                    replica.add(start),
-                    peer,
-                    x.as_ptr().add(start),
-                    owner,
-                    bounce,
-                    COPY_FLOATS.min(len - start),
-                )
-            })?;
-        }
+        cuda(unsafe {
+            ds_recipe_broadcast(
+                x.as_ptr(),
+                owner,
+                replica,
+                peer,
+                bounce,
+                receive.cast(),
+                partials.cast(),
+                len,
+                local_cache.tp2_packed_input.into(),
+            )
+        })?;
 
         let weights = &*rt.weights;
         let peer_input = replica as usize;
@@ -514,9 +526,9 @@ mod tests {
             std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
             [0, 1],
         )?;
-        // Two batches cross the launch threshold and the 2 MiB bounce boundary.
+        // The second batch needs multiple 2 MiB tiles even for FP16 input.
         // Repeated directions share the same ordinary cache with full decode slots.
-        for (layer, batch) in [(0, 128), (20, 129)] {
+        for (layer, batch) in [(0, 128), (20, 257)] {
             rt.layer(layer)?;
             rt.target_prefill = true;
             let input: Vec<_> = (0..batch * HIDDEN)
@@ -529,16 +541,20 @@ mod tests {
                 c.tp2_prefill = true;
                 c.limit = 2; // three rank slots; more than six selected experts.
             }
-            let out = forward_dev(&mut rt, layer, &x, batch)?;
-            let actual = rt.to_host(&out)?;
-            let mismatch = actual
-                .iter()
-                .zip(&expected)
-                .position(|(a, b)| a.to_bits() != b.to_bits());
-            ensure!(
-                mismatch.is_none(),
-                "TP2 layer {layer} first unequal result at {mismatch:?}"
-            );
+            assert!(input.iter().any(|&v| half::f16::from_f32(v).to_f32() != v));
+            for packed in [false, true] {
+                rt.moe_cache.device(rt.device)?.tp2_packed_input = packed;
+                let out = forward_dev(&mut rt, layer, &x, batch)?;
+                let actual = rt.to_host(&out)?;
+                let mismatch = actual
+                    .iter()
+                    .zip(&expected)
+                    .position(|(a, b)| a.to_bits() != b.to_bits());
+                ensure!(
+                    mismatch.is_none(),
+                    "TP2 layer {layer} packed={packed} first unequal result at {mismatch:?}"
+                );
+            }
             for (d, rank) in [(rt.device, 0), (rt.peer_device(), 1)] {
                 let c = rt.moe_cache.device(d)?;
                 ensure!(

@@ -312,6 +312,8 @@ struct DeviceCache {
     #[cfg(feature = "recipe-prefill")]
     tp2_prefill: bool,
     #[cfg(feature = "recipe-prefill")]
+    tp2_packed_input: bool,
+    #[cfg(feature = "recipe-prefill")]
     rank_workspace: tp2::Workspace,
     fused: bool,
     packed_decode: bool,
@@ -335,6 +337,8 @@ impl DeviceCache {
             recipe_prefill,
             #[cfg(feature = "recipe-prefill")]
             tp2_prefill: tp2_prefill_enabled()?,
+            #[cfg(feature = "recipe-prefill")]
+            tp2_packed_input: switch("DS4_TP2_PACKED_INPUT", false)?,
             #[cfg(feature = "recipe-prefill")]
             rank_workspace: tp2::Workspace::default(),
             device,
