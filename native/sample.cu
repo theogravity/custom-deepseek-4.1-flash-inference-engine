@@ -71,6 +71,7 @@ extern "C" int ds4_sample(int device,const float *logits,float *scratch,float *i
 }
 // Each warp computes a rank-256 Markov bias for eight vocabulary entries.
 // Previous predictions and both BF16 Markov tables stay on the device across K.
+template<int Tracks>
 __global__ void markov_parts(const __nv_bfloat16 *emb,const __nv_bfloat16 *head,
         const float *base,int vocab,int seed,const float *prior,Winner *out) {
     int source=prior ? int(*prior) : seed;
@@ -83,27 +84,45 @@ __global__ void markov_parts(const __nv_bfloat16 *emb,const __nv_bfloat16 *head,
     #pragma unroll
     for(int j=0;j<8;++j) x[j]=__bfloat162float(emb[size_t(source)*256+lane+j*32]);
     Winner w{-INFINITY,INT_MAX};
-    for(int t=0;t<8;++t) {
-        int id=blockIdx.x*64+t*8+warp;
-        if (id>=vocab) continue;
-        float sum=0;
+    // Keep independent vocabulary dot products in flight. Every id retains
+    // its original eight FMAs and lane reduction; a partial final tile is legal.
+    for (int t = 0; t < 8; t += Tracks) {
+        float sum[Tracks] = {};
+        const int first = blockIdx.x * 64 + t * 8 + warp;
         #pragma unroll
-        for(int j=0;j<8;++j)
-            sum=fmaf(x[j],__bfloat162float(head[size_t(id)*256+lane+j*32]),sum);
-        for(int d=16;d;d/=2) sum+=__shfl_down_sync(0xffffffff,sum,d);
-        if (!lane) {
-            float v=sum+base[id];
-            w=best(w,{v,isfinite(v)?id:-1});
+        for (int j = 0; j < 8; ++j) {
+            #pragma unroll
+            for (int k = 0; k < Tracks; ++k) {
+                int id = first + 8 * k;
+                if (id < vocab)
+                    sum[k] = fmaf(x[j], __bfloat162float(head[size_t(id)*256 + lane + j*32]), sum[k]);
+            }
+        }
+        #pragma unroll
+        for (int k = 0; k < Tracks; ++k) {
+            int id = first + 8 * k;
+            if (id < vocab) {
+                for (int d = 16; d; d /= 2)
+                    sum[k] += __shfl_down_sync(0xffffffff, sum[k], d);
+                if (!lane) {
+                    float value = sum[k] + base[id];
+                    w = best(w, {value, isfinite(value) ? id : -1});
+                }
+            }
         }
     }
     block_best(w,out+blockIdx.x,nullptr);
 }
 extern "C" int ds4_markov(int device,const void *emb,const void *head,const float *base,
-        float *scratch,float *ids,int seed,int rows,int vocab) {
+        float *scratch,float *ids,int seed,int rows,int vocab,int paired) {
     auto e=cudaSetDevice(device); if (e!=cudaSuccess) return e;
     int parts=(vocab+63)/64;
     for(int i=0;i<rows;++i) {
-        markov_parts<<<parts,256>>>((const __nv_bfloat16*)emb,(const __nv_bfloat16*)head,
+        if (paired)
+            markov_parts<2><<<parts,256>>>((const __nv_bfloat16*)emb,(const __nv_bfloat16*)head,
+                base+size_t(i)*vocab,vocab,seed,i ? ids+i-1 : nullptr,(Winner*)scratch);
+        else
+            markov_parts<1><<<parts,256>>>((const __nv_bfloat16*)emb,(const __nv_bfloat16*)head,
             base+size_t(i)*vocab,vocab,seed,i ? ids+i-1 : nullptr,(Winner*)scratch);
         e=cudaGetLastError(); if (e!=cudaSuccess) return e;
         finish_parts<<<1,256>>>((Winner*)scratch,parts,ids+i);

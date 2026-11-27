@@ -38,6 +38,7 @@ extern "C" {
         seed: i32,
         rows: i32,
         vocab: i32,
+        paired: i32,
     ) -> i32;
     fn ds_upload(
         dev: c_int,
@@ -184,6 +185,7 @@ pub struct Runtime {
     prefill_tiles: i32,
     verification_tiles: i32,
     head_row_tiles: bool,
+    markov_pairs: bool,
     packed: bool,
     parallel: Option<parallel_dense::ParallelDense>,
     devices: [i32; 2],
@@ -225,6 +227,11 @@ impl Runtime {
             target_prefill: false,
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
+            markov_pairs: match std::env::var("DS4_MARKOV_PAIRS").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => anyhow::bail!("DS4_MARKOV_PAIRS must be 0 or 1"),
+            },
             head_row_tiles: match std::env::var("DS4_HEAD_ROW_TILES").as_deref() {
                 Ok("1") => true,
                 Ok("0") | Err(std::env::VarError::NotPresent) => false,
@@ -489,6 +496,7 @@ impl Runtime {
                 seed as i32,
                 rows as i32,
                 VOCAB as i32,
+                self.markov_pairs.into(),
             )
         };
         ensure!(e == 0, "CUDA Markov selection failed ({e})");
@@ -891,7 +899,7 @@ mod tests {
         x[512] = 1.;
         x[cols + 300] = 2.;
         x[cols * 2 + 2] = f32::NAN;
-        let mut scores = as_f32(&x)?;
+        let scores = as_f32(&x)?;
         let tmp = as_f32(&vec![0.; 3 * 32])?;
         let ids = as_f32(&[0.; 3])?;
         let mut host = [0.; 3];
@@ -914,7 +922,6 @@ mod tests {
         read(&mut host)?;
         assert_eq!(host, [15., 300., -1.]);
         x.fill(0.);
-        scores = as_f32(&x)?;
         let mut emb = vec![half::bf16::ZERO; cols * 256];
         let mut head = emb.clone();
         for (i, (from, to)) in [(4, 33), (33, 512), (512, 9)].into_iter().enumerate() {
@@ -923,44 +930,44 @@ mod tests {
         }
         let e = upload(emb.as_ptr().cast(), cols, 256, 1)?;
         let h = upload(head.as_ptr().cast(), cols, 256, 1)?;
-        assert_eq!(
-            unsafe {
-                ds4_markov(
-                    dev,
-                    e.ptr,
-                    h.ptr,
-                    scores.ptr.cast(),
-                    tmp.ptr.cast(),
-                    ids.ptr.cast(),
-                    4,
-                    3,
-                    cols as i32,
-                )
-            },
-            0
-        );
-        read(&mut host)?;
-        assert_eq!(host, [33., 512., 9.]);
-        x[1] = f32::INFINITY;
-        scores = as_f32(&x)?;
-        assert_eq!(
-            unsafe {
-                ds4_markov(
-                    dev,
-                    e.ptr,
-                    h.ptr,
-                    scores.ptr.cast(),
-                    tmp.ptr.cast(),
-                    ids.ptr.cast(),
-                    4,
-                    3,
-                    cols as i32,
-                )
-            },
-            0
-        );
-        read(&mut host)?;
-        assert_eq!(host, [-1.; 3]);
+        let mut verify = |logits: &[f32], expected: [f32; 3]| -> Result<()> {
+            let scores = as_f32(logits)?;
+            for paired in [0, 1] {
+                let fresh = as_f32(&[-7.; 3])?;
+                assert_eq!(
+                    unsafe {
+                        ds4_markov(
+                            dev,
+                            e.ptr,
+                            h.ptr,
+                            scores.ptr.cast(),
+                            tmp.ptr.cast(),
+                            fresh.ptr.cast(),
+                            4,
+                            3,
+                            cols as i32,
+                            paired,
+                        )
+                    },
+                    0
+                );
+                checked(unsafe {
+                    ds_copy_f32(dev, host.as_mut_ptr(), fresh.ptr.cast(), host.len(), 1)
+                })?;
+                assert_eq!(host, expected);
+            }
+            Ok(())
+        };
+        verify(&x, [33., 512., 9.])?;
+        // Equal winners in distinct blocks, including the partial final tile.
+        x[17] = 10.;
+        x[514] = 10.;
+        verify(&x, [17., 0., 0.])?;
+        // The second interleaved track must propagate nonfinite values.
+        for invalid in [f32::INFINITY, f32::NAN] {
+            x[9] = invalid;
+            verify(&x, [-1.; 3])?;
+        }
         let n = 4096;
         let mut logits = [0., 3f32.ln()].repeat(n);
         logits[0] = f32::NAN;
