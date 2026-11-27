@@ -40,6 +40,18 @@ Single-client time to first streamed reasoning or visible output with the releas
 
 The two wide-step columns use the same build through 195,803 tokens. ¹The 505k result is from the preceding 16k build, with BF16 index scoring. Free VRAM on that run fell to 66 MiB per GPU. All four input lengths fit the 524,288-token serving limit. Six simultaneous 404k requests have yet to be qualified on this wide-step profile. [Protocol, builds and agent overlap](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint) · [Raw native results](benchmarks/results/upstream/tp2-wide-prefill.json)
 
+### TP2 prompt-index split stage microbenchmark
+
+The experimental peer-index path was tested with 512 prompt queries and resident key mirrors on the two RTX PRO 6000 GPUs. These are **index-stage** times, not request-level TTFT; the feature remains off by default (`DS4_TP2_INDEX=0`).
+
+| Indexed positions | Owner, index MMA | TP2 index MMA | Speedup | Owner, batched MQA | TP2 batched MQA | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32,768 | 1.178 ms | 0.713 ms | 1.65× | 1.090 ms | 0.671 ms | 1.62× |
+| 131,072 | 4.298 ms | 2.295 ms | 1.87× | 3.923 ms | 2.106 ms | 1.86× |
+| 252,500 | 8.624 ms | 4.496 ms | 1.92× | 7.958 ms | 4.186 ms | 1.90× |
+
+Both scoring modes returned matching ordered IDs on both GPUs. The peer stream lifetime passed Compute Sanitizer with zero memory errors. The request-level gain has not been established, so the stable service profile does not enable this experiment. [Test procedure](docs/testing.md#two-gpu-prompt-index-search)
+
 In a separate mixed coding run, switching from 8k to 16k cut first output for an arriving 68k code review from 45.23 to 41.50 seconds. The existing Rust generation’s longest overlapping gap between stream events increased from 12.84 to 14.89 seconds. This tradeoff and the spread between cold runs are why the experimental profile defaults to 8k. [Agent timings and repeat measurements](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint)
 
 ## Build and serve from a fresh clone
