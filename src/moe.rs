@@ -127,6 +127,7 @@ fn cuda(code: i32) -> Result<()> {
 
 #[derive(Default)]
 pub struct MoeCache {
+    pub(crate) reclaimable: HashMap<i32, std::sync::Weak<std::sync::Mutex<crate::runtime::Pool>>>,
     devices: HashMap<i32, DeviceCache>,
     metrics: Metrics,
 }
@@ -149,16 +150,26 @@ impl MoeCache {
     /// Make room before an uncached dense projection uploads its resident
     /// weight and conversion buffers. Freeing a slot waits for pending uses.
     pub fn reserve(&mut self, device: i32, bytes: usize) -> Result<()> {
-        let Some(cache) = self.devices.get_mut(&device) else {
-            return Ok(());
-        };
-        if cache.slots.is_empty() {
+        let pool = self.reclaimable.get(&device).and_then(|p| p.upgrade());
+        let mut cache = self.devices.get_mut(&device);
+        if pool.is_none() && cache.as_ref().is_none_or(|c| c.slots.is_empty()) {
             return Ok(());
         }
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(device, &mut free) })?;
         let missing = bytes.saturating_add(64 << 20).saturating_sub(free);
         let mut released = 0;
+        if missing > 0 {
+            if let Some(pool) = pool {
+                released = pool
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .reclaim(missing);
+            }
+        }
+        let Some(cache) = cache.take() else {
+            return Ok(());
+        };
         while released < missing && !cache.slots.is_empty() {
             let (slot, size) = cache.evict_slot(u64::MAX)?;
             released += size;

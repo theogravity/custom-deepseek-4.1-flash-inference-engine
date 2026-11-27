@@ -121,9 +121,26 @@ impl Drop for Allocation {
     }
 }
 #[derive(Default)]
-struct Pool {
+pub(crate) struct Pool {
+    limit: usize,
     idle: Vec<Allocation>,
     elements: usize,
+}
+impl Pool {
+    pub(crate) fn reclaim(&mut self, bytes: usize) -> usize {
+        let mut reclaimed = 0;
+        while reclaimed < bytes {
+            let Some(a) = self.idle.pop() else { break };
+            self.elements -= a.capacity;
+            reclaimed += a.capacity * 4;
+        }
+        reclaimed
+    }
+    fn fits(&self, allocation: usize, requested: usize) -> bool {
+        allocation >= requested
+            && (self.limit <= (64 << 20)
+                || allocation <= requested.saturating_add((requested / 4).max(16384)))
+    }
 }
 pub struct Dev {
     allocation: Option<Allocation>,
@@ -154,8 +171,7 @@ impl Drop for Dev {
             return;
         };
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        // Limit idle workspace to 256 MiB per card even as prompt chunk sizes vary.
-        if a.capacity <= (64 << 20) - pool.elements {
+        if a.capacity <= pool.limit - pool.elements {
             pool.elements += a.capacity;
             pool.idle.push(a);
         }
@@ -218,11 +234,36 @@ impl Runtime {
                 _ => anyhow::bail!("{name} must be 1, 2 or 4"),
             }
         };
+        let pool_mib = std::env::var("DS4_TRANSIENT_POOL_MIB")
+            .unwrap_or_else(|_| "256".into())
+            .parse::<usize>()
+            .context("invalid DS4_TRANSIENT_POOL_MIB")?;
+        let limit = pool_mib
+            .checked_mul(1 << 18)
+            .context("transient pool limit overflow")?;
+        let pools: HashMap<_, _> = devices
+            .into_iter()
+            .map(|d| {
+                (
+                    d,
+                    Arc::new(Mutex::new(Pool {
+                        limit,
+                        ..Pool::default()
+                    })),
+                )
+            })
+            .collect();
+        let mut moe_cache = MoeCache::default();
+        if pool_mib > 256 {
+            for (&dev, pool) in &pools {
+                moe_cache.reclaimable.insert(dev, Arc::downgrade(pool));
+            }
+        }
         let mut rt = Self {
             weights: Arc::new(weights),
             device: devices[0],
             devices,
-            moe_cache: MoeCache::default(),
+            moe_cache,
             attention_scratch: Default::default(),
             verification: false,
             target_prefill: false,
@@ -235,7 +276,7 @@ impl Runtime {
             },
             packed: packed_dense(),
             parallel: None,
-            pools: devices.into_iter().map(|d| (d, Arc::default())).collect(),
+            pools,
             vectors: HashMap::new(),
             matrices: HashMap::new(),
             contexts: HashMap::new(),
@@ -269,7 +310,7 @@ impl Runtime {
                 .idle
                 .iter()
                 .enumerate()
-                .filter(|(_, a)| a.capacity >= len)
+                .filter(|(_, a)| p.fits(a.capacity, len))
                 .min_by_key(|(_, a)| a.capacity)
                 .map(|(i, _)| i);
             index.map(|i| {
