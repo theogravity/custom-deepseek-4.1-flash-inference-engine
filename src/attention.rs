@@ -1111,7 +1111,7 @@ fn append_source(
             && rt.target_prefill
             && !rt.verification
             && verify.is_none()
-            && prefill_gpu_pool_pairs()
+            && rt.gpu_pair_pool
         {
             let (pooled, pending) = device_pool_pairs(rt, src, &kv, &gates, pos, batch)?;
             drop((gates, kv));
@@ -3382,12 +3382,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires DS4_TEST_PACK, DS4_PREFILL_GPU_POOL_PAIRS=1 and both inference GPUs"]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs"]
     fn cuda_checkpoint_prefill_pool_pairs_preserves_cache_and_orphans() -> Result<()> {
-        ensure!(
-            prefill_gpu_pool_pairs(),
-            "enable DS4_PREFILL_GPU_POOL_PAIRS"
-        );
         ensure!(
             std::env::var("CUDA_VISIBLE_DEVICES")?.split(',').count() == 2,
             "mask the two inference GPUs"
@@ -3399,6 +3395,7 @@ mod tests {
         let owner = 2;
         rt.layer(owner)?;
         rt.target_prefill = true;
+        rt.gpu_pair_pool = true;
         let (mut cpu, mut gpu) = (Source::default(), Source::default());
         let mut pos = 0;
         for n in [4, 1, 3, 9, 2, 1] {

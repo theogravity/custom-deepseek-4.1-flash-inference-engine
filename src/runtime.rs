@@ -219,6 +219,7 @@ pub struct Runtime {
     pub verification: bool,
     pub(crate) target_prefill: bool,
     peer_prefill_boundary: bool,
+    pub(crate) gpu_pair_pool: bool,
     prefill_tiles: i32,
     verification_tiles: i32,
     head_row_tiles: bool,
@@ -291,6 +292,7 @@ impl Runtime {
                 Ok("0") | Err(std::env::VarError::NotPresent) => false,
                 _ => anyhow::bail!("DS4_TP2_PEER_BOUNDARY must be 0 or 1"),
             },
+            gpu_pair_pool: crate::attention::prefill_gpu_pool_pairs(),
             prefill_tiles: configured_tiles("DS4_PREFILL_MX_TILES")?,
             verification_tiles: configured_tiles("DS4_VERIFY_MX_TILES")?,
             head_row_tiles: match std::env::var("DS4_HEAD_ROW_TILES").as_deref() {
