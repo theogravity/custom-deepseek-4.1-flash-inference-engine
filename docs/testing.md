@@ -37,3 +37,12 @@ docker build -t ds4-flash-rs:tp2-prefill-20261127 .
 export DS4_FLASHINFER_PREFILL=1
 docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/tp2-prefill.yml up -d --force-recreate --no-build --wait
 ```
+
+### SM120 E4M3 prompt index scores
+
+`DS4_PREFILL_INDEX_FP8=1` selects the native FP8 MMA scorer for target prompt evaluation and gives those prefix snapshots their own namespace. The scorer prepares each query row once, checks that every component round-trips through E4M3 with a per-head scale, and uses BF16 MMA for incompatible rows. The GPU selection fixture checks signed near-cutoff scores, earliest tie winners, complete position and block selections, and full selection timing at up to 524,288 positions.
+
+```bash
+CUDA_VISIBLE_DEVICES=<inference-gpu-uuid> DS4_TEST_DEVICE=0 \
+  cargo test --release cuda_index -- --ignored --test-threads=1 --nocapture
+```

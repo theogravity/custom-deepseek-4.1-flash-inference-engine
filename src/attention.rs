@@ -160,6 +160,7 @@ unsafe extern "C" {
         batch: i32,
         out: *mut f32,
     ) -> i32;
+    fn ds4_attn_fp8_query_bytes(rows: i32) -> usize;
     fn ds4_attn_scores(
         device: i32,
         scratch: *mut c_void,
@@ -1347,8 +1348,12 @@ fn select(
                 }
             }
         }
-        let bytes =
+        let mode = index_score_mode(rt.target_prefill);
+        let mut bytes =
             (rows * width * size_of::<f32>()).next_multiple_of(256) * (1 + usize::from(filtering));
+        if mode == 3 {
+            bytes += unsafe { ds4_attn_fp8_query_bytes(rows as i32) };
+        }
         let work = scratch(rt, bytes)?;
         let mut scores = vec![0.; rows * width];
         cuda_ok(
@@ -1363,7 +1368,7 @@ fn select(
                     width as i32,
                     rows as i32,
                     scores.as_mut_ptr(),
-                    index_score_mode(rt.target_prefill),
+                    mode,
                 )
             },
             "scoring compressed index keys",
@@ -1396,9 +1401,16 @@ pub(crate) fn prefill_index_mma() -> bool {
     *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_INDEX_MMA").is_some_and(|v| v == "1"))
 }
 
+pub(crate) fn prefill_index_fp8() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_INDEX_FP8").is_some_and(|v| v == "1"))
+}
+
 fn index_score_mode(target_prefill: bool) -> i32 {
     static PACKED: OnceLock<bool> = OnceLock::new();
-    if target_prefill && prefill_index_mma() {
+    if target_prefill && prefill_index_fp8() {
+        3
+    } else if target_prefill && prefill_index_mma() {
         2
     } else {
         i32::from(
@@ -2566,6 +2578,9 @@ mod tests {
                     Ok(out.into_iter().map(f32::to_bits).collect())
                 };
                 assert_eq!(score(0)?, score(1)?, "index scores width={width}");
+                // These FP32 queries do not round-trip through one E4M3
+                // group scale per head. Every fallback bit must match BF16 MMA.
+                assert_eq!(score(2)?, score(3)?, "FP8 fallback width={width}");
             }
         }
         Ok(())
@@ -2633,19 +2648,67 @@ mod tests {
                     Ok(out)
                 };
                 let reference = score(0)?;
-                let actual = score(2)?;
-                for (i, (&a, &b)) in actual.iter().zip(&reference).enumerate() {
-                    if filtered && ids[i] < 0 {
-                        assert_eq!(a, f32::NEG_INFINITY);
-                    } else {
-                        assert!(
+                for mode in [2, 3] {
+                    let actual = score(mode)?;
+                    for (i, (&a, &b)) in actual.iter().zip(&reference).enumerate() {
+                        if filtered && ids[i] < 0 {
+                            assert_eq!(a, f32::NEG_INFINITY);
+                        } else {
+                            assert!(
                             (a - b).abs() <= 1e-5 + 3e-6 * b.abs(),
                             "width={width} filtered={filtered} slot={i} expected={b} actual={a}"
                         );
+                        }
                     }
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_index_fp8_preserves_query_exponent_and_mixed_fallback_rows() -> Result<()> {
+        let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let rows = 2;
+        let mut keys = [0u8; INDEX_BYTES];
+        keys[0] = e4m3_code(448.);
+        keys[INDEX_DIM..].copy_from_slice(&2f32.powi(118).to_le_bytes());
+        let keys = upload(dev, &keys)?;
+        let mut q = vec![0f32; rows * INDEX_HEADS * INDEX_DIM];
+        q[0] = 1. / 64.; // E4M3 encoded as 256 with scale 2^-14.
+        q[INDEX_HEADS * INDEX_DIM] = 0.014111; // Must use the BF16 fallback.
+        let q = upload(dev, &q)?;
+        let mut w = vec![0f32; rows * INDEX_HEADS];
+        w[0] = 64.;
+        w[INDEX_HEADS] = 64.;
+        let w = upload(dev, &w)?;
+        let scratch = GpuBuffer::new(dev)?;
+        let score = |mode| -> Result<[f32; 2]> {
+            let mut out = [f32::NAN; 2];
+            cuda_ok(
+                unsafe {
+                    ds4_attn_scores(
+                        dev,
+                        scratch.ptr.as_ptr(),
+                        keys.ptr.as_ptr(),
+                        q.data(),
+                        w.data(),
+                        ptr::null(),
+                        1,
+                        rows as i32,
+                        out.as_mut_ptr(),
+                        mode,
+                    )
+                },
+                "checking mixed FP8 and BF16 index rows",
+            )?;
+            Ok(out)
+        };
+        let result = score(3)?;
+        assert!(result.iter().all(|s| s.is_finite()));
+        assert_eq!(result[0], 7. * 2f32.powi(118));
+        assert_eq!(result, score(2)?);
         Ok(())
     }
 
@@ -2709,7 +2772,7 @@ mod tests {
             "sizing close-cutoff scratch",
         )?;
         let scratch = upload(dev, &vec![0xffu8; bytes])?;
-        for mode in [1, 2] {
+        for mode in [1, 2, 3] {
             let picks = upload(dev, &vec![-9i32; rows * TOP])?;
             let mut actual = vec![f32::NAN; width * rows];
             cuda_ok(
@@ -2789,7 +2852,8 @@ mod tests {
         read(&short, &mut host)?;
         assert_eq!(host, [0, -1, 0, -1, 0, 1]);
         check_index_ranking(device, 1)?;
-        check_index_ranking(device, 2)
+        check_index_ranking(device, 2)?;
+        check_index_ranking(device, 3)
     }
 
     fn check_index_ranking(device: i32, score_mode: i32) -> Result<()> {
@@ -3238,7 +3302,7 @@ mod tests {
                 Ok((selected, candidates))
             };
             let (expected, expected_blocks) = reference()?;
-            for mode in [1, 2] {
+            for mode in [1, 2, 3] {
                 // Poison both outputs so an omitted write by the second
                 // scorer cannot inherit a passing result from the first.
                 picks.write(&vec![-9i32; n * TOP])?;
@@ -3272,13 +3336,14 @@ mod tests {
             let scalar_us = time_gpu(0)?;
             let packed_us = time_gpu(1)?;
             let mma_us = time_gpu(2)?;
+            let fp8_us = time_gpu(3)?;
             let start = std::time::Instant::now();
             for _ in 0..3 {
                 std::hint::black_box(reference()?);
             }
             let host_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
             eprintln!(
-                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us mma={mma_us:.1}us CPU-rank={host_us:.1}us",
+                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us mma={mma_us:.1}us fp8={fp8_us:.1}us CPU-rank={host_us:.1}us",
                 bytes
             );
         }

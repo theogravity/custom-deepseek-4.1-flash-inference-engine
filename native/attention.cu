@@ -459,6 +459,11 @@ extern "C" int ds4_attn_flash(int dev, void *scratch, const float *queries, cons
     return 0;
 }
 #endif
+extern "C" size_t ds4_attn_fp8_query_bytes(int rows) {
+    Layout l;
+    l.slice<IndexFp8Query>(rows);
+    return l.used;
+}
 
 extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const float *queries,
         const float *weights, const int *ids, int width, int batch, float *out, int score_mode) {
@@ -467,12 +472,12 @@ extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const 
     Layout l;
     const size_t ns = size_t(batch) * width;
     auto io=l.slice<int>(ids ? ns : 0), so=l.slice<float>(ns);
+    auto qo=l.slice<IndexFp8Query>(score_mode == 3 ? batch : 0);
     TRY(b->grow(l.used));
     if (ids) TRY(cudaMemcpy(at<int>(b,io),ids,ns*4,cudaMemcpyHostToDevice));
     auto *keys = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
-    launch_index_scores(score_mode,keys,queries,weights,ids ? at<int>(b,io) : nullptr,
-                        width,batch,at<float>(b,so));
-    TRY(cudaGetLastError());
+    TRY(launch_index_scores(score_mode,keys,queries,weights,ids ? at<int>(b,io) : nullptr,
+                        width,batch,at<float>(b,so),score_mode == 3 ? at<IndexFp8Query>(b,qo) : nullptr));
     TRY(cudaMemcpy(out,at<float>(b,so),ns*4,cudaMemcpyDeviceToHost));
     return 0;
 }
@@ -515,8 +520,11 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     dim3 grid((width+block-1)/block,rows);
     index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
     TRY(cudaGetLastError());
-    launch_index_scores(score_mode,packed,queries,weights,ids,width,rows,scores);
-    TRY(cudaGetLastError());
+    // The adjacent rank/sorted buffers are idle until scoring has completed.
+    // Tiny fixtures without enough storage use the BF16 path.
+    auto *q8 = size_t(width)*2*sizeof(*rank) >= sizeof(IndexFp8Query)
+        ? reinterpret_cast<IndexFp8Query *>(rank) : nullptr;
+    TRY(launch_index_scores(score_mode,packed,queries,weights,ids,width,rows,scores,q8));
     auto select=[&](int stride, int keep)->cudaError_t {
         if (use_tiled_selection(stride,rows,keep)) {
             // rank_positions has consumed ids; its storage now holds tile winners.
