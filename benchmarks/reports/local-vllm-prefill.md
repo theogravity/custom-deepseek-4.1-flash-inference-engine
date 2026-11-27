@@ -127,7 +127,7 @@ The native process splits wide dense projections and expert feed-forward project
 | 195,803 | 20.62 s | 93.32 s | 78.86 s | 84.84 s |
 | 505,000 | 52.92 s | 356.32 s | — | — |
 
-Each cell is one cold-prefix request after a separate process warm-up. The FP8 arms share the same engine binary and settings apart from step size. Compared with the BF16 arm, they also use indexed LFU eviction. The body hashes agree across native arms at matching lengths. The 505k run reached 66 MiB of free VRAM per card at the sampled minimum. A single-client completion does not establish the six-session capacity of the experimental profile. [Raw times, image identities, flags, memory and counters](../results/upstream/tp2-wide-prefill.json)
+Each cell is one cold-prefix request after a separate process warm-up. The FP8 arms share the same engine binary and settings apart from step size. Compared with the BF16 arm, they also use indexed LFU eviction. The visible completion text hashes agree across native arms at matching lengths. The 505k run reached 66 MiB of free VRAM per card at the sampled minimum. A single-client completion does not establish the six-session capacity of the experimental profile. [Raw times, image identities, flags, memory and counters](../results/upstream/tp2-wide-prefill.json)
 
 At 98,304 processed tokens in a separate 170,582-token prompt, a 4.64-second device trace on the BF16 build recorded 688 ms in segmented radix sort and 194 ms scoring attention candidates. Peer copies moved 45.03 GB in total. Moving the 1.25 GiB layer-boundary residual through host RAM took 302 ms for the device-to-host transfer alone. These are sums from a partial prefill step and can overlap.
 
