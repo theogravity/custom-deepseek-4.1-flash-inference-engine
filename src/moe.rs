@@ -20,6 +20,10 @@ const TOP_K: usize = 6;
 const DRAFT_EXPERTS: usize = 128;
 const DRAFT_TOP_K: usize = 3;
 const SLOT_BYTES: usize = 3 * (HIDDEN * INTER * 3 / 8 + 2 * (HIDDEN + INTER));
+#[cfg(feature = "recipe-prefill")]
+mod tp2;
+#[cfg(feature = "recipe-prefill")]
+const RANK_SLOT_BYTES: usize = 3 * (HIDDEN * (INTER / 2) * 3 / 8 + 2 * (HIDDEN + INTER / 2));
 const MAX_GROUP_ROWS: usize = 256;
 const MAX_GROUP_EXPERTS: usize = 64;
 
@@ -41,7 +45,7 @@ struct RoutedRow {
 unsafe extern "C" {
     fn ds_moe_error(error: i32) -> *const c_char;
     fn ds_moe_free_bytes(device: i32, bytes: *mut usize) -> i32;
-    fn ds_moe_alloc(slot: *mut *mut c_void) -> i32;
+    fn cudaMalloc(slot: *mut *mut c_void, bytes: usize) -> i32;
     fn ds_moe_upload_parts(slot: *mut c_void, parts: *const *const c_void, coalesce: i32) -> i32;
     fn ds_moe_router_start(
         host: *mut *mut f32,
@@ -145,9 +149,10 @@ impl MoeCache {
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(device, &mut free) })?;
         let missing = bytes.saturating_add(64 << 20).saturating_sub(free);
-        let to_remove = missing.div_ceil(SLOT_BYTES).min(cache.slots.len());
-        for _ in 0..to_remove {
-            let slot = cache.evict_slot(u64::MAX)?;
+        let mut released = 0;
+        while released < missing && !cache.slots.is_empty() {
+            let (slot, size) = cache.evict_slot(u64::MAX)?;
+            released += size;
             unsafe { ds_moe_free(device, slot as *mut c_void) };
         }
         Ok(())
@@ -161,6 +166,9 @@ enum Layer {
 }
 
 impl Layer {
+    fn full(self, expert: usize) -> Key {
+        Key(self, expert, SlotFormat::Full)
+    }
     fn base(self) -> String {
         match self {
             Self::Backbone(n) => format!("layers.{n}.ffn"),
@@ -169,10 +177,27 @@ impl Layer {
     }
 }
 
-type Key = (Layer, usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum SlotFormat {
+    Full,
+    #[cfg(feature = "recipe-prefill")]
+    Rank(u8),
+}
+impl SlotFormat {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Full => SLOT_BYTES,
+            #[cfg(feature = "recipe-prefill")]
+            Self::Rank(_) => RANK_SLOT_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Key(Layer, usize, SlotFormat);
 const EXPERT_KEYS: usize = 40 * EXPERTS + 3 * DRAFT_EXPERTS;
 
-fn frequency_index((layer, expert): Key) -> usize {
+fn frequency_index(Key(layer, expert, _): Key) -> usize {
     match layer {
         Layer::Backbone(n) => n * EXPERTS + expert,
         Layer::Draft(n) => 40 * EXPERTS + n * DRAFT_EXPERTS + expert,
@@ -187,6 +212,14 @@ pub(crate) fn recipe_prefill_enabled() -> Result<bool> {
     Ok(enabled)
 }
 
+pub(crate) fn tp2_prefill_enabled() -> Result<bool> {
+    let enabled = switch("DS4_TP2_PREFILL", false)?;
+    ensure!(
+        !enabled || cfg!(feature = "recipe-prefill"),
+        "DS4_TP2_PREFILL requires the recipe-prefill build feature"
+    );
+    Ok(enabled)
+}
 fn switch(name: &str, default: bool) -> Result<bool> {
     match std::env::var(name).as_deref() {
         Err(std::env::VarError::NotPresent) => Ok(default),
@@ -253,6 +286,7 @@ struct DeviceCache {
     device: i32,
     limit: usize,
     slots: HashMap<Key, (usize, u64)>,
+    resident_bytes: usize,
     lru: BTreeSet<(u64, Key)>,
     frequencies: Option<Box<[u64]>>,
     clock: u64,
@@ -266,6 +300,10 @@ struct DeviceCache {
     packed_upload: bool,
     inline_metadata: bool,
     recipe_prefill: bool,
+    #[cfg(feature = "recipe-prefill")]
+    tp2_prefill: bool,
+    #[cfg(feature = "recipe-prefill")]
+    rank_workspace: tp2::Workspace,
     fused: bool,
     packed_decode: bool,
     parallel: bool,
@@ -286,9 +324,14 @@ impl DeviceCache {
         let recipe_prefill = recipe_prefill_enabled()?;
         Ok(Self {
             recipe_prefill,
+            #[cfg(feature = "recipe-prefill")]
+            tp2_prefill: tp2_prefill_enabled()?,
+            #[cfg(feature = "recipe-prefill")]
+            rank_workspace: tp2::Workspace::default(),
             device,
             limit,
             slots: HashMap::new(),
+            resident_bytes: 0,
             lru: BTreeSet::new(),
             frequencies: match std::env::var("DS4_EXPERT_EVICTION").as_deref() {
                 Err(std::env::VarError::NotPresent) | Ok("lru") => None,
@@ -315,7 +358,7 @@ impl DeviceCache {
         })
     }
 
-    fn evict_slot(&mut self, group_start: u64) -> Result<usize> {
+    fn evict_slot(&mut self, group_start: u64) -> Result<(usize, usize)> {
         let key = if let Some(frequencies) = &self.frequencies {
             // Already acquired slots are still referenced by this physical CUDA group.
             self.slots
@@ -325,24 +368,36 @@ impl DeviceCache {
                 .map(|(key, _)| *key)
                 .context("no evictable expert slot")?
         } else {
-            self.lru.pop_first().context("empty expert cache")?.1
+            let (age, _) = self.lru.first().context("empty expert cache")?;
+            ensure!(*age <= group_start, "no evictable expert slot");
+            self.lru.pop_first().unwrap().1
         };
-        Ok(self.slots.remove(&key).context("missing LRU slot")?.0)
+        let bytes = key.2.bytes();
+        self.resident_bytes -= bytes;
+        Ok((
+            self.slots.remove(&key).context("missing LRU slot")?.0,
+            bytes,
+        ))
     }
 
-    fn available_slots(resident: usize, free: usize, limit: usize) -> usize {
-        let available = (resident * SLOT_BYTES + free).saturating_sub(512 << 20);
-        (available / SLOT_BYTES).clamp(1, limit)
+    fn available_slots(
+        resident_bytes: usize,
+        free: usize,
+        limit: usize,
+        slot_bytes: usize,
+    ) -> usize {
+        let available = (resident_bytes + free).saturating_sub(512 << 20);
+        (available.min(limit * SLOT_BYTES) / slot_bytes).max(1)
     }
 
-    fn capacity(&mut self) -> Result<usize> {
+    fn capacity(&mut self, slot_bytes: usize) -> Result<usize> {
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(self.device, &mut free) })?;
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
-        let capacity = Self::available_slots(self.slots.len(), free, self.limit);
-        while self.slots.len() > capacity {
-            let slot = self.evict_slot(u64::MAX)?;
+        let capacity = Self::available_slots(self.resident_bytes, free, self.limit, slot_bytes);
+        while self.resident_bytes > capacity * slot_bytes {
+            let (slot, _) = self.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
         }
         Ok(capacity)
@@ -361,7 +416,7 @@ impl DeviceCache {
             && self.scratch_bytes >= max_rows * row_bytes
             && routes
                 .chunk_by(|a, b| a.expert == b.expert)
-                .all(|group| self.slots.contains_key(&(layer, group[0].expert)))
+                .all(|group| self.slots.contains_key(&layer.full(group[0].expert)))
     }
 
     fn touch(&mut self, key: Key, stamp: u64) -> Option<usize> {
@@ -391,23 +446,38 @@ impl DeviceCache {
         }
         // Check all sizes before passing mmap pointers over FFI.
         let parts = checkpoint_parts(weights, key)?;
-        let slot = if self.slots.len() >= capacity {
-            self.evict_slot(group_start)?
+        let slot_bytes = key.2.bytes();
+        let mut reuse = None;
+        while self.resident_bytes + slot_bytes > capacity * slot_bytes {
+            let (old, bytes) = self.evict_slot(group_start)?;
+            if bytes == slot_bytes && reuse.is_none() {
+                reuse = Some(old);
+            } else {
+                unsafe { ds_moe_free(self.device, old as *mut c_void) };
+            }
+        }
+        let slot = if let Some(slot) = reuse {
+            slot as *mut c_void
         } else {
             let mut slot = ptr::null_mut();
-            cuda(unsafe { ds_moe_alloc(&mut slot) })?;
-            slot as usize
+            cuda(unsafe { cudaMalloc(&mut slot, slot_bytes) })?;
+            slot
         };
-        if let Err(e) = cuda(unsafe {
-            ds_moe_upload_parts(
-                slot as *mut c_void,
-                parts.as_ptr(),
-                self.packed_upload.into(),
-            )
-        }) {
-            unsafe { ds_moe_free(self.device, slot as *mut c_void) };
+        let status = match key.2 {
+            #[cfg(feature = "recipe-prefill")]
+            SlotFormat::Rank(rank) => unsafe {
+                tp2::ds_recipe_upload_rank(slot, slot_bytes, parts.as_ptr(), rank.into())
+            },
+            SlotFormat::Full => unsafe {
+                ds_moe_upload_parts(slot, parts.as_ptr(), self.packed_upload.into())
+            },
+        };
+        if let Err(e) = cuda(status) {
+            unsafe { ds_moe_free(self.device, slot) };
             return Err(e);
         }
+        let slot = slot as usize;
+        self.resident_bytes += slot_bytes;
         self.uploads += 1;
         self.slots.insert(key, (slot, stamp));
         if let Some(frequencies) = &mut self.frequencies {
@@ -422,6 +492,8 @@ impl DeviceCache {
 
 impl Drop for DeviceCache {
     fn drop(&mut self) {
+        #[cfg(feature = "recipe-prefill")]
+        self.rank_workspace.free(self.device);
         unsafe { ds_moe_peer_free(self.peer_link) };
         unsafe { ds_moe_router_free(self.device, self.router.host, self.router.ready) };
         for &(slot, _) in self.slots.values() {
@@ -431,7 +503,7 @@ impl Drop for DeviceCache {
     }
 }
 
-fn checkpoint_parts(weights: &Weights, (layer, expert): Key) -> Result<[*const c_void; 9]> {
+fn checkpoint_parts(weights: &Weights, Key(layer, expert, _): Key) -> Result<[*const c_void; 9]> {
     let mut parts = [ptr::null(); 9];
     let base = layer.base();
     let (codebook, multiplier) = match layer {
@@ -589,7 +661,8 @@ impl Dispatch<'_> {
         while begin < routes.len() {
             let expert = routes[begin].expert;
             let count = routes[begin..].partition_point(|r| r.expert == expert);
-            let slot = device.acquire(self.weights, (self.layer, expert), capacity, group_start)?;
+            let slot =
+                device.acquire(self.weights, self.layer.full(expert), capacity, group_start)?;
             for start in (begin..begin + count).step_by(job_size) {
                 jobs.push(Job {
                     expert: slot,
@@ -681,7 +754,7 @@ impl Placement {
         Ok(Self {
             device: cache.device,
             capacity: if query {
-                cache.capacity()?
+                cache.capacity(SLOT_BYTES)?
             } else {
                 cache.slots.len().max(1)
             },
@@ -746,7 +819,18 @@ fn forward<const E: usize, const K: usize>(
     let mut weighted = rt.buffer(x.len().checked_mul(K).context("routed output overflow")?)?;
     let peer_id = rt.peer_device();
     let cache = rt.moe_cache.device(rt.device)?;
-    let parallel = cache.parallel && (matches!(layer, Layer::Backbone(_)) || cache.parallel_draft);
+    #[cfg(feature = "recipe-prefill")]
+    let tp2 = tp2::eligible(
+        cache.tp2_prefill,
+        rt.target_prefill,
+        rt.verification,
+        layer,
+        batch,
+    );
+    #[cfg(not(feature = "recipe-prefill"))]
+    let tp2 = false;
+    let parallel =
+        !tp2 && cache.parallel && (matches!(layer, Layer::Backbone(_)) || cache.parallel_draft);
     // Wide staged prompt batches triggered a copy-engine fault on the dual
     // RTX PRO 6000. Peer kernels can read and write the primary buffers
     // directly. Keep compact transfers for decode and smaller prompt batches.
@@ -780,6 +864,14 @@ fn forward<const E: usize, const K: usize>(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
     );
+    #[cfg(feature = "recipe-prefill")]
+    if tp2 {
+        let Layer::Backbone(index) = layer else {
+            unreachable!()
+        };
+        tp2::dispatch(rt, index, x, &mut weighted, &mut shared_out, &routes)?;
+        return Ok(shared_out);
+    }
     let peer_rows;
     let primary_rows;
     let (local, remote): (&[Route], &[Route]) = if parallel {
@@ -939,13 +1031,19 @@ mod tests {
     use Layer::Backbone;
     #[test]
     fn cache_capacity_reclaims_headroom_and_honors_the_user_limit() {
-        assert_eq!(DeviceCache::available_slots(5, 512 << 20, 10), 5);
         assert_eq!(
-            DeviceCache::available_slots(5, (512 << 20) - SLOT_BYTES, 10),
+            DeviceCache::available_slots(5 * SLOT_BYTES, 512 << 20, 10, SLOT_BYTES),
+            5
+        );
+        assert_eq!(
+            DeviceCache::available_slots(5 * SLOT_BYTES, (512 << 20) - SLOT_BYTES, 10, SLOT_BYTES),
             4
         );
-        assert_eq!(DeviceCache::available_slots(5, 8192 << 20, 10), 10);
-        assert_eq!(DeviceCache::available_slots(0, 0, 10), 1);
+        assert_eq!(
+            DeviceCache::available_slots(5 * SLOT_BYTES, 8192 << 20, 10, SLOT_BYTES),
+            10
+        );
+        assert_eq!(DeviceCache::available_slots(0, 0, 10, SLOT_BYTES), 1);
     }
 
     #[test]
@@ -987,7 +1085,7 @@ mod tests {
         cache.cached_capacity = true;
         cache.scratch_bytes = usize::MAX;
         assert!(!cache.can_reuse_capacity(layer, &routes));
-        cache.slots.insert((layer, 0), (0, 1));
+        cache.slots.insert(layer.full(0), (0, 1));
         assert!(cache.can_reuse_capacity(layer, &routes));
         cache.scratch_bytes = 0;
         assert!(!cache.can_reuse_capacity(layer, &routes));
@@ -997,26 +1095,27 @@ mod tests {
     fn cached_hits_protect_their_slot_during_eviction() {
         let mut cache = DeviceCache::new(0).unwrap();
         cache.frequencies = None;
+        cache.resident_bytes = 3 * SLOT_BYTES;
         // Null entries need no CUDA allocation. Exercise the same ordering
         // that protects experts collected for a pending group kernel.
         for i in 0..3 {
-            cache.slots.insert((Backbone(2), i), (0, i as u64));
-            cache.lru.insert((i as u64, (Backbone(2), i)));
+            cache.slots.insert(Backbone(2).full(i), (0, i as u64));
+            cache.lru.insert((i as u64, Backbone(2).full(i)));
         }
-        assert_eq!(cache.touch((Backbone(2), 0), 3), Some(0));
+        assert_eq!(cache.touch(Backbone(2).full(0), 3), Some(0));
         cache.evict_slot(u64::MAX).unwrap();
-        assert!(!cache.slots.contains_key(&(Backbone(2), 1)));
-        assert!(cache.slots.contains_key(&(Backbone(2), 0)));
-        assert!(cache.slots.contains_key(&(Backbone(2), 2)));
+        assert!(!cache.slots.contains_key(&Backbone(2).full(1)));
+        assert!(cache.slots.contains_key(&Backbone(2).full(0)));
+        assert!(cache.slots.contains_key(&Backbone(2).full(2)));
     }
 
     #[test]
     fn lfu_preserves_group_slots_and_breaks_frequency_ties_by_recency() {
         let mut cache = DeviceCache::new(0).unwrap();
         let keys = [
-            (Backbone(39), 383),
-            (Layer::Draft(0), 0),
-            (Layer::Draft(2), 127),
+            Backbone(39).full(383),
+            Layer::Draft(0).full(0),
+            Layer::Draft(2).full(127),
         ];
         let mut frequency = vec![0; EXPERT_KEYS].into_boxed_slice();
         for (i, key) in keys.iter().copied().enumerate() {
@@ -1024,6 +1123,7 @@ mod tests {
             frequency[frequency_index(key)] = [8, 8, 1][i];
         }
         cache.frequencies = Some(frequency);
+        cache.resident_bytes = 3 * SLOT_BYTES;
         assert_eq!(cache.touch(keys[2], 4), Some(0));
         cache.evict_slot(3).unwrap();
         assert!(!cache.slots.contains_key(&keys[0]));
@@ -1056,7 +1156,7 @@ mod tests {
             .map(|i| (i as f32 * 0.3).sin())
             .collect::<Vec<_>>();
         let run = |cache: &mut DeviceCache, expert| -> Result<Vec<f32>> {
-            let slot = cache.acquire(&weights, (Backbone(0), expert), 2, u64::MAX)?;
+            let slot = cache.acquire(&weights, Backbone(0).full(expert), 2, u64::MAX)?;
             let mut y = vec![0.; HIDDEN];
             let job = Job {
                 expert: slot,
@@ -1085,18 +1185,18 @@ mod tests {
             cache.frequencies = lfu.then(|| vec![0; EXPERT_KEYS].into_boxed_slice());
             let first = run(&mut cache, 0)?;
             let second = run(&mut cache, 1)?;
-            let first_slot = cache.slots[&(Backbone(0), 0)].0;
-            let second_slot = cache.slots[&(Backbone(0), 1)].0;
+            let first_slot = cache.slots[&Backbone(0).full(0)].0;
+            let second_slot = cache.slots[&Backbone(0).full(1)].0;
             assert_eq!(first, run(&mut cache, 0)?);
             let _ = run(&mut cache, 2)?;
-            assert!(!cache.slots.contains_key(&(Backbone(0), 1)));
-            assert_eq!(cache.slots[&(Backbone(0), 2)].0, second_slot);
+            assert!(!cache.slots.contains_key(&Backbone(0).full(1)));
+            assert_eq!(cache.slots[&Backbone(0).full(2)].0, second_slot);
             assert_eq!(second, run(&mut cache, 1)?);
             let expected = if lfu { second_slot } else { first_slot };
-            assert_eq!(cache.slots[&(Backbone(0), 1)].0, expected);
+            assert_eq!(cache.slots[&Backbone(0).full(1)].0, expected);
             assert!(cache
                 .slots
-                .contains_key(&(Backbone(0), if lfu { 0 } else { 2 })));
+                .contains_key(&Backbone(0).full(if lfu { 0 } else { 2 })));
             assert_eq!(cache.slots.len(), 2);
         }
         Ok(())
@@ -1155,7 +1255,7 @@ mod tests {
                         assert!(cache
                             .slots
                             .keys()
-                            .all(|&(_, e)| (e % 2 == 0) == (*device == rt.device)));
+                            .all(|&Key(_, e, _)| (e % 2 == 0) == (*device == rt.device)));
                     }
                 }
             }

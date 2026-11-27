@@ -1,6 +1,7 @@
 #ifdef DS4_RECIPE_PREFILL
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -216,5 +217,57 @@ extern "C" int ds_recipe_upload_rank(void *storage, size_t capacity, const void 
         CHECK(cudaMemcpy(dst + in_width, output, out_width * sizeof(half), cudaMemcpyHostToDevice));
     }
     return 0;
+}
+
+// Ordered, bounded bridge between two local device buffers. Host synchronization
+// completes each DMA before the single pinned tile can be reused on either GPU.
+// The final H2D leaves the destination's context current for its consumer.
+extern "C" int ds_recipe_transfer(float *dst, int dst_device, const float *src, int src_device,
+                                  float *host, size_t count) {
+    if (!dst || !src || !host || !count || count > (2u << 20) / sizeof(float))
+        return int(cudaErrorInvalidValue);
+    CHECK(cudaSetDevice(src_device));
+    CHECK(cudaMemcpyAsync(host, src, count * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaStreamSynchronize(nullptr));
+    CHECK(cudaSetDevice(dst_device));
+    CHECK(cudaMemcpyAsync(dst, host, count * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaStreamSynchronize(nullptr));
+    return 0;
+}
+
+namespace {
+__device__ float sum_routes(const float *routed, size_t i) {
+    size_t base = (i / H) * 6 * H + i % H;
+    float sum = 0.f;
+#pragma unroll
+    for (int k = 0; k < 6; ++k)
+        sum = __fadd_rn(sum, routed[base + size_t(k) * H]);
+    return sum;
+}
+
+__global__ void reduce_rank(const float *routed, float *tokens, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) tokens[i] = sum_routes(routed, i);
+}
+
+__global__ void finish_ranks(const float *routed, const float *peer, float *shared, size_t start, size_t count) {
+    size_t j = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (j < count) {
+        size_t i = start + j;
+        float sum = __fadd_rn(sum_routes(routed, i), peer[j]);
+        shared[i] = __bfloat162float(__float2bfloat16_rn(__fadd_rn(sum, shared[i])));
+    }
+}
+} // namespace
+
+extern "C" int ds_recipe_sum_rank(const float *routed, float *tokens, size_t count) {
+    reduce_rank<<<(count + 255)/256,256>>>(routed, tokens, count);
+    return int(cudaGetLastError());
+}
+
+extern "C" int ds_recipe_finish_ranks(const float *routed, const float *peer, float *shared,
+                                      size_t start, size_t count) {
+    finish_ranks<<<(count + 255)/256,256>>>(routed, peer, shared, start, count);
+    return int(cudaGetLastError());
 }
 #endif
