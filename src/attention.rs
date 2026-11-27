@@ -1435,7 +1435,7 @@ fn select(
                 }
             }
         }
-        let mode = index_score_mode(rt.target_prefill);
+        let mode = index_score_mode(rt.target_prefill, width, rows, filtering);
         let mut bytes =
             (rows * width * size_of::<f32>()).next_multiple_of(256) * (1 + usize::from(filtering));
         if mode >= 3 {
@@ -1498,10 +1498,20 @@ pub(crate) fn prefill_batched_mqa() -> bool {
     *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_BATCHED_MQA").is_some_and(|v| v == "1"))
 }
 
-fn index_score_mode(target_prefill: bool) -> i32 {
+fn batched_mqa_tile(width: usize, rows: usize, filtered: bool) -> bool {
+    // The single-query kernel wins small scans. Four-query tiles amortize query
+    // setup and share keys on long, dense scans with at least 1M query/key pairs.
+    !filtered && rows >= 4 && width >= 16_384 && width.saturating_mul(rows) >= 1_048_576
+}
+
+fn index_score_mode(target_prefill: bool, width: usize, rows: usize, filtered: bool) -> i32 {
     static PACKED: OnceLock<bool> = OnceLock::new();
     if target_prefill && prefill_batched_mqa() {
-        4
+        if batched_mqa_tile(width, rows, filtered) {
+            4
+        } else {
+            3
+        }
     } else if target_prefill && prefill_index_fp8() {
         3
     } else if target_prefill && prefill_index_mma() {
@@ -1585,7 +1595,7 @@ fn device_select(
                     } else {
                         ptr::null_mut()
                     },
-                    index_score_mode(rt.target_prefill),
+                    index_score_mode(rt.target_prefill, width, rows, filtered),
                 )
             },
             "ranking index keys on GPU",
@@ -2786,6 +2796,16 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn batched_mqa_selects_large_contiguous_scans() {
+        assert!(batched_mqa_tile(524288, 4, false));
+        assert!(batched_mqa_tile(16384, 64, false));
+        assert!(!batched_mqa_tile(16384, 64, true));
+        assert!(!batched_mqa_tile(65536, 8, false));
+        assert!(!batched_mqa_tile(600, 8192, false));
+        assert!(!batched_mqa_tile(524288, 3, false));
     }
 
     #[test]
