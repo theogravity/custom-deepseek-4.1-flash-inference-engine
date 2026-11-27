@@ -1,0 +1,25 @@
+diff --git a/native/moe.cu b/native/moe.cu
+index f9a208b..175ccf8 100644
+--- a/native/moe.cu
++++ b/native/moe.cu
+@@ -85,16 +85,17 @@ __device__ __forceinline__ void mma(const unsigned (&a)[4], unsigned b0, unsigne
+                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+ }
+ 
+-// Four warps cover 64 output columns. Each job covers up to 16 inputs routed
++// Each warp covers 16 output columns (four warps by default). Each job covers up to 16 inputs routed
+ // to one expert, sharing the decoded weights. Split K keeps a one-token job
+ // large enough to distribute across the SMs. Partials are reduced in order.
+-template <int projection, bool mcg, bool paired = false, bool packed_decode = false>
++template <int projection, bool mcg, bool paired = false, bool packed_decode = false, int warps = 4>
+ __global__ void project(const Job *jobs, const half *x, float *partial, int rows, int splits) {
+     constexpr int K = projection == Down ? I : H;
+     constexpr int N = projection == Down ? H : I;
+     constexpr int KT = K / 16;
+     int lane = threadIdx.x % 32;
+-    int nt = blockIdx.x * 4 + threadIdx.x / 32;
++    static_assert(N % (16 * warps) == 0);
++    int nt = blockIdx.x * warps + threadIdx.x / 32;
+     Job job = jobs[blockIdx.y];
+     int split = blockIdx.z;
+     int which = projection;

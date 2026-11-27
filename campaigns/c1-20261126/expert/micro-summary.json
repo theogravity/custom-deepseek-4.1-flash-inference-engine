@@ -1,0 +1,134 @@
+{
+  "method": "CUDA events on GPU 1, alternating mode order, nine samples of 40 sequential launches, median microseconds per launch. Full FP32 partial buffers compared bitwise for baseline vs shuffle before each shape; five-job fixture covers 1,8,9,15,16 routed rows per expert. Synthetic repeated weights, not serving throughput.",
+  "raw_sha256": "ae2e0a83330bf173bde7038203cf39834c394ae066dae1ea1a3d42fb71e4cc61",
+  "cells": [
+    {
+      "projection": "gate+up",
+      "jobs": 4,
+      "rows": 7,
+      "control_us": 20.6368,
+      "shuffle_us": 19.3008,
+      "change_pct": -6.47
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 5,
+      "rows": 49,
+      "control_us": 30.9048,
+      "shuffle_us": 30.0592,
+      "change_pct": -2.74
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 8,
+      "rows": 15,
+      "control_us": 37.7048,
+      "shuffle_us": 37.1168,
+      "change_pct": -1.56
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 10,
+      "rows": 19,
+      "control_us": 74.0072,
+      "shuffle_us": 74.1304,
+      "change_pct": 0.17
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 11,
+      "rows": 21,
+      "control_us": 63.7512,
+      "shuffle_us": 64.4304,
+      "change_pct": 1.07
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 12,
+      "rows": 24,
+      "control_us": 83.5504,
+      "shuffle_us": 83.476,
+      "change_pct": -0.09
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 14,
+      "rows": 27,
+      "control_us": 108.38799,
+      "shuffle_us": 108.1312,
+      "change_pct": -0.24
+    },
+    {
+      "projection": "gate+up",
+      "jobs": 16,
+      "rows": 31,
+      "control_us": 140.5168,
+      "shuffle_us": 140.11441,
+      "change_pct": -0.29
+    },
+    {
+      "projection": "down",
+      "jobs": 4,
+      "rows": 7,
+      "control_us": 10.8856,
+      "shuffle_us": 10.5256,
+      "change_pct": -3.31
+    },
+    {
+      "projection": "down",
+      "jobs": 5,
+      "rows": 49,
+      "control_us": 15.8776,
+      "shuffle_us": 15.1568,
+      "change_pct": -4.54
+    },
+    {
+      "projection": "down",
+      "jobs": 8,
+      "rows": 15,
+      "control_us": 25.3408,
+      "shuffle_us": 29.6896,
+      "change_pct": 17.16
+    },
+    {
+      "projection": "down",
+      "jobs": 10,
+      "rows": 19,
+      "control_us": 31.94,
+      "shuffle_us": 33.9752,
+      "change_pct": 6.37
+    },
+    {
+      "projection": "down",
+      "jobs": 11,
+      "rows": 21,
+      "control_us": 34.9648,
+      "shuffle_us": 34.6376,
+      "change_pct": -0.94
+    },
+    {
+      "projection": "down",
+      "jobs": 12,
+      "rows": 24,
+      "control_us": 39.7776,
+      "shuffle_us": 40.0832,
+      "change_pct": 0.77
+    },
+    {
+      "projection": "down",
+      "jobs": 14,
+      "rows": 27,
+      "control_us": 47.1248,
+      "shuffle_us": 46.8856,
+      "change_pct": -0.51
+    },
+    {
+      "projection": "down",
+      "jobs": 16,
+      "rows": 31,
+      "control_us": 53.6448,
+      "shuffle_us": 53.376,
+      "change_pct": -0.5
+    }
+  ]
+}

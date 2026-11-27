@@ -1,0 +1,15 @@
+package compose
+import "testing"
+func TestAdditionalCases(t *testing.T) {
+    t.Setenv("SVC","local")
+    for _, tc := range []struct{ cmd, flag, want string }{
+        {"--port-file /xx","--port",""},
+        {"--help\t--name=\"two words\"","--name","two words"},
+        {"--name 'two words'","--name","two words"},
+        {"--listen=\"$SVC endpoint\"","--listen","local endpoint"},
+        {"--name-file foo --name=bar","--name","bar"},
+        {"--other '--name ignored' --name right","--name","right"},
+    } {
+      if got:=extractFlagStr(tc.cmd,tc.flag);got!=tc.want{t.Errorf("extractFlagStr(%q, %q)=%q want %q",tc.cmd,tc.flag,got,tc.want)}
+    }
+}

@@ -1,0 +1,5 @@
+# Workstation experiment archive
+
+These directories preserve the research scripts used for the CUDA kernel, cache, scheduling and Pi experiments, including exploratory and rejected variants. They also include the archived per-kernel timing tables. The directory names match the campaign names cited in the engine's reports. The original host account path is represented as `/home/benchmark/llm`.
+
+These are snapshots of the original experiment drivers. Some expect temporary worktrees, previous measurements, local image tags or an installed service, and some change the running engine. The supported replay drivers, kernel build helper and clean-clone instructions are in [the benchmark directory](../benchmarks/). The portable Pi driver there includes the provider that the historical workstation harness obtained from model-cli. The repository contains the synthetic Pi task and measurements. Workstation credentials, individual agent request captures, caches and model binaries stay on the benchmark host.

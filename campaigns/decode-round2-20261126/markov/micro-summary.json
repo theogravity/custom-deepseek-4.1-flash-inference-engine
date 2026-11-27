@@ -1,0 +1,24 @@
+{
+  "shape": "synthetic BF16 correction and raw logits, 129280 vocabulary x 256 rank, 7 draft positions; table reused warm across iterations",
+  "legs": [
+    {
+      "mode": 0,
+      "median_us_for_seven_rows": 96.65,
+      "timed_samples": 12,
+      "matching_ids": 7
+    },
+    {
+      "mode": 1,
+      "median_us_for_seven_rows": 28.499,
+      "timed_samples": 12,
+      "matching_ids": 7
+    },
+    {
+      "mode": 0,
+      "median_us_for_seven_rows": 96.546,
+      "timed_samples": 12,
+      "matching_ids": 7
+    }
+  ],
+  "raw_sha256": "667e7b95d423cb1a9072f38e94f8c69e635471124cd1be3747f28b0bf10d7693"
+}
