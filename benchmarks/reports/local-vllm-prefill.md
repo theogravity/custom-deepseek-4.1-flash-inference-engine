@@ -99,7 +99,7 @@ On an idle benchmark host, with the API key exported, this Bash block recreates 
   export DS4_PREFILL_DECODER_PRUNE=1 DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=0 DS4_FLASHINFER_PREFILL=0
   stack=(-f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml
          -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/reference-drafter.yml
-         -f deploy/profiles/tp2-prefill.yml)
+         -f "$bench_dir/engine/deploy/profiles/tp2-prefill.yml")
   for step in 8192 16384; do
     export DS4_PREFILL_CHUNK="$step" DS4_HOST_PREFIX_DIR="$bench_dir/prefix-$step"
     mkdir -m 700 "$DS4_HOST_PREFIX_DIR"
@@ -114,3 +114,37 @@ On an idle benchmark host, with the API key exported, this Bash block recreates 
 The configured context limit is 524,288 in both arms. Restore the original serving image and prefix directory using the same Compose files and environment that were active before the experiment.
 
 The overlap driver records a peer stream that stalls for the entire arriving request’s wait with zero interior events. It measures the complete interval between the peer’s surrounding events.
+
+## Wide TP2 checkpoint
+
+The native process splits wide dense projections and expert feed-forward projections across both GPUs. It retains one owner for the attention computation at each layer. In this build, wide prompts use cuBLAS, the pack’s S8B expert kernel, and FlashInfer’s SM120 MLA kernel. The 8,192-token scheduling step remains the default in the experimental overlay. Set `DS4_PREFILL_CHUNK=16384` before recreating the service to use 16,384.
+
+| Input tokens | Installed vLLM | Native 16k, BF16 index | Native 8k, FP8 index and BF16 peer transfers | Native 16k, FP8 index and BF16 peer transfers |
+|---:|---:|---:|---:|---:|
+| 15,864 | 2.91 s | 3.77 s | 3.77 s | 4.44 s |
+| 60,013 | 8.07 s | 14.61 s | 13.99 s | 13.96 s |
+| 195,803 | 20.62 s | 93.32 s | 78.86 s | 84.84 s |
+| 505,000 | 52.92 s | 356.32 s | — | — |
+
+Each cell is one cold-prefix request after a separate process warm-up. The FP8 arms share the same engine binary and settings apart from step size. Compared with the BF16 arm, they also use indexed LFU eviction. The body hashes agree across native arms at matching lengths. The 505k run reached 66 MiB of free VRAM per card at the sampled minimum. A single-client completion does not establish the six-session capacity of the experimental profile. [Raw times, image identities, flags, memory and counters](../results/upstream/tp2-wide-prefill.json)
+
+At 98,304 processed tokens in a separate 170,582-token prompt, a 4.64-second device trace on the BF16 build recorded 688 ms in segmented radix sort and 194 ms scoring attention candidates. Peer copies moved 45.03 GB in total. Moving the 1.25 GiB layer-boundary residual through host RAM took 302 ms for the device-to-host transfer alone. These are sums from a partial prefill step and can overlap.
+
+To reproduce the FP8-index arms, build commit `16c9201468076127006ca7ad66e982216b54e2c6` with both CUDA features. Use the current checkout’s Compose profiles and timing driver. Set `DS4_FLASHINFER_DIR` as described in the [build instructions](../../docs/testing.md#flashinfer-sm120-prompt-attention). For each step, start a fresh service with an empty prefix directory and run the requests in order.
+
+```bash
+# From the measured engine worktree
+CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked --features recipe-prefill,flashinfer-prefill
+docker build -t ds4-flash-rs:tp2-prefill-20261127 .
+
+# From the checkout containing this report, with the documented API key exported
+export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
+export DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=0
+export DS4_PREFILL_CHUNK=8192 DS4_HOST_PREFIX_DIR="$(mktemp -d)"
+docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml \
+  -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/reference-drafter.yml \
+  -f deploy/profiles/tp2-prefill.yml up -d --force-recreate --no-build --wait
+python3 tools/cold_prefill.py --timing-only 3500,91570510 5000,91570511 19000,91570512 62000,91570513
+```
+
+Repeat with a new prefix directory and `DS4_PREFILL_CHUNK=16384`. The first row of each output file is the excluded warm-up. Reproducing the BF16 column uses engine commit `74de5de`, the same 16k setup with `DS4_PREFILL_INDEX_FP8=0 DS4_TP_DENSE_BF16_WIRE=0`, and a final cold request of `160000,91570514`.

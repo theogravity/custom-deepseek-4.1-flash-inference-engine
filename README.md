@@ -29,25 +29,16 @@ Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At si
 
 ### Cold first output on the same workstation
 
-Both servers used identical rendered prompt tokens, the released DSpark drafter with five proposals, and 375 W per GPU. Each row is one single-client request with zero cached tokens after a separate process warm-up. The native run used deferred decoder work and 64-token physical prefill chunks.
+Single-client time to first streamed reasoning or visible output with the released five-proposal DSpark drafter. Each engine received the same rendered inputs, a separate 11k warm-up and zero reused tokens. Both GPUs were capped at 375 W. Each entry is one request.
 
-| Input tokens | Installed vLLM TP2 | Native Rust/CUDA | Native / vLLM time |
-|---:|---:|---:|---:|
-| 15,864 | 2.91 s | 11.78 s | 4.05× |
-| 60,013 | 8.07 s | 38.91 s | 4.82× |
-| 195,803 | 20.62 s | 159.69 s | 7.74× |
-| 505,000 | 52.92 s | 438.09 s | 8.28× |
+| Input tokens | Installed vLLM, 8k step | Earlier native, 64 step | Native TP2, 8k step | Native TP2, 16k step |
+|---:|---:|---:|---:|---:|
+| 15,864 | 2.91 s | 11.78 s | 3.77 s | 4.44 s |
+| 60,013 | 8.07 s | 38.91 s | 13.99 s | 13.96 s |
+| 195,803 | 20.62 s | 159.69 s | 78.86 s | 84.84 s |
+| 505,000 | 52.92 s | 438.09 s | — | 356.32 s¹ |
 
-The installed vLLM profile uses an 8,192-token scheduling budget and TP2 within each layer. The measured native release still puts 20 backbone layers on each GPU. Matching the local vLLM settings and performance is the [native TP2 target](docs/engine.md#native-tp2-target). [Same-host measurements and model-kernel experiment](benchmarks/reports/local-vllm-prefill.md) · [Original published cold-prefill comparison](benchmarks/reports/headline-reference.md#single-client-cold-prefill)
-
-The experimental TP2 prefill backend also supports physical steps of 8,192 and 16,384 input tokens.
-
-| Cold input tokens | TP2 with 8,192-token steps | TP2 with 16,384-token steps | Installed vLLM, 8,192-token scheduling budget |
-|---:|---:|---:|---:|
-| 15,864 | 8.68 s | 12.74 s | 2.91 s |
-| 60,013 | 32.12 s | 29.73 s | 8.07 s |
-
-When a 68,049-token code review arrived during another agent’s Rust generation, both settings took 51.9 seconds to first output for the arriving agent. The longest full gap between the existing agent’s output events that overlapped the arriving agent’s wait was 13.24 seconds at 8,192 and 17.94 seconds at 16,384. Each setting was measured once. [Cold prefill and agent overlap](benchmarks/reports/local-vllm-prefill.md#physical-prefill-steps-of-8192-and-16384-tokens)
+The two wide-step columns use the same build through 195,803 tokens. ¹The 505k result is from the preceding 16k build, with BF16 index scoring. Free VRAM on that run fell to 66 MiB per GPU. All four input lengths fit the 524,288-token serving limit. Six simultaneous 404k requests have yet to be qualified on this wide-step profile. [Protocol, builds and agent overlap](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint) · [Raw native results](benchmarks/results/upstream/tp2-wide-prefill.json)
 
 ## Build and serve from a fresh clone
 

@@ -1,0 +1,442 @@
+{
+  "hardware": {
+    "gpu_watts_each": 375,
+    "cpu_socket_limit_watts": 225,
+    "gpu_devices": [
+      1,
+      2
+    ]
+  },
+  "metric": "One client, seconds from request start to first nonempty content or reasoning event. Native endpoint. One process warm-up per arm. Timing only.",
+  "reference": "local-vllm-prefill.json",
+  "arms": {
+    "long16ka": {
+      "engine_revision": "74de5de2c83546e716d42059833d1560bbaa6ba9",
+      "image": "sha256:1d8a7346a7ee6e332944608fe4f4edc213873fc508f23a6fd6f6824af95f29a5",
+      "step_tokens": 16384,
+      "options_relative_to_concurrent_coding": {
+        "DS4_DRAFTER": "released",
+        "DS4_SPEC_K": "5",
+        "DS4_PROMPT_LOOKUP": "0",
+        "DS4_OUTPUT_LOOKUP": "0",
+        "DS4_PREFIX_RAM_MIB": "49152",
+        "DS4_PREFIX_DISK_MIB": "131072",
+        "DS4_PREFILL_DECODER_PRUNE": "1",
+        "DS4_TP_DENSE": "1",
+        "DS4_TP2_PREFILL": "1",
+        "DS4_PREFILL_LT": "1",
+        "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+        "DS4_PREFILL_BOUNDED_REPLAY": "1",
+        "DS4_TP2_PACKED_INPUT": "1",
+        "DS4_TP2_PEER_DMA": "1",
+        "DS4_TP2_STAGE_WEIGHTS": "1",
+        "DS4_PREFILL_BLAS": "1",
+        "DS4_PREFILL_INDEX_MMA": "1",
+        "DS4_TRANSIENT_POOL_MIB": "4096",
+        "DS4_FLASHINFER_PREFILL": "1"
+      },
+      "warmup": {
+        "seed": 91570510,
+        "word_count": 3500,
+        "ttft_s": 7.800841232994571,
+        "content_sha256": "fe903dda0d55f4beec0a4528349d973fe160487654273240d1afc88a92e81186",
+        "done": true,
+        "finish": "stop",
+        "prompt_tokens": 11080,
+        "completion_tokens": 28,
+        "total_tokens": 11108,
+        "case": "cold,3500,91570510",
+        "delta": {
+          "requests_started": 1,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        },
+        "minimum_free_gpu_mib": [
+          28206,
+          29262
+        ],
+        "minimum_available_host_mib": 238787
+      },
+      "timed": [
+        {
+          "seed": 91570511,
+          "word_count": 5000,
+          "ttft_s": 3.774647821992403,
+          "content_sha256": "254ddb2961f88547e242bdc5264aa19ecebb38956332e5fe40e6e84265a1d54b",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 15864,
+          "completion_tokens": 29,
+          "total_tokens": 15893,
+          "case": "cold,5000,91570511",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            15196,
+            12812
+          ],
+          "minimum_available_host_mib": 238519
+        },
+        {
+          "seed": 91570512,
+          "word_count": 19000,
+          "ttft_s": 14.612428398002521,
+          "content_sha256": "784010f5955a0b841c96008ebab719afe605d49f21d11f9469818463d4e3c999",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 60013,
+          "completion_tokens": 28,
+          "total_tokens": 60041,
+          "case": "cold,19000,91570512",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            954,
+            610
+          ],
+          "minimum_available_host_mib": 238113
+        },
+        {
+          "seed": 91570513,
+          "word_count": 62000,
+          "ttft_s": 93.3205084259971,
+          "content_sha256": "8c58b68e3a7637a1d4ea8746604b94f1e20b852484044e3b9a5d3642a6caba3d",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 195803,
+          "completion_tokens": 28,
+          "total_tokens": 195831,
+          "case": "cold,62000,91570513",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            64,
+            66
+          ],
+          "minimum_available_host_mib": 238182
+        },
+        {
+          "seed": 91570514,
+          "word_count": 160000,
+          "ttft_s": 356.31753445199865,
+          "content_sha256": "f19270d421355d2f94a28d43815bb3f7077b7a991452f6622e760b105260eabe",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 505000,
+          "completion_tokens": 29,
+          "total_tokens": 505029,
+          "case": "cold,160000,91570514",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            66,
+            66
+          ],
+          "minimum_available_host_mib": 236662
+        }
+      ]
+    },
+    "indexed8kb": {
+      "engine_revision": "16c9201468076127006ca7ad66e982216b54e2c6",
+      "image": "sha256:543fe0549aa76ce7d513d6a53607c699e6d85600e1df97d0edc925c169b72feb",
+      "step_tokens": 8192,
+      "options_relative_to_concurrent_coding": {
+        "DS4_DRAFTER": "released",
+        "DS4_SPEC_K": "5",
+        "DS4_PROMPT_LOOKUP": "0",
+        "DS4_OUTPUT_LOOKUP": "0",
+        "DS4_PREFIX_RAM_MIB": "49152",
+        "DS4_PREFIX_DISK_MIB": "131072",
+        "DS4_PREFILL_DECODER_PRUNE": "1",
+        "DS4_TP_DENSE": "1",
+        "DS4_TP2_PREFILL": "1",
+        "DS4_PREFILL_LT": "1",
+        "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+        "DS4_PREFILL_BOUNDED_REPLAY": "1",
+        "DS4_TP2_PACKED_INPUT": "1",
+        "DS4_TP2_PEER_DMA": "1",
+        "DS4_TP2_STAGE_WEIGHTS": "1",
+        "DS4_PREFILL_BLAS": "1",
+        "DS4_PREFILL_INDEX_MMA": "1",
+        "DS4_TRANSIENT_POOL_MIB": "4096",
+        "DS4_FLASHINFER_PREFILL": "1",
+        "DS4_TP_DENSE_BF16_WIRE": "1",
+        "DS4_PREFILL_INDEX_FP8": "1"
+      },
+      "warmup": {
+        "seed": 91570510,
+        "word_count": 3500,
+        "ttft_s": 9.364831314000185,
+        "content_sha256": "fe903dda0d55f4beec0a4528349d973fe160487654273240d1afc88a92e81186",
+        "done": true,
+        "finish": "stop",
+        "prompt_tokens": 11080,
+        "completion_tokens": 28,
+        "total_tokens": 11108,
+        "case": "cold,3500,91570510",
+        "delta": {
+          "requests_started": 1,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        },
+        "minimum_free_gpu_mib": [
+          24356,
+          24582
+        ],
+        "minimum_available_host_mib": 240164
+      },
+      "timed": [
+        {
+          "seed": 91570511,
+          "word_count": 5000,
+          "ttft_s": 3.768583145007142,
+          "content_sha256": "254ddb2961f88547e242bdc5264aa19ecebb38956332e5fe40e6e84265a1d54b",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 15864,
+          "completion_tokens": 29,
+          "total_tokens": 15893,
+          "case": "cold,5000,91570511",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            15188,
+            14932
+          ],
+          "minimum_available_host_mib": 240144
+        },
+        {
+          "seed": 91570512,
+          "word_count": 19000,
+          "ttft_s": 13.985446007995051,
+          "content_sha256": "784010f5955a0b841c96008ebab719afe605d49f21d11f9469818463d4e3c999",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 60013,
+          "completion_tokens": 28,
+          "total_tokens": 60041,
+          "case": "cold,19000,91570512",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            4254,
+            4604
+          ],
+          "minimum_available_host_mib": 240239
+        },
+        {
+          "seed": 91570513,
+          "word_count": 62000,
+          "ttft_s": 78.86262149500544,
+          "content_sha256": "8c58b68e3a7637a1d4ea8746604b94f1e20b852484044e3b9a5d3642a6caba3d",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 195803,
+          "completion_tokens": 28,
+          "total_tokens": 195831,
+          "case": "cold,62000,91570513",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            68,
+            110
+          ],
+          "minimum_available_host_mib": 236428
+        }
+      ]
+    },
+    "indexed16kb": {
+      "engine_revision": "16c9201468076127006ca7ad66e982216b54e2c6",
+      "image": "sha256:543fe0549aa76ce7d513d6a53607c699e6d85600e1df97d0edc925c169b72feb",
+      "step_tokens": 16384,
+      "options_relative_to_concurrent_coding": {
+        "DS4_DRAFTER": "released",
+        "DS4_SPEC_K": "5",
+        "DS4_PROMPT_LOOKUP": "0",
+        "DS4_OUTPUT_LOOKUP": "0",
+        "DS4_PREFIX_RAM_MIB": "49152",
+        "DS4_PREFIX_DISK_MIB": "131072",
+        "DS4_PREFILL_DECODER_PRUNE": "1",
+        "DS4_TP_DENSE": "1",
+        "DS4_TP2_PREFILL": "1",
+        "DS4_PREFILL_LT": "1",
+        "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+        "DS4_PREFILL_BOUNDED_REPLAY": "1",
+        "DS4_TP2_PACKED_INPUT": "1",
+        "DS4_TP2_PEER_DMA": "1",
+        "DS4_TP2_STAGE_WEIGHTS": "1",
+        "DS4_PREFILL_BLAS": "1",
+        "DS4_PREFILL_INDEX_MMA": "1",
+        "DS4_TRANSIENT_POOL_MIB": "4096",
+        "DS4_FLASHINFER_PREFILL": "1",
+        "DS4_TP_DENSE_BF16_WIRE": "1",
+        "DS4_PREFILL_INDEX_FP8": "1"
+      },
+      "warmup": {
+        "seed": 91570510,
+        "word_count": 3500,
+        "ttft_s": 16.499511499001528,
+        "content_sha256": "fe903dda0d55f4beec0a4528349d973fe160487654273240d1afc88a92e81186",
+        "done": true,
+        "finish": "stop",
+        "prompt_tokens": 11080,
+        "completion_tokens": 28,
+        "total_tokens": 11108,
+        "case": "cold,3500,91570510",
+        "delta": {
+          "requests_started": 1,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        },
+        "minimum_free_gpu_mib": [
+          25834,
+          26002
+        ],
+        "minimum_available_host_mib": 237646
+      },
+      "timed": [
+        {
+          "seed": 91570511,
+          "word_count": 5000,
+          "ttft_s": 4.440035095001804,
+          "content_sha256": "254ddb2961f88547e242bdc5264aa19ecebb38956332e5fe40e6e84265a1d54b",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 15864,
+          "completion_tokens": 29,
+          "total_tokens": 15893,
+          "case": "cold,5000,91570511",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            13310,
+            10748
+          ],
+          "minimum_available_host_mib": 237757
+        },
+        {
+          "seed": 91570512,
+          "word_count": 19000,
+          "ttft_s": 13.96301026600122,
+          "content_sha256": "784010f5955a0b841c96008ebab719afe605d49f21d11f9469818463d4e3c999",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 60013,
+          "completion_tokens": 28,
+          "total_tokens": 60041,
+          "case": "cold,19000,91570512",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            418,
+            1068
+          ],
+          "minimum_available_host_mib": 238257
+        },
+        {
+          "seed": 91570513,
+          "word_count": 62000,
+          "ttft_s": 84.8384680839954,
+          "content_sha256": "8c58b68e3a7637a1d4ea8746604b94f1e20b852484044e3b9a5d3642a6caba3d",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 195803,
+          "completion_tokens": 28,
+          "total_tokens": 195831,
+          "case": "cold,62000,91570513",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            66,
+            64
+          ],
+          "minimum_available_host_mib": 234935
+        }
+      ]
+    }
+  },
+  "trace": {
+    "engine_revision": "74de5de2c83546e716d42059833d1560bbaa6ba9",
+    "step_tokens": 16384,
+    "prompt_tokens": 170582,
+    "scheduler_position": 98304,
+    "gpu_activity_window_ms": 4642.91,
+    "kernel_gpu_ms": {
+      "segmented_radix_sort": 688,
+      "index_scores": 194
+    },
+    "peer_copy_gb_decimal": 45.03,
+    "residual_device_to_host_bytes": 1342177280,
+    "residual_device_to_host_ms": 302.4,
+    "scope": "One partial prefill step. GPU kernel times are sums over launches. Transfer and execution can overlap."
+  }
+}
