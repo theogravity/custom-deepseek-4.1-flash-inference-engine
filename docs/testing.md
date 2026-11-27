@@ -25,6 +25,15 @@ The optional `flashinfer-prefill` feature compiles the DSV4 single- and dual-cac
 
 ```bash
 cargo test --release --features flashinfer-prefill flash_prefill_workspace
-CUDA_VISIBLE_DEVICES=<inference-gpu-uuid> DS4_TEST_DEVICE=0 \
+CUDA_VISIBLE_DEVICES="$(nvidia-smi -i 1 --query-gpu=uuid --format=csv,noheader)" DS4_TEST_DEVICE=0 \
   cargo test --release --features flashinfer-prefill cuda_flash_mla -- --ignored --nocapture
+```
+
+Build the two-rank expert and FlashInfer kernels into the serving image from the engine checkout. The build uses the model pack's `recipe/` folder and needs the pinned FlashInfer source tree.
+
+```sh
+cargo build --release --locked --features recipe-prefill,flashinfer-prefill
+docker build -t ds4-flash-rs:tp2-prefill-20261127 .
+export DS4_FLASHINFER_PREFILL=1
+docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/tp2-prefill.yml up -d --force-recreate --no-build --wait
 ```
