@@ -18,9 +18,9 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
-| `DS4_OUTPUT_LOOKUP` | single | Draft from recent verified output when one client is decoding. Select 0 to disable or 1 to enable at all loads |
-| `DS4_C1_OUTPUT_CONSENSUS` | 1 in the selected overlay | Use repeated output structure for a lone decoder. A value of 0 restores the previous output-lookup policy. |
-| `DS4_EXTEND_REPETITION` | 1 in the selected overlay | Extend strongly supported single-client output proposals to two periods and up to 96 tokens. |
+| `DS4_OUTPUT_LOOKUP` | single | Use recent verified output for a single client. The concurrent coding overlay selects `repeated` to also draft repeated patterns from each active client’s own output. Weak concurrent matches fall back to DSpark. Select `0` to disable output lookup or `1` for unrestricted output lookup at all loads |
+| `DS4_C1_OUTPUT_CONSENSUS` | 1 in the selected overlay | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. The concurrent mode is selected independently by `DS4_OUTPUT_LOOKUP=repeated`. |
+| `DS4_EXTEND_REPETITION` | 1 in the selected overlay | Extend strongly supported repetition proposals to two periods and up to 96 tokens for a single client and for concurrent clients using `repeated`. |
 | `DS4_HEAD_ROW_TILES` | 1 in the selected overlay | Reuse vocabulary-head weights across multiple eight-row tiles during target verification. |
 | `DS4_PREFILL_MX_TILES`, `DS4_VERIFY_MX_TILES` | 4, 4 | Number of packed projection tiles per block during prompt ingestion and multi-token target verification |
 | `DS4_PARALLEL_PREFILL_ROUTER` | 1 | Select routed experts across prompt rows using the CPU worker pool |
@@ -34,7 +34,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 From the repository root on the workstation, select the released drafter with the following command. Omit the environment overrides to return to the deployed profile.
 
 ```sh
-DS4_DRAFTER=released docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml up --no-build -d --wait
+DS4_DRAFTER=released docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml up --no-build -d --wait
 ```
 
 For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`. Standalone commands also accept `--drafter code|released|none` and `--spec-k N`. Compose sets the numerical and hardware switches used in the benchmarks. [Deployment configuration](../compose.yml)

@@ -1,0 +1,5 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:concurrent-coding-20261126
+    environment:
+      DS4_OUTPUT_LOOKUP: "${DS4_OUTPUT_LOOKUP:-repeated}"

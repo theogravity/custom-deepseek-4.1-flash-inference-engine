@@ -4,7 +4,7 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 ## Benchmarks
 
-Warm requests on the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches.
+These warm workload measurements use the previous coding profile on the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches.
 
 | Coding workload | Clients | Input tokens per client | Output tokens per client | Decode tok/s | End-to-end tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -19,13 +19,13 @@ On six different follow-ups to a warm 404k-token conversation, median time to fi
 
 ### Same workloads as the vLLM reference
 
-| Concurrent clients | Published vLLM tok/s | Native tok/s | Native vs. vLLM |
-|---:|---:|---:|---:|
-| 1 | 282 | 382.5 | +35.6% |
-| 4 | 518 | 457.5 | -11.7% |
-| 6 | 557 | 502.5 | -9.8% |
+| Concurrent clients | Published vLLM tok/s | Previous native tok/s | Current native tok/s | Current vs. vLLM |
+|---:|---:|---:|---:|---:|
+| 1 | 282 | 382.5 | 383 | +35.8% |
+| 4 | 518 | 457.5 | **584** | **+12.7%** |
+| 6 | 557 | 502.5 | **583** | **+4.7%** |
 
-Rates are aggregate across the listed clients on the upstream 25.6k-token code edit. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM rates are a warm second pass on its 600 W profile.
+Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At six clients, dividing 583 by six gives about 97 tok/s per client over the longest decode interval. Individual streams finish at different times. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM figure is one warm second pass at 600 W. The concurrent coding profile lets each client draft repeated patterns from its own verified output. In the separate matched four- and six-client runs, every measured stream reproduced the control’s visible code and reasoning. [Concurrent decoding experiment](benchmarks/reports/concurrent-repetition.md) · [Original headline comparison](benchmarks/reports/headline-reference.md)
 
 | Published input tokens | Native input tokens | vLLM cold TTFT | Native cold TTFT | Native / vLLM time |
 |---:|---:|---:|---:|---:|
@@ -34,7 +34,7 @@ Rates are aggregate across the listed clients on the upstream 25.6k-token code e
 | 195,600 | 195,702 | 15.7 s | 204.77 s | 13.0× |
 | 505,214 | 505,143 | 41.6 s | 601.78 s | 14.5× |
 
-Cold time to first output (TTFT) ends at the first reasoning or visible text. The GPU power limit for the published cold-prefill runs was unrecorded. Each native row used one fresh prompt and restored zero prefix tokens. The six-client ~404k run was stopped during cold prefill. Its completion time and retrieval result are unmeasured, and the cache repeat was skipped. [Methodology and raw results](benchmarks/reports/headline-reference.md)
+The native cold-prefill rows above were measured on the previous coding profile. Cold time to first output (TTFT) ends at the first reasoning or visible text. The GPU power limit for the published cold-prefill runs was unrecorded. Each native row used one fresh prompt and restored zero prefix tokens. The six-client ~404k run was stopped during cold prefill. Its completion time and retrieval result are unmeasured, and the cache repeat was skipped. [Methodology and raw results](benchmarks/reports/headline-reference.md)
 
 ## Build and serve from a fresh clone
 
@@ -43,10 +43,10 @@ Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker
 ```sh
 hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --revision 451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae --local-dir /mnt/models/dsv41-flash-exl3
 cargo build --release --locked
-docker build -t ds4-flash-rs:agent-coding-20261126 .
+docker build -t ds4-flash-rs:concurrent-coding-20261126 .
 export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml up --no-build -d --wait
+docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml up --no-build -d --wait
 curl -fsS http://127.0.0.1:8001/health
 ```
 

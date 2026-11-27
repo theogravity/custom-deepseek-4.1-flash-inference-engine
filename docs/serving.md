@@ -2,17 +2,17 @@
 
 ## Run on this workstation
 
-The coding profile uses the locally built release image. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. The HTTP server reuses tokenized text when an agent sends the same file or tool result in a later turn. [Performance and checkpoints](../benchmarks/reports/decode-round-2.md)
+The coding profile uses the locally built release image. It drafts repeated patterns using each client’s own verified output at single- and multi-client loads and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. The HTTP server reuses tokenized text when an agent sends the same file or tool result in a later turn. [Concurrent decoding measurements](../benchmarks/reports/concurrent-repetition.md)
 
 Run these commands from the root of this checkout beside the workstation stack’s `models/` directory.
 
 ```sh
 export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml up --no-build -d --wait
 ```
 
-For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](../benchmarks/reports/agent-followups.md#build-and-rollback)
+For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build the current release](../README.md#build-and-serve-from-a-fresh-clone) · [Restore the previous coding profile](../benchmarks/reports/concurrent-repetition.md)
 
 This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. LiteLLM continues to serve clients on port 4000. The prior LFU and base LRU images have separate launch commands. [Checkpoint profiles](../benchmarks/reports/expert-cache.md#running-the-candidate-on-this-workstation)
 

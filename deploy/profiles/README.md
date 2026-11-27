@@ -4,7 +4,8 @@ Start each profile with the root [compose.yml](../../compose.yml). Add the overl
 
 | Profile | Overlays after the base | Build and measurements |
 |---|---|---|
-| Current coding release | [decode-round2.yml](decode-round2.yml), [coding.yml](coding.yml) | [Coding release](../../benchmarks/reports/agent-followups.md#build-and-rollback) |
+| Concurrent coding release | [decode-round2.yml](decode-round2.yml), [coding.yml](coding.yml), [concurrent-coding.yml](concurrent-coding.yml) | [Concurrent decoding](../../benchmarks/reports/concurrent-repetition.md) |
+| Previous coding release | [decode-round2.yml](decode-round2.yml), [coding.yml](coding.yml) | [Coding release](../../benchmarks/reports/agent-followups.md#build-and-rollback) |
 | Previous coding release with idle prefill | [decode-round2.yml](decode-round2.yml), [agentic.yml](agentic.yml) | [Tool-return latency](../../benchmarks/reports/tool-return.md#capacity-and-deployment) |
 | Decode round two | [decode-round2.yml](decode-round2.yml) | [Round two](../../benchmarks/reports/decode-round-2.md#build-and-rollback) |
 | Single-client output drafting | [c1-optimized.yml](c1-optimized.yml) | [Single-client decode](../../benchmarks/reports/single-client-decode.md#run-reproduce-or-roll-back) |

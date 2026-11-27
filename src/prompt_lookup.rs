@@ -9,6 +9,7 @@ enum OutputLookup {
     Disabled,
     SingleClient,
     Always,
+    Repeated,
 }
 
 #[derive(Clone, Default)]
@@ -16,6 +17,7 @@ pub(super) struct Config {
     max_width: usize,
     adaptive: bool,
     prior_output: OutputLookup,
+    single_consensus: bool,
     consensus: Option<Arc<DecimalTokens>>,
     extend_repetition: bool,
 }
@@ -44,13 +46,16 @@ pub(super) fn configured(tokenizer: &Tokenizer) -> Result<Config> {
         Err(std::env::VarError::NotPresent) | Ok("0") => OutputLookup::Disabled,
         Ok("single") => OutputLookup::SingleClient,
         Ok("1") => OutputLookup::Always,
-        _ => bail!("DS4_OUTPUT_LOOKUP must be 0, single or 1"),
+        Ok("repeated") => OutputLookup::Repeated,
+        _ => bail!("DS4_OUTPUT_LOOKUP must be 0, single, 1 or repeated"),
     };
-    let consensus = match std::env::var("DS4_C1_OUTPUT_CONSENSUS").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0") => None,
-        Ok("1") => Some(Arc::new(DecimalTokens::new(|s| tokenizer.token_to_id(s)))),
+    let single_consensus = match std::env::var("DS4_C1_OUTPUT_CONSENSUS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
         _ => bail!("DS4_C1_OUTPUT_CONSENSUS must be 0 or 1"),
     };
+    let consensus = (single_consensus || matches!(prior_output, OutputLookup::Repeated))
+        .then(|| Arc::new(DecimalTokens::new(|s| tokenizer.token_to_id(s))));
     let extend_repetition = match std::env::var("DS4_EXTEND_REPETITION").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("0") => false,
         Ok("1") => true,
@@ -59,6 +64,7 @@ pub(super) fn configured(tokenizer: &Tokenizer) -> Result<Config> {
     Ok(Config {
         extend_repetition,
         consensus,
+        single_consensus,
         prior_output,
         max_width: width,
         adaptive,
@@ -136,13 +142,18 @@ impl PromptLookup {
         let use_output = match self.config.prior_output {
             OutputLookup::Disabled => false,
             OutputLookup::SingleClient => single_client,
-            OutputLookup::Always => true,
+            OutputLookup::Always | OutputLookup::Repeated => true,
         };
         if length == 0 && use_output {
             let output = &ids[self.prompt_len..];
             let recent = &output[output.len().saturating_sub(2048)..];
             let (prior, matched) = prior_output_proposal(recent, width);
-            if let (true, Some(decimals)) = (single_client, &self.config.consensus) {
+            let repeated = if single_client {
+                self.config.single_consensus
+            } else {
+                matches!(self.config.prior_output, OutputLookup::Repeated)
+            };
+            if let (true, Some(decimals)) = (repeated, &self.config.consensus) {
                 let proposed =
                     repeating_output(recent, width, decimals, self.config.extend_repetition);
                 if !proposed.is_empty() && (matched < 16 || proposed.len() >= prior.len()) {
@@ -305,6 +316,7 @@ mod tests {
             max_width: 128,
             adaptive,
             prior_output: OutputLookup::Disabled,
+            single_consensus: false,
             consensus: None,
             extend_repetition: false,
         }
@@ -364,6 +376,7 @@ mod tests {
             &prompt,
             Config {
                 prior_output: OutputLookup::SingleClient,
+                single_consensus: true,
                 consensus: Some(Arc::new(DecimalTokens::default())),
                 ..config(true)
             },
@@ -379,6 +392,37 @@ mod tests {
         let mut disagreement = output;
         disagreement[12 + 2] = 800;
         assert!(repeating_output(&disagreement, 48, &decimals, false).is_empty());
+    }
+
+    #[test]
+    fn concurrent_repetition_preserves_single_client_policy_and_learned_fallback() {
+        let prompt = [9090; 8];
+        let lookup = PromptLookup::new(
+            &prompt,
+            Config {
+                prior_output: OutputLookup::Repeated,
+                consensus: Some(Arc::new(DecimalTokens::default())),
+                ..config(true)
+            },
+        );
+        let block = |v| vec![20, 21, 22, 23, 24, 25, v, v, 7, 8, 9, 10];
+        let repeated = history(&prompt, &[block(70), block(71), block(72)].concat());
+        assert_eq!(
+            lookup.propose(&repeated, 48, true, false),
+            [20, 21, 22, 23, 24, 25]
+        );
+        assert!(lookup.propose(&repeated, 48, true, true).is_empty());
+        for matched in [8, 20] {
+            let suffix: Vec<_> = (100..100 + matched).collect();
+            let tail = [81, 82, 83, 84];
+            let ids = history(&prompt, &[suffix.as_slice(), &tail, &suffix].concat());
+            if matched == 8 {
+                assert!(lookup.propose(&ids, 4, true, false).is_empty());
+                assert_eq!(lookup.propose(&ids, 4, false, false), tail);
+            } else {
+                assert_eq!(lookup.propose(&ids, 4, true, false), tail);
+            }
+        }
     }
 
     #[test]
@@ -442,6 +486,7 @@ mod tests {
         let prompt = [9090; 12];
         let mut cfg = config(true);
         cfg.prior_output = OutputLookup::Always;
+        cfg.single_consensus = true;
         cfg.consensus = Some(Arc::new(DecimalTokens::default()));
         let lookup = PromptLookup::new(&prompt, cfg);
         for size in [8, 16] {
@@ -503,6 +548,7 @@ mod tests {
                 max_width: 9,
                 adaptive: true,
                 prior_output: OutputLookup::Disabled,
+                single_consensus: false,
                 consensus: None,
                 extend_repetition: false,
             },
