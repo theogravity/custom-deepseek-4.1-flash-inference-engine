@@ -2,6 +2,7 @@ services:
   dsv41-flash-exl3:
     image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-prefill-20261127}
     environment:
+      DS4_PREFILL_ROUTER_BOUNDS: "${DS4_PREFILL_ROUTER_BOUNDS:-0}"
       DS4_ENGRAM_RANDOM_READ: "${DS4_ENGRAM_RANDOM_READ:-0}"
       DS4_TP_DENSE: "1"
       DS4_TP2_PREFILL: "1"

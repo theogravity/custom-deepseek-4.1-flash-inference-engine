@@ -652,12 +652,58 @@ struct Route {
     weight: f32,
 }
 
+// The upper 16 bits bound each finite logit between two adjacent BF16
+// values. log1p(exp(-abs(x))) is at most ln(2) and at most exp(-abs(x)).
+// Deliberately loose upper bounds let most experts skip both transcendental
+// operations. Candidates that can still win use the original scalar formula.
+fn router_upper_scores() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=u16::MAX)
+            .map(|prefix| {
+                let start = f32::from_bits(u32::from(prefix) << 16);
+                let end = f32::from_bits((u32::from(prefix) << 16) | 65535);
+                if !start.is_finite() || !end.is_finite() {
+                    return f32::INFINITY;
+                }
+                let near = start.abs().min(end.abs());
+                let tail = if near >= 8.0 {
+                    0.001
+                } else if near >= 4.0 {
+                    0.02
+                } else if near >= 2.0 {
+                    0.14
+                } else if near >= 1.0 {
+                    0.37
+                } else {
+                    0.70
+                };
+                (start.max(end).max(0.0) + tail).sqrt().next_up()
+            })
+            .collect()
+    })
+}
+
 fn routes<const E: usize, const K: usize>(
     logits: &[f32],
     bias: &[f32],
     batch: usize,
     parallel: bool,
 ) -> Result<Vec<Route>> {
+    let prune = parallel
+        && batch >= 128
+        && std::env::var_os("DS4_PREFILL_ROUTER_BOUNDS").is_some_and(|v| v == "1");
+    route_rows::<E, K>(logits, bias, batch, parallel, prune)
+}
+
+fn route_rows<const E: usize, const K: usize>(
+    logits: &[f32],
+    bias: &[f32],
+    batch: usize,
+    parallel: bool,
+    prune: bool,
+) -> Result<Vec<Route>> {
+    let bounds = prune.then(router_upper_scores);
     ensure!(
         logits.len() == batch * E && bias.len() == E,
         "router shape mismatch"
@@ -666,6 +712,12 @@ fn routes<const E: usize, const K: usize>(
     let assign = |(token, (scores, dest)): (usize, (&[f32; E], &mut [Route; K]))| {
         let mut top = [(f32::NEG_INFINITY, 0.0, 0); K];
         for (expert, &logit) in scores.iter().enumerate() {
+            if let Some(table) = bounds {
+                let upper = table[(logit.to_bits() >> 16) as usize];
+                if upper + bias[expert] <= top[K - 1].0 {
+                    continue;
+                }
+            }
             let score = (logit.max(0.0) + (-logit.abs()).exp().ln_1p()).sqrt();
             let corrected = score + bias[expert];
             if corrected > top[K - 1].0 {
@@ -1483,6 +1535,37 @@ mod tests {
         assert_eq!(
             serial,
             routes::<EXPERTS, TOP_K>(&logits, &bias, rows, true).unwrap()
+        );
+    }
+
+    #[test]
+    fn wide_router_upper_bounds_preserve_every_expert_and_weight() {
+        let table = router_upper_scores();
+        for prefix in 0..=u16::MAX {
+            for tail in [0, 1, 127, 0x4000, 0x8000, 0xfffe, 0xffff] {
+                let x = f32::from_bits((u32::from(prefix) << 16) | tail);
+                if x.is_finite() {
+                    let score = (x.max(0.) + (-x.abs()).exp().ln_1p()).sqrt();
+                    assert!(score <= table[prefix as usize], "bound failed at {x}");
+                }
+            }
+        }
+        let mut seed = 19_u32;
+        let input: Vec<_> = (0..EXPERTS * 257)
+            .map(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                if i % 13 == 0 {
+                    0.
+                } else {
+                    (seed as i32 as f32) / 178329821.
+                }
+            })
+            .collect();
+        let bias: Vec<_> = (0..EXPERTS).map(|i| (i % 23) as f32 / 31. - 0.3).collect();
+        let reference = route_rows::<EXPERTS, TOP_K>(&input, &bias, 257, false, false).unwrap();
+        assert_eq!(
+            reference,
+            route_rows::<EXPERTS, TOP_K>(&input, &bias, 257, true, true).unwrap()
         );
     }
 
