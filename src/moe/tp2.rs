@@ -86,7 +86,7 @@ fn preload_rank(
 ) -> Result<usize> {
     cuda(unsafe { cudaSetDevice(cache.device) })?;
     let result = (|| {
-        let capacity = cache.limit * SLOT_BYTES / RANK_SLOT_BYTES;
+        let capacity = cache.limit_bytes / RANK_SLOT_BYTES;
         let mut loaded = 0;
         for layer in 0..layers {
             for expert in 0..EXPERTS {
@@ -515,14 +515,23 @@ mod tests {
         )?;
         for device in [0, 1] {
             let cache = rt.moe_cache.device(device)?;
-            cache.limit = if device == 0 { 2 } else { 1 };
+            cache.limit_bytes = if device == 0 {
+                2 * SLOT_BYTES
+            } else {
+                RANK_SLOT_BYTES - 1
+            };
             cache.frequencies = Some(vec![0; EXPERT_KEYS].into_boxed_slice());
             cache.stage_rank_weights = true;
         }
         rt.layer(20)?;
         let mut active = -1;
-        let loaded = preload_encoder(&mut rt, [0, 1], 20)?;
-        assert_eq!(loaded, [3, 1]);
+        // The peer can still route on demand with the one-slot minimum, but
+        // its configured budget cannot hold any unsolicited rank weights.
+        assert_eq!(preload_encoder(&mut rt, [0, 1], 20)?, [3, 0]);
+        assert_eq!(rt.moe_cache.device(1)?.capacity(RANK_SLOT_BYTES)?, 1);
+        rt.moe_cache.device(1)?.limit_bytes = RANK_SLOT_BYTES;
+        assert_eq!(preload_encoder(&mut rt, [0, 1], 20)?, [0, 1]);
+        let loaded = [3, 1];
         cuda(unsafe { cudaGetDevice(&mut active) })?;
         assert_eq!(active, 1);
         for (rank, count) in loaded.into_iter().enumerate() {
@@ -621,7 +630,12 @@ mod tests {
         }
         assert_eq!(RANK_SLOT_BYTES, unsafe { ds_recipe_rank_slot_bytes() });
         assert_eq!(
-            DeviceCache::available_slots(2 * SLOT_BYTES, 512 << 20, 2, RANK_SLOT_BYTES),
+            DeviceCache::available_slots(
+                2 * SLOT_BYTES,
+                512 << 20,
+                2 * SLOT_BYTES,
+                RANK_SLOT_BYTES
+            ),
             3
         );
     }
@@ -783,7 +797,7 @@ mod tests {
                 let c = rt.moe_cache.device(d)?;
                 c.tp2_prefill = true;
                 c.stage_rank_weights = true;
-                c.limit = 2; // three rank slots; more than six selected experts.
+                c.limit_bytes = 2 * SLOT_BYTES; // three rank slots; more than six selected experts.
             }
             assert!(input.iter().any(|&v| half::f16::from_f32(v).to_f32() != v));
             for (direct, packed) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -822,10 +836,7 @@ mod tests {
                             && f == SlotFormat::Rank(rank)),
                     "missing rank {rank} slots"
                 );
-                ensure!(
-                    c.resident_bytes <= c.limit * SLOT_BYTES,
-                    "slot budget exceeded"
-                );
+                ensure!(c.resident_bytes <= c.limit_bytes, "slot budget exceeded");
             }
             // A verification call with the switch still on must use full experts.
             rt.target_prefill = false;

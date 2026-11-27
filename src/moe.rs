@@ -369,7 +369,7 @@ impl Drop for PeerWork {
 struct DeviceCache {
     idle_pool: Option<IdlePool>,
     device: i32,
-    limit: usize,
+    limit_bytes: usize,
     slots: HashMap<Key, (usize, u64)>,
     resident_bytes: usize,
     eviction_order: BTreeSet<(u64, u64, Key)>,
@@ -413,7 +413,10 @@ impl DeviceCache {
             .parse()
             .context("DS4_MOE_CACHE_GIB must be a number")?;
         ensure!(gib.is_finite() && gib >= 0.0, "invalid DS4_MOE_CACHE_GIB");
-        let limit = (((gib * 1073741824.0) as usize) / SLOT_BYTES).max(1);
+        let configured = (gib * 1073741824.0) as usize;
+        // Keep the existing whole-expert budget above one full slot. A smaller
+        // explicit byte limit can forbid even one unsolicited rank upload.
+        let limit_bytes = configured.min((configured / SLOT_BYTES).max(1) * SLOT_BYTES);
         let recipe_prefill = recipe_prefill_enabled()?;
         Ok(Self {
             idle_pool: None,
@@ -431,7 +434,7 @@ impl DeviceCache {
             #[cfg(feature = "recipe-prefill")]
             rank_workspace: tp2::Workspace::default(),
             device,
-            limit,
+            limit_bytes,
             slots: HashMap::new(),
             resident_bytes: 0,
             eviction_order: BTreeSet::new(),
@@ -482,11 +485,11 @@ impl DeviceCache {
     fn available_slots(
         resident_bytes: usize,
         free: usize,
-        limit: usize,
+        limit_bytes: usize,
         slot_bytes: usize,
     ) -> usize {
         let available = (resident_bytes + free).saturating_sub(EXPERT_HEADROOM);
-        (available.min(limit * SLOT_BYTES) / slot_bytes).max(1)
+        (available.min(limit_bytes) / slot_bytes).max(1)
     }
 
     fn capacity(&mut self, slot_bytes: usize) -> Result<usize> {
@@ -495,7 +498,8 @@ impl DeviceCache {
         free = reclaim_rank_headroom(self.device, self.idle_pool.as_ref(), free, slot_bytes)?;
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
-        let capacity = Self::available_slots(self.resident_bytes, free, self.limit, slot_bytes);
+        let capacity =
+            Self::available_slots(self.resident_bytes, free, self.limit_bytes, slot_bytes);
         while self.resident_bytes > capacity * slot_bytes {
             let (slot, _) = self.evict_slot(u64::MAX)?;
             unsafe { ds_moe_free(self.device, slot as *mut c_void) };
@@ -1247,15 +1251,20 @@ mod tests {
     #[test]
     fn cache_capacity_reclaims_headroom_and_honors_the_user_limit() {
         assert_eq!(
-            DeviceCache::available_slots(5 * SLOT_BYTES, 512 << 20, 10, SLOT_BYTES),
+            DeviceCache::available_slots(5 * SLOT_BYTES, 512 << 20, 10 * SLOT_BYTES, SLOT_BYTES),
             5
         );
         assert_eq!(
-            DeviceCache::available_slots(5 * SLOT_BYTES, (512 << 20) - SLOT_BYTES, 10, SLOT_BYTES),
+            DeviceCache::available_slots(
+                5 * SLOT_BYTES,
+                (512 << 20) - SLOT_BYTES,
+                10 * SLOT_BYTES,
+                SLOT_BYTES
+            ),
             4
         );
         assert_eq!(
-            DeviceCache::available_slots(5 * SLOT_BYTES, 8192 << 20, 10, SLOT_BYTES),
+            DeviceCache::available_slots(5 * SLOT_BYTES, 8192 << 20, 10 * SLOT_BYTES, SLOT_BYTES),
             10
         );
         assert_eq!(DeviceCache::available_slots(0, 0, 10, SLOT_BYTES), 1);
@@ -1491,9 +1500,9 @@ mod tests {
                 cache.parallel_draft = true;
                 cache.staged = staged;
                 cache.fused = true;
-                cache.limit = 2; // force slot reuse while remote kernels hold the old data
+                cache.limit_bytes = 2 * SLOT_BYTES; // force slot reuse while remote kernels hold the old data
                 let peer = rt.peer_device();
-                rt.moe_cache.device(peer)?.limit = 2;
+                rt.moe_cache.device(peer)?.limit_bytes = 2 * SLOT_BYTES;
                 for (index, x) in [&xs[0], &xs[1], &xs[1]].into_iter().enumerate() {
                     let batch = x.len() / HIDDEN;
                     let y = match layer {
