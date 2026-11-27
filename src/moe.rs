@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    runtime::{Dev, Runtime},
+    runtime::{Dev, Pool, Runtime},
     weights::Weights,
 };
 
@@ -125,9 +125,34 @@ fn cuda(code: i32) -> Result<()> {
     Ok(())
 }
 
+type IdlePool = std::sync::Weak<std::sync::Mutex<Pool>>;
+pub(crate) fn reclaim_rank_headroom(
+    device: i32,
+    pool: Option<&IdlePool>,
+    free: usize,
+    slot: usize,
+) -> Result<usize> {
+    let missing = ((512usize << 20) + slot).saturating_sub(free);
+    if missing > 0 {
+        if let Some(pool) = pool.and_then(|p| p.upgrade()) {
+            if pool
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reclaim(missing)
+                > 0
+            {
+                let mut measured = 0;
+                cuda(unsafe { ds_moe_free_bytes(device, &mut measured) })?;
+                return Ok(measured);
+            }
+        }
+    }
+    Ok(free)
+}
+
 #[derive(Default)]
 pub struct MoeCache {
-    pub(crate) reclaimable: HashMap<i32, std::sync::Weak<std::sync::Mutex<crate::runtime::Pool>>>,
+    pub(crate) reclaimable: HashMap<i32, IdlePool>,
     devices: HashMap<i32, DeviceCache>,
     metrics: Metrics,
 }
@@ -144,7 +169,11 @@ impl MoeCache {
     fn device(&mut self, device: i32) -> Result<&mut DeviceCache> {
         Ok(match self.devices.entry(device) {
             std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
-            std::collections::hash_map::Entry::Vacant(v) => v.insert(DeviceCache::new(device)?),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let mut cache = DeviceCache::new(device)?;
+                cache.idle_pool = self.reclaimable.get(&device).cloned();
+                v.insert(cache)
+            }
         })
     }
     /// Make room before an uncached dense projection uploads its resident
@@ -303,6 +332,7 @@ impl Drop for PeerWork {
 }
 
 struct DeviceCache {
+    idle_pool: Option<IdlePool>,
     device: i32,
     limit: usize,
     slots: HashMap<Key, (usize, u64)>,
@@ -351,6 +381,7 @@ impl DeviceCache {
         let limit = (((gib * 1073741824.0) as usize) / SLOT_BYTES).max(1);
         let recipe_prefill = recipe_prefill_enabled()?;
         Ok(Self {
+            idle_pool: None,
             recipe_prefill,
             #[cfg(feature = "recipe-prefill")]
             tp2_prefill: tp2_prefill_enabled()?,
@@ -429,6 +460,7 @@ impl DeviceCache {
     fn capacity(&mut self, slot_bytes: usize) -> Result<usize> {
         let mut free = 0;
         cuda(unsafe { ds_moe_free_bytes(self.device, &mut free) })?;
+        free = reclaim_rank_headroom(self.device, self.idle_pool.as_ref(), free, slot_bytes)?;
         // Leave room for scratch, dense projections and the CUDA context. If
         // another allocation consumes the reserve, later groups shrink again.
         let capacity = Self::available_slots(self.resident_bytes, free, self.limit, slot_bytes);

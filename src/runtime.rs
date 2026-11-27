@@ -126,6 +126,19 @@ pub(crate) struct Pool {
     idle: Vec<Allocation>,
     elements: usize,
 }
+fn transient_pool_limit(value: Result<String, std::env::VarError>) -> Result<usize> {
+    let mib = match value {
+        Ok(v) => v
+            .parse::<usize>()
+            .context("invalid DS4_TRANSIENT_POOL_MIB")?,
+        Err(std::env::VarError::NotPresent) => 256,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(mib
+        .checked_mul(1 << 20)
+        .context("transient pool byte limit overflow")?
+        / size_of::<f32>())
+}
 impl Pool {
     pub(crate) fn reclaim(&mut self, bytes: usize) -> usize {
         let mut reclaimed = 0;
@@ -238,13 +251,7 @@ impl Runtime {
                 _ => anyhow::bail!("{name} must be 1, 2 or 4"),
             }
         };
-        let pool_mib = std::env::var("DS4_TRANSIENT_POOL_MIB")
-            .unwrap_or_else(|_| "256".into())
-            .parse::<usize>()
-            .context("invalid DS4_TRANSIENT_POOL_MIB")?;
-        let limit = pool_mib
-            .checked_mul(1 << 18)
-            .context("transient pool limit overflow")?;
+        let limit = transient_pool_limit(std::env::var("DS4_TRANSIENT_POOL_MIB"))?;
         let pools: HashMap<_, _> = devices
             .into_iter()
             .map(|d| {
@@ -258,7 +265,7 @@ impl Runtime {
             })
             .collect();
         let mut moe_cache = MoeCache::default();
-        if pool_mib > 256 {
+        if limit > (64 << 20) {
             for (&dev, pool) in &pools {
                 moe_cache.reclaimable.insert(dev, Arc::downgrade(pool));
             }
@@ -793,6 +800,63 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
 
+    #[test]
+    fn validates_transient_limit_in_bytes() {
+        use std::env::VarError;
+        assert_eq!(
+            transient_pool_limit(Err(VarError::NotPresent)).unwrap(),
+            64 << 20
+        );
+        assert_eq!(transient_pool_limit(Ok("0".into())).unwrap(), 0);
+        assert!(transient_pool_limit(Ok("invalid".into())).is_err());
+        assert!(transient_pool_limit(Ok((usize::MAX / (1 << 20) + 1).to_string())).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert!(
+                transient_pool_limit(Err(VarError::NotUnicode(std::ffi::OsString::from_vec(
+                    vec![0xff]
+                ))))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE"]
+    fn rank_headroom_reclaims_idle_device_allocations() -> Result<()> {
+        let dev = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let pool = Arc::new(Mutex::new(Pool {
+            limit: 1024 << 18,
+            ..Pool::default()
+        }));
+        for _ in 0..2 {
+            let mut ptr = ptr::null_mut();
+            let n = 2 << 20;
+            checked(unsafe { ds_alloc_f32(dev, &mut ptr, n) })?;
+            drop(Dev {
+                allocation: Some(Allocation {
+                    device: dev,
+                    ptr,
+                    capacity: n,
+                }),
+                pool: pool.clone(),
+                len: n,
+            });
+        }
+        assert_eq!(pool.lock().unwrap().elements, 4 << 20);
+        // Exercise the pressure path with an injected free-byte reading, keeping
+        // the rest of the workstation available to its other GPU clients.
+        let available = crate::moe::reclaim_rank_headroom(
+            dev,
+            Some(&Arc::downgrade(&pool)),
+            510 << 20,
+            8 << 20,
+        )?;
+        assert!(available > 10 << 20);
+        assert_eq!(pool.lock().unwrap().elements, 0);
+        Ok(())
+    }
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an inference GPU"]
     fn failed_request_allocation_leaves_next_cuda_launch_clean() -> Result<()> {
