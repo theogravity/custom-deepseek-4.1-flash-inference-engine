@@ -4,7 +4,7 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 ## Benchmarks
 
-These warm workload measurements use the previous coding profile on the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches.
+These warm workload measurements use the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches. The recommended TP2 profile now enables the measured decode and coding improvements by default while retaining the 68 GiB MoE cache and 524k context.
 
 | Coding workload | Clients | Input tokens per client | Output tokens per client | Decode tok/s | End-to-end tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -27,6 +27,19 @@ On six different follow-ups to a warm 404k-token conversation, median time to fi
 
 Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At six clients, dividing 583 by six gives about 97 tok/s per client over the longest decode interval. Individual streams finish at different times. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM figure is one warm second pass at 600 W. The concurrent coding profile lets each client draft repeated patterns from its own verified output. In the separate matched four- and six-client runs, every measured stream reproduced the control’s visible code and reasoning. [Concurrent decoding experiment](benchmarks/reports/concurrent-repetition.md) · [Original headline comparison](benchmarks/reports/headline-reference.md)
 
+### C1 code-edit comparison on the current TP2 peer-index build
+
+This additional one-client run uses the same 25,625-token upstream Python edit and 1,500-token completion. Both GPUs were capped at 375 W and the CPU package cap read 225 W. Each arm used one warm-up and six measured waves; the table shows median decode rate and median time to first output. The C1 candidate added LFU expert eviction, batched top-k and output consensus to the native TP2 peer-index baseline. The local vLLM figure is the same-host reference. Native code-edit output was validated for the requested function; output identity across engines was not assessed.
+
+| Engine/profile | Median decode tok/s | Median first output |
+|---|---:|---:|
+| Native TP2 peer-index baseline | 125.5 | 4.33 s |
+| Native TP2 peer-index + C1 decode candidate | **314.0** | 1.88 s |
+| Native recommended TP2 profile, all defaults enabled | **323.9** | 1.96 s |
+| Local vLLM reference | 265.0 | **0.20 s** |
+
+The two C1-only rows use six measured waves; the combined recommended profile row is a deployment smoke with only two measured waves, so treat its rate as provisional. The C1-only candidate is 18.5% faster than this local vLLM reference in decode, while vLLM still has lower first-output latency. The recommended profile now enables the positive decode and coding experiments by default; the C1-only candidate predates enabling repeated-output drafting, extended repetition, head-row tiles and the agent text cache together. Peer-index improved the isolated index stage; its request-level impact is not established. [Run details and sources](benchmarks/results/upstream/c1-code-edit-peer-index-20261127-summary.json)
+
 ### Cold first output on the same workstation
 
 Single-client time to first streamed reasoning or visible output with the released five-proposal DSpark drafter. Each engine received the same rendered inputs, a separate 11k warm-up and zero reused tokens. Both GPUs were capped at 375 W. Each entry is one request.
@@ -42,7 +55,7 @@ The two wide-step columns use the same build through 195,803 tokens. ¹The 505k 
 
 ### TP2 prompt-index split stage microbenchmark
 
-The experimental peer-index path was tested with 512 prompt queries and resident key mirrors on the two RTX PRO 6000 GPUs. These are **index-stage** times, not request-level TTFT; the feature remains off by default (`DS4_TP2_INDEX=0`).
+The peer-index path was tested with 512 prompt queries and resident key mirrors on the two RTX PRO 6000 GPUs. These are **index-stage** times, not request-level TTFT. It is enabled in the recommended TP2 profile (`DS4_TP2_INDEX=1`); set it to `0` to disable it if a workload regresses.
 
 | Indexed positions | Owner, index MMA | TP2 index MMA | Speedup | Owner, batched MQA | TP2 batched MQA | Speedup |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -50,9 +63,9 @@ The experimental peer-index path was tested with 512 prompt queries and resident
 | 131,072 | 4.298 ms | 2.295 ms | 1.87× | 3.923 ms | 2.106 ms | 1.86× |
 | 252,500 | 8.624 ms | 4.496 ms | 1.92× | 7.958 ms | 4.186 ms | 1.90× |
 
-Both scoring modes returned matching ordered IDs on both GPUs. The peer stream lifetime passed Compute Sanitizer with zero memory errors. The request-level gain has not been established, so the stable service profile does not enable this experiment. [Test procedure](docs/testing.md#two-gpu-prompt-index-search)
+Both scoring modes returned matching ordered IDs on both GPUs. The peer stream lifetime passed Compute Sanitizer with zero memory errors. The recommended profile enables peer-index because the isolated stage benchmark was faster, while the request-level gain remains unmeasured and should be tracked in workload benchmarks. [Test procedure](docs/testing.md#two-gpu-prompt-index-search)
 
-In a separate mixed coding run, switching from 8k to 16k cut first output for an arriving 68k code review from 45.23 to 41.50 seconds. The existing Rust generation’s longest overlapping gap between stream events increased from 12.84 to 14.89 seconds. This tradeoff and the spread between cold runs are why the experimental profile defaults to 8k. [Agent timings and repeat measurements](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint)
+In a separate mixed coding run, switching from 8k to 16k cut first output for an arriving 68k code review from 45.23 to 41.50 seconds. The existing Rust generation’s longest overlapping gap between stream events increased from 12.84 to 14.89 seconds. This tradeoff and the spread between cold runs are why the recommended profile defaults to 8k. [Agent timings and repeat measurements](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint)
 
 ## Build and serve from a fresh clone
 
@@ -61,10 +74,10 @@ Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker
 ```sh
 hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --revision 451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae --local-dir /mnt/models/dsv41-flash-exl3
 cargo build --release --locked
-docker build -t ds4-flash-rs:concurrent-coding-20261126 .
+docker build -t ds4-flash-rs:tp2-peer-index-20261127 .
 export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml up --no-build -d --wait
+docker compose -f compose.yml -f deploy/profiles/tp2-prefill.yml up --no-build -d --wait
 curl -fsS http://127.0.0.1:8001/health
 ```
 

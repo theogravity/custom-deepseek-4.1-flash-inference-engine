@@ -4,6 +4,7 @@ Start each profile with the root [compose.yml](../../compose.yml). Add the overl
 
 | Profile | Overlays after the base | Build and measurements |
 |---|---|---|
+| **Recommended TP2 coding profile** | [tp2-prefill.yml](tp2-prefill.yml) | Enables measured decode/coding improvements and peer-index split; 68 GiB MoE cache, 524k context. [Code-edit comparison](../../benchmarks/results/upstream/c1-code-edit-peer-index-20261127-summary.json) |
 | Concurrent coding with deferred cold prefill | Same three concurrent coding overlays, then [cold-prefill.yml](cold-prefill.yml) | [Cold-prefill experiment and build](../../benchmarks/reports/cold-prefill-optimization.md#build-and-activate) |
 | Concurrent coding release | [decode-round2.yml](decode-round2.yml), [coding.yml](coding.yml), [concurrent-coding.yml](concurrent-coding.yml) | [Concurrent decoding](../../benchmarks/reports/concurrent-repetition.md) |
 | Previous coding release | [decode-round2.yml](decode-round2.yml), [coding.yml](coding.yml) | [Coding release](../../benchmarks/reports/agent-followups.md#build-and-rollback) |

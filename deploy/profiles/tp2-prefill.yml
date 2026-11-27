@@ -1,6 +1,6 @@
 services:
   dsv41-flash-exl3:
-    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-prefill-20261127}
+    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-peer-index-20261127}
     environment:
       DS4_MOE_CACHE_GIB: "${DS4_MOE_CACHE_GIB:-68}"
       DS4_PREFILL_GPU_POOL_PAIRS: "${DS4_PREFILL_GPU_POOL_PAIRS:-1}"
@@ -23,4 +23,15 @@ services:
       DS4_TP_DENSE_BF16_WIRE: "${DS4_TP_DENSE_BF16_WIRE:-1}"
       DS4_PREFILL_INDEX_FP8: "${DS4_PREFILL_INDEX_FP8:-1}"
       DS4_PREFILL_DECODER_PRUNE: "${DS4_PREFILL_DECODER_PRUNE:-1}"
+      # Decode/coding experiments with measured gains, promoted from overlays.
+      DS4_EXPERT_EVICTION: "${DS4_EXPERT_EVICTION:-lfu}"
+      DS4_BATCH_TOPK: "${DS4_BATCH_TOPK:-1}"
+      DS4_C1_OUTPUT_CONSENSUS: "${DS4_C1_OUTPUT_CONSENSUS:-1}"
+      DS4_EXTEND_REPETITION: "${DS4_EXTEND_REPETITION:-1}"
+      DS4_HEAD_ROW_TILES: "${DS4_HEAD_ROW_TILES:-1}"
+      DS4_OUTPUT_LOOKUP: "${DS4_OUTPUT_LOOKUP:-repeated}"
+      DS4_AGENT_TEXT_CACHE: "${DS4_AGENT_TEXT_CACHE:-1}"
+      DS4_IDLE_TOOL_PREFILL_MAX_TOKENS: "${DS4_IDLE_TOOL_PREFILL_MAX_TOKENS:-32768}"
+      # Peer-index improves the measured TP2 index stage; callers can disable it if needed.
+      DS4_TP2_INDEX: "${DS4_TP2_INDEX:-1}"
     command: ["serve", "--bind", "0.0.0.0:8001", "--max-context", "524288", "--chunk-size", "${DS4_PREFILL_CHUNK:-8192}"]

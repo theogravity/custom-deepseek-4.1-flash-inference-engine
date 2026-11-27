@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-27",
+  "workload": "upstream Python code-edit scaling request, one client, 25,625 prompt tokens, 1,500 completion tokens; first requested function checked",
+  "hardware": "2x NVIDIA RTX PRO 6000 Blackwell at 375 W each; CPU package power cap read 225 W",
+  "method": "one warm-up plus six measured waves; rates are median aggregate output tok/s; cold initial model startup excluded",
+  "results": [
+    {
+      "engine": "native TP2 peer-index baseline",
+      "median_decode_tok_s": 125.5,
+      "median_first_output_s": 4.33,
+      "source": "c1-code-edit-peer-index-20261127-native.jsonl",
+      "profile": "TP2 prefill + peer-index; no candidate C1 overlay"
+    },
+    {
+      "engine": "native TP2 peer-index with C1 decode candidate",
+      "median_decode_tok_s": 314.0,
+      "median_first_output_s": 1.88,
+      "source": "c1-code-edit-peer-index-20261127-c1-profile.jsonl",
+      "profile": "LFU expert eviction, batched top-k, C1 output consensus"
+    },
+    {
+      "engine": "local vLLM reference",
+      "median_decode_tok_s": 265.0,
+      "median_first_output_s": 0.2,
+      "source": "console output captured during benchmark; six measured rates 222.0272, 255.8041, 261.4655, 270.7235, 268.5705, 281.4068",
+      "profile": "same host and power caps; vLLM image/settings as configured locally"
+    },
+    {
+      "engine": "native recommended TP2 profile (combined defaults smoke)",
+      "median_decode_tok_s": 323.9,
+      "median_first_output_s": 1.96,
+      "source": "c1-code-edit-peer-index-20261127-default-profile-smoke.jsonl",
+      "profile": "full recommended profile; only two measured waves after one warm-up; smoke result, not a six-wave qualification"
+    }
+  ],
+  "comparability": "The native C1 candidate is 18.5% above this local vLLM median for decode, but its median first output remains slower. The native candidate C1 profile did not include the later-promoted repeated-output, extended-repetition, head-row-tile or agent text-cache settings. Cross-engine outputs are not asserted identical; function presence was checked. The peer-index microbenchmark is index-stage evidence only, not a measured request-level TTFT gain. The combined-default smoke produced 323.9 tok/s median over only two measured waves; treat it as a deployment check, not a stable comparison."
+}
