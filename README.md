@@ -4,19 +4,19 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 The native benchmarks cover code generation at 404k context and six independent full windows at 375 W. The published edit benchmark has also been replayed at both power limits. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Published comparison](UPSTREAM-COMPARISON.md)
 
-For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md)
+For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md) · [Tool-return latency](TOOL-RETURN.md)
 
 ## Run on this workstation
 
-The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. [Performance and checkpoints](DECODE-ROUND2.md)
+The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. [Performance and checkpoints](DECODE-ROUND2.md)
 
 ```sh
 cd ~/llm/ds4-flash-rs
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.agentic.yml up --no-build -d --wait
 ```
 
-For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](DECODE-ROUND2.md#build-and-rollback)
+For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](TOOL-RETURN.md#capacity-and-deployment)
 
 This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. LiteLLM continues to serve clients on port 4000. The prior LFU and base LRU images have separate launch commands. [Checkpoint profiles](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation)
 

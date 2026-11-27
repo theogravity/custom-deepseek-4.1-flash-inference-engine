@@ -85,3 +85,7 @@ Wide attention ranking and warp-shared expert weights produced sub-percent singl
 ## Second decode round at 375 W, 2026-11-26
 
 Longer repetition proposals and vocabulary-head row tiling reached 386.7 tok/s on the deployed single-client edit. The Markov shortlist made the draft scan faster but reduced accepted tokens per verification round. Six concurrent 404k coding sessions reached 282.7 tok/s aggregate with the wider head. [Measured controls, qualifications and three checkpoints](DECODE-ROUND2.md)
+
+## Returning from Pi tools at 375 W, 2026-11-26
+
+Preparing canonical history on idle GPUs reduced the wait after a simulated two-second tool from 4.17–4.22 s to 2.67 s. With six seconds available it fell to 0.097 s. Immediate replies took 4.18 s. All 54 captured-response replays matched. [Experiment, full-window checks and deployment](TOOL-RETURN.md)

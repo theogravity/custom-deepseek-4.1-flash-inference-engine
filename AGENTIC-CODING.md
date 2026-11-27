@@ -24,7 +24,7 @@ For completed streams, the public-test timing bounds use the first passing test 
 
 In the first control's third launch, the final parser passed the public tests at 85.4–86.7 seconds. Pi then issued two more model calls before its final request. That last request generated the full 64,000 tokens in 104.2 seconds. The final tree passed the held-out tests, and Pi reported the output limit.
 
-On the deployed engine's clean run, one turn generated 11,421 tokens before the next tool result came back. That next model call took 12.0 seconds to deliver its first event. Across eight calls the engine reused 80,128 of 104,164 input tokens. The engine currently stores prefix checkpoints during input processing. Checking how much of the generated assistant turn survives reformatting when the next tool result is appended would quantify how much more could be reused. [Prefix checkpoint implementation](src/model.rs)
+On the deployed engine's clean run, one turn generated 11,421 tokens before the next tool result came back. That next model call took 12.0 seconds to deliver its first event. Across eight calls the engine reused 80,128 of 104,164 input tokens. That profile stored prefix checkpoints during input processing. A follow-up captured another complete Pi tool exchange and measured the effect of preparing its generated history while the tool was running. [Tool-return latency](TOOL-RETURN.md)
 
 ## Pi reasoning effort
 

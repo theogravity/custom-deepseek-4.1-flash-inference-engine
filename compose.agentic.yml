@@ -1,0 +1,5 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:agentic-idle-20261126
+    environment:
+      DS4_IDLE_TOOL_PREFILL_MAX_TOKENS: "${DS4_IDLE_TOOL_PREFILL_MAX_TOKENS:-32768}"
