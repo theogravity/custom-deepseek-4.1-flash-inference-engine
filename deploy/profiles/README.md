@@ -1,6 +1,6 @@
 # Compose profiles
 
-Start each profile with the root [compose.yml](../../compose.yml). Add the overlays below with `-f` in the order shown. The last overlay selects the image. Each report identifies the source for rebuilding that image.
+The root [compose.yml](../../compose.yml) now enables the measured recommended TP2 coding defaults directly. Use it on its own for a local build, or add one of the overlays below with `-f` to reproduce an earlier or experimental image/configuration. The recommended profile overlay selects the pinned checkpoint image used for published benchmark results.
 
 | Profile | Overlays after the base | Build and measurements |
 |---|---|---|

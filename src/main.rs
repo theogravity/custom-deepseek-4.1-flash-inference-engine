@@ -24,7 +24,12 @@ use tokenizers::Tokenizer;
 struct Args {
     #[arg(long, global = true, default_value = "/mnt/models/dsv41-flash-exl3")]
     model_dir: PathBuf,
-    #[arg(long, global = true, default_value_t = 16384)]
+    #[arg(
+        long,
+        visible_alias = "max-model-len",
+        global = true,
+        default_value_t = 16384
+    )]
     max_context: usize,
     #[arg(long, global = true, default_value_t = 32)]
     chunk_size: usize,
@@ -61,8 +66,12 @@ enum Action {
     },
     /// Serve Anthropic and OpenAI APIs. Requires DSV41_API_KEY or LITELLM_MASTER_KEY.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:8001")]
-        bind: String,
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        #[arg(long, default_value_t = 8001)]
+        port: u16,
+        #[arg(long, default_value = "DeepSeek V4.1 Flash")]
+        served_model_name: String,
     },
 }
 #[derive(Deserialize)]
@@ -127,7 +136,18 @@ fn main() -> Result<()> {
     )?;
     eprintln!("Opened checkpoint in {:.2}s", t.elapsed().as_secs_f64());
     match args.command {
-        Action::Serve { bind } => api::serve(model, tok, &bind, key),
+        Action::Serve {
+            host,
+            port,
+            served_model_name,
+        } => {
+            ensure!(
+                served_model_name == api::MODEL_NAME,
+                "this checkpoint serves model name {:?}",
+                api::MODEL_NAME
+            );
+            api::serve(model, tok, &format!("{host}:{port}"), key)
+        }
         Action::Infer { prompt, max_tokens } => {
             let input = tok.encode(prompt, false).map_err(|e| anyhow!("{e}"))?;
             let mut ids = Vec::new();
