@@ -3323,7 +3323,7 @@ mod tests {
                     );
                 }
             }
-            let time_gpu = |mode| -> Result<f64> {
+            let time_gpu = |run: &dyn Fn(i32) -> Result<()>, mode| -> Result<f64> {
                 run(mode)?;
                 cuda_ok(unsafe { cudaDeviceSynchronize() }, "warming GPU index")?;
                 let start = std::time::Instant::now();
@@ -3333,10 +3333,56 @@ mod tests {
                 cuda_ok(unsafe { cudaDeviceSynchronize() }, "timing GPU index")?;
                 Ok(start.elapsed().as_secs_f64() * 1e6 / 5.)
             };
-            let scalar_us = time_gpu(0)?;
-            let packed_us = time_gpu(1)?;
-            let mma_us = time_gpu(2)?;
-            let fp8_us = time_gpu(3)?;
+            let scalar_us = time_gpu(&run, 0)?;
+            let packed_us = time_gpu(&run, 1)?;
+            let mma_us = time_gpu(&run, 2)?;
+            let fp8_us = time_gpu(&run, 3)?;
+            if pos >= TOP_BLOCKS * BLOCK {
+                let filtered_width = (TOP_BLOCKS * BLOCK) as i32;
+                let mut bytes = 0;
+                cuda_ok(
+                    unsafe { ds4_attn_index_bytes(filtered_width, n as i32, &mut bytes) },
+                    "sizing filtered index benchmark",
+                )?;
+                let filtered_workspace = upload(dev, &vec![0u8; bytes])?;
+                let filtered = |mode| {
+                    cuda_ok(
+                        unsafe {
+                            ds4_attn_index_select(
+                                dev,
+                                filtered_workspace.data(),
+                                keys.ptr.as_ptr(),
+                                q.data(),
+                                w.data(),
+                                blocks.data(),
+                                filtered_width,
+                                pos as i32,
+                                1,
+                                n as i32,
+                                picks.data(),
+                                ptr::null_mut(),
+                                mode,
+                            )
+                        },
+                        "benchmarking filtered index selection",
+                    )
+                };
+                // Every full top-512 winner is inside one of the winning
+                // 2048 blocks, even with the newest block forced in.
+                for mode in [2, 3] {
+                    picks.write(&vec![-9i32; n * TOP])?;
+                    filtered(mode)?;
+                    let mut got = vec![0i32; n * TOP];
+                    read(&picks, &mut got)?;
+                    assert_eq!(
+                        got, expected,
+                        "filtered winners at width={width} mode={mode}"
+                    );
+                }
+                let bf16_us = time_gpu(&filtered, 2)?;
+                let fp8_us = time_gpu(&filtered, 3)?;
+                eprintln!("filtered index rows={n} source={width} candidates={filtered_width} mma={bf16_us:.1}us fp8={fp8_us:.1}us");
+            }
             let start = std::time::Instant::now();
             for _ in 0..3 {
                 std::hint::black_box(reference()?);
