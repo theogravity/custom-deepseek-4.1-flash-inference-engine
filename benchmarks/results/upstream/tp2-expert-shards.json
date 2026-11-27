@@ -1,0 +1,36 @@
+{
+  "reference": "installed vLLM image 3689a42b8a15 / xmoe_do_i8, S8B mode 1 variant 0",
+  "expert": 3,
+  "scope": "Rank-local output bits. Host comparison of partial sums. Seven invalid job layouts rejected per case.",
+  "raw_stdout_sha256": "994f2b7f85242c675e0a4397121005d1a5789c739e6da1292bba6bb89e4cc250",
+  "runs": [
+    {
+      "layer": 0,
+      "rank": 0,
+      "channels": 1152,
+      "rows": 129,
+      "bit_equal": true
+    },
+    {
+      "layer": 0,
+      "rank": 1,
+      "channels": 1152,
+      "rows": 129,
+      "bit_equal": true
+    },
+    {
+      "layer": 20,
+      "rank": 0,
+      "channels": 1152,
+      "rows": 129,
+      "bit_equal": true
+    },
+    {
+      "layer": 20,
+      "rank": 1,
+      "channels": 1152,
+      "rows": 129,
+      "bit_equal": true
+    }
+  ]
+}

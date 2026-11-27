@@ -51,3 +51,11 @@ docker run --rm --network none --gpus '"device=1,2"' -e CUDA_VISIBLE_DEVICES=0,1
   -v /mnt/models/dsv41-flash-exl3:/model:ro --entrypoint python3 \
   dsv41-flash-1017-exl3-3bpw-sm120-lmcache /check/check_recipe_prefill.py --model /model --library /tmp/librecipe.so
 ```
+
+## Experimental two-rank expert projection
+
+This branch adds the rank-local CUDA entry points for a two-rank EXL3 expert. For the gate and up projections, the loader splits the output dimension of the trellis and its output scale vector. For the down projection, it splits the input dimension of the trellis and its input scale vector. Each rank processes 1,152 intermediate channels. The other scales are replicated. The input is still the original quantized model pack.
+
+To compare each rank with the installed vLLM extension, use the projection parity commands above with `/check/check_recipe_tp2.py` in the final Docker invocation. The test evaluates expert 3 at layers 0 and 20 on both ranks using 129 routed rows in two jobs. It checks the partial outputs before reduction and compares their host-side sum. This test covers the rank-local CUDA calculations. An on-device collective, TP2 attention, scheduler integration, full-model output fidelity and serving performance remain open.
+
+Both ranks matched the installed extension bit-for-bit in all four cases. The fixture ran with Python assertions disabled and verified that seven invalid job layouts per case were rejected before allocation. [Rank-local test results](../results/upstream/tp2-expert-shards.json)

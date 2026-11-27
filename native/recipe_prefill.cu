@@ -11,17 +11,15 @@
 // Host adapter for the model pack's S8B (per-row, per-128-column scale) kernel.
 // The engine owns allocation, routing, expert slots and the final reduction.
 namespace {
-constexpr int H = 5120, I = 2304;
-constexpr size_t TRELLIS = size_t(H) * I * 3 / 8;
-constexpr size_t EXPERT = 3 * (TRELLIS + (H + I) * sizeof(half));
-constexpr float HAD_SCALE = 0.08838834764831845f;
+constexpr int H = 5120, intermediate = 2304;
+template<int I> constexpr size_t trellis_bytes = size_t(H) * I * 3 / 8;
 // Physical projection order follows the checkpoint's contiguous w1, w2, w3.
 enum Projection { Gate = 0, Down = 1, Up = 2 };
-__device__ const half *suh(const char *expert, int projection) {
-    return reinterpret_cast<const half *>(expert + 3 * TRELLIS) + projection * (H + I);
+template<int I> __device__ const half *suh(const char *expert, int projection) {
+    return reinterpret_cast<const half *>(expert + 3 * trellis_bytes<I>) + projection * (H + I);
 }
-__device__ const half *svh(const char *expert, int projection) {
-    return suh(expert, projection) + (projection == Down ? I : H);
+template<int I> __device__ const half *svh(const char *expert, int projection) {
+    return suh<I>(expert, projection) + (projection == Down ? I : H);
 }
 
 
@@ -39,7 +37,7 @@ struct RecipeRows {
     half *weights;
     int64_t *gate_in, *up_in, *gate_out, *up_out, *down_in, *down_out;
 };
-__global__ void recipe_rows(const RoutedRow *routes, const float *x,
+template<int I> __global__ void recipe_rows(const RoutedRow *routes, const float *x,
                             half *input, RecipeRows meta) {
     int r = blockIdx.y, col = blockIdx.x * blockDim.x + threadIdx.x;
     RoutedRow route = routes[r];
@@ -51,12 +49,12 @@ __global__ void recipe_rows(const RoutedRow *routes, const float *x,
         meta.outputs[r] = route.output;
         meta.experts[r] = r;
         meta.weights[r] = __float2half_rn(route.weight);
-        meta.gate_in[r] = reinterpret_cast<int64_t>(suh(route.expert, Gate));
-        meta.up_in[r] = reinterpret_cast<int64_t>(suh(route.expert, Up));
-        meta.gate_out[r] = reinterpret_cast<int64_t>(svh(route.expert, Gate));
-        meta.up_out[r] = reinterpret_cast<int64_t>(svh(route.expert, Up));
-        meta.down_in[r] = reinterpret_cast<int64_t>(suh(route.expert, Down));
-        meta.down_out[r] = reinterpret_cast<int64_t>(svh(route.expert, Down));
+        meta.gate_in[r] = reinterpret_cast<int64_t>(suh<I>(route.expert, Gate));
+        meta.up_in[r] = reinterpret_cast<int64_t>(suh<I>(route.expert, Up));
+        meta.gate_out[r] = reinterpret_cast<int64_t>(svh<I>(route.expert, Gate));
+        meta.up_out[r] = reinterpret_cast<int64_t>(svh<I>(route.expert, Up));
+        meta.down_in[r] = reinterpret_cast<int64_t>(suh<I>(route.expert, Down));
+        meta.down_out[r] = reinterpret_cast<int64_t>(svh<I>(route.expert, Down));
     }
 }
 // Every route owns a unique output rank. The recipe uses atomic adds; keep
@@ -65,14 +63,14 @@ __global__ void recipe_scatter(const float *compact, const int64_t *outputs, flo
     int row = blockIdx.y, col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col < H) weighted[size_t(outputs[row])*H + col] = compact[size_t(row)*H + col];
 }
-__global__ void recipe_jobs(const Job *jobs, int n, int *starts, int *counts, int64_t *trellis) {
+template<int I> __global__ void recipe_jobs(const Job *jobs, int n, int *starts, int *counts, int64_t *trellis) {
     int i = threadIdx.x + blockDim.x * blockIdx.x;
     if (i >= n) return;
     Job j = jobs[i];
     starts[i] = j.begin;
     counts[i] = j.count;
     for (int projection = 0; projection != 3; ++projection)
-        trellis[projection*n+i] = reinterpret_cast<int64_t>(j.expert + projection * TRELLIS);
+        trellis[projection*n+i] = reinterpret_cast<int64_t>(j.expert + projection * trellis_bytes<I>);
 }
 
 int recipe_gemm(dof::GemmArgs args) {
@@ -101,7 +99,7 @@ int recipe_gemm(dof::GemmArgs args) {
 }
 } // namespace
 
-extern "C" int ds_recipe_group(void **scratch, size_t *capacity, const Job *jobs, int nj,
+template<int I> static int recipe_group(void **scratch, size_t *capacity, const Job *jobs, int nj,
                  const RoutedRow *routes, int rows, const float *x, float *weighted) {
     size_t r = size_t(rows);
     constexpr int hs = H/128, is = I/128;
@@ -135,9 +133,9 @@ extern "C" int ds_recipe_group(void **scratch, size_t *capacity, const Job *jobs
         reinterpret_cast<half *>(base+weight_off), ptrs+2*r,ptrs+3*r,ptrs+4*r,ptrs+5*r,ptrs+6*r,ptrs+7*r};
     auto starts = reinterpret_cast<int *>(base+jobmeta_off);
     auto tr = reinterpret_cast<int64_t *>(base+tr_off);
-    recipe_rows<<<dim3((H+255)/256,rows),256>>>(rr,x,input,meta);
+    recipe_rows<I><<<dim3((H+255)/256,rows),256>>>(rr,x,input,meta);
     CHECK(cudaGetLastError());
-    recipe_jobs<<<(nj+127)/128,128>>>(j,nj,starts,starts+nj,tr);
+    recipe_jobs<I><<<(nj+127)/128,128>>>(j,nj,starts,starts+nj,tr);
     CHECK(cudaGetLastError());
     auto blocks = [&](int slabs) {return (rows*slabs+7)/8;};
     dof::k_gather_blk<<<blocks(hs),256>>>(input,meta.tokens,meta.experts,meta.gate_in,meta.up_in,
@@ -162,5 +160,61 @@ extern "C" int ds_recipe_group(void **scratch, size_t *capacity, const Job *jobs
     CHECK(cudaGetLastError());
     recipe_scatter<<<dim3((H+255)/256,rows),256>>>(compact,meta.outputs,weighted);
     return int(cudaGetLastError());
+}
+
+extern "C" int ds_recipe_group(void **scratch, size_t *capacity, const Job *jobs, int nj,
+        const RoutedRow *routes, int rows, const float *x, float *weighted) {
+    return recipe_group<intermediate>(scratch, capacity, jobs, nj, routes, rows, x, weighted);
+}
+
+extern "C" int ds_recipe_rank_group(void **scratch, size_t *capacity, const Job *jobs, int nj,
+        const RoutedRow *routes, int rows, const float *x, float *weighted) {
+    if (!scratch || !capacity || !jobs || !routes || !x || !weighted ||
+        rows <= 0 || rows > 65535 || nj <= 0 || nj > rows) return int(cudaErrorInvalidValue);
+    int covered = 0;
+    for (int j = 0; j < nj; ++j) {
+        const Job &job = jobs[j];
+        if (!job.expert || job.begin != covered || job.count <= 0 ||
+            job.count > 128 || job.count > rows - covered) return int(cudaErrorInvalidValue);
+        covered += job.count;
+    }
+    if (covered != rows) return int(cudaErrorInvalidValue);
+    return recipe_group<intermediate / 2>(scratch, capacity, jobs, nj, routes, rows, x, weighted);
+}
+
+// Each rank holds half of the expert intermediate channels in the checkpoint's
+// native trellis format. Input scales on gate/up and output scales on down are replicated.
+extern "C" size_t ds_recipe_rank_slot_bytes() {
+    return 3 * (trellis_bytes<intermediate / 2> + (H + intermediate / 2) * sizeof(half));
+}
+
+extern "C" int ds_recipe_upload_rank(void *storage, size_t capacity, const void *const *parts, int rank) {
+    if (!storage || capacity < ds_recipe_rank_slot_bytes() || !parts || rank < 0 || rank > 1)
+        return int(cudaErrorInvalidValue);
+    for (int j = 0; j < 9; ++j) if (!parts[j]) return int(cudaErrorInvalidValue);
+    constexpr int shard = intermediate / 2;
+    constexpr size_t packed = trellis_bytes<shard>;
+    auto *slot = static_cast<char *>(storage);
+    // Checkpoint trellises are [input/16, output/16, 48] uint16 tiles.
+    constexpr size_t pitch = (intermediate / 16) * 48 * sizeof(uint16_t);
+    for (auto proj : {Gate, Up}) {
+        int input_part = proj == Gate ? 0 : 1;
+        const auto *src = static_cast<const char *>(parts[input_part]) + rank * (pitch / 2);
+        CHECK(cudaMemcpy2D(slot + proj * packed, pitch / 2, src, pitch,
+                           pitch / 2, H / 16, cudaMemcpyHostToDevice));
+    }
+    CHECK(cudaMemcpy(slot + Down * packed, static_cast<const char *>(parts[2]) + rank * packed,
+                     packed, cudaMemcpyHostToDevice));
+    auto *scales = reinterpret_cast<half *>(slot + 3 * packed);
+    for (auto proj : {Gate, Down, Up}) {
+        int first = proj == Gate ? 3 : proj == Up ? 5 : 7;
+        int in_width = proj == Down ? shard : H, out_width = proj == Down ? H : shard;
+        const auto *input = static_cast<const half *>(parts[first]) + (proj == Down ? rank * shard : 0);
+        const auto *output = static_cast<const half *>(parts[first+1]) + (proj == Down ? 0 : rank * shard);
+        auto *dst = scales + proj * (H + shard);
+        CHECK(cudaMemcpy(dst, input, in_width * sizeof(half), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(dst + in_width, output, out_width * sizeof(half), cudaMemcpyHostToDevice));
+    }
+    return 0;
 }
 #endif
