@@ -4,6 +4,8 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 The native benchmarks cover code generation at 404k context and six independent full windows at 375 W. The published edit benchmark has also been replayed at both power limits. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Published comparison](UPSTREAM-COMPARISON.md)
 
+For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md)
+
 ## Run on this workstation
 
 The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. [Performance and checkpoints](DECODE-ROUND2.md)
