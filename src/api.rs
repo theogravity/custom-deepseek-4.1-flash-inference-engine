@@ -118,6 +118,7 @@ struct ServerState {
     key: String,
     tokenizer: Arc<Tokenizer>,
     plain: Tokenizer,
+    text_cache: Option<chat::TextCache>,
     queue: mpsc::Sender<Job>,
     context: usize,
     encoders: Arc<Semaphore>,
@@ -159,7 +160,7 @@ fn prepare(req: Value, state: &ServerState, count: bool) -> Result<Prepared> {
             "a user message is required"
         );
     }
-    let ids = prompt.encode(&state.tokenizer, &state.plain)?;
+    let ids = prompt.encode(&state.tokenizer, &state.plain, state.text_cache.as_ref())?;
     if !count && ids.len() >= state.context {
         return Err(ContextOverflow {
             window: state.context,
@@ -519,6 +520,11 @@ pub fn serve(model: Model, tokenizer: Tokenizer, addr: &str, key: String) -> Res
         key,
         tokenizer: Arc::new(tokenizer),
         plain,
+        text_cache: match std::env::var("DS4_AGENT_TEXT_CACHE").as_deref() {
+            Ok("1") => Some(chat::TextCache::default()),
+            Ok("0") | Err(std::env::VarError::NotPresent) => None,
+            _ => anyhow::bail!("DS4_AGENT_TEXT_CACHE must be 0 or 1"),
+        },
         queue,
         context: model.max_context(),
         encoders: Arc::new(Semaphore::new(limits.live.max(QUEUE))),

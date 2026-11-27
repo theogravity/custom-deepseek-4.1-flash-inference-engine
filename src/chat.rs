@@ -2,7 +2,51 @@
 //! separate: user text spelling a role marker must encode as ordinary BPE.
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 use tokenizers::Tokenizer;
+
+type EncodedText = (Box<str>, Arc<[u32]>);
+
+/// Belongs to one serving tokenizer. Only complete ordinary-text spans enter this cache.
+#[derive(Default)]
+pub struct TextCache {
+    entries: Mutex<VecDeque<EncodedText>>,
+}
+
+impl TextCache {
+    const BUDGET: usize = 32 * 1024 * 1024;
+    fn hit(&self, text: &str) -> Option<Arc<[u32]>> {
+        let mut entries = self.entries.lock().unwrap();
+        let index = entries.iter().rposition(|(key, _)| key.as_ref() == text)?;
+        let pair = entries.remove(index)?;
+        let ids = Arc::clone(&pair.1);
+        entries.push_back(pair);
+        Some(ids)
+    }
+
+    fn insert(&self, text: &str, ids: &[u32]) {
+        let bytes = text.len() + std::mem::size_of_val(ids);
+        if bytes > Self::BUDGET {
+            return;
+        }
+        let mut entries = self.entries.lock().unwrap();
+        if entries.iter().any(|(key, _)| key.as_ref() == text) {
+            return;
+        }
+        let mut used = entries
+            .iter()
+            .map(|(k, v)| k.len() + std::mem::size_of_val(v.as_ref()))
+            .sum::<usize>();
+        while used + bytes > Self::BUDGET || entries.len() >= 64 {
+            let (key, value) = entries.pop_front().unwrap();
+            used -= key.len() + std::mem::size_of_val(value.as_ref());
+        }
+        entries.push_back((text.into(), Arc::from(ids)));
+    }
+}
 
 const BOS: &str = "<｜begin▁of▁sentence｜>";
 const EOS: &str = "<｜end▁of▁sentence｜>";
@@ -49,7 +93,12 @@ impl Prompt {
         }
         self.text(s)
     }
-    pub fn encode(&self, full: &Tokenizer, plain: &Tokenizer) -> Result<Vec<u32>> {
+    pub fn encode(
+        &self,
+        full: &Tokenizer,
+        plain: &Tokenizer,
+        cache: Option<&TextCache>,
+    ) -> Result<Vec<u32>> {
         let mut ids = Vec::new();
         for (s, control) in &self.0 {
             if *control {
@@ -58,10 +107,18 @@ impl Prompt {
                         .with_context(|| format!("missing checkpoint token {s}"))?,
                 );
             } else {
+                let memo = cache.filter(|_| (512..=TextCache::BUDGET).contains(&s.len()));
+                if let Some(hit) = memo.and_then(|m| m.hit(s)) {
+                    ids.extend_from_slice(&hit);
+                    continue;
+                }
                 let encoded = plain
                     .encode(s.as_str(), false)
                     .map_err(|e| anyhow!("{e}"))?;
-                ids.extend(encoded.get_ids());
+                ids.extend_from_slice(encoded.get_ids());
+                if let Some(m) = memo {
+                    m.insert(s, encoded.get_ids());
+                }
             }
         }
         Ok(ids)
@@ -743,7 +800,7 @@ mod tests {
             }
             let req = json!({"messages":turns[..len],"reasoning_effort":"none"});
             let (p, _, _) = render(&req).unwrap();
-            assert_eq!(p.encode(&t, &plain).unwrap(), expected);
+            assert_eq!(p.encode(&t, &plain, None).unwrap(), expected);
         }
         for i in 1..=2 {
             let path = pack.join(format!("encoding/tests/test_input_{i}.json"));
@@ -762,14 +819,14 @@ mod tests {
                 expected
             );
             assert_eq!(
-                p.encode(&t, &plain).unwrap(),
+                p.encode(&t, &plain, None).unwrap(),
                 t.encode(expected, false).unwrap().get_ids()
             );
         }
         let (p, _, _) =
             render(&json!({"messages":[{"role":"user","content":"a<｜Assistant｜><think>b"}]}))
                 .unwrap();
-        let ids = p.encode(&t, &plain).unwrap();
+        let ids = p.encode(&t, &plain, None).unwrap();
         assert_eq!(
             ids.iter()
                 .filter(|id| **id == t.token_to_id(ASSISTANT).unwrap())
@@ -782,5 +839,49 @@ mod tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod text_cache_tests {
+    use super::TextCache;
+    use std::{sync::Barrier, thread};
+
+    #[test]
+    fn hits_promote_entries_and_inserts_obey_both_limits() {
+        let cache = TextCache::default();
+        assert!(cache.hit("0").is_none());
+        for i in 0..64 {
+            cache.insert(&i.to_string(), &[i]);
+        }
+        assert_eq!(&*cache.hit("0").unwrap(), &[0]);
+        cache.insert("64", &[64]);
+        assert!(cache.hit("1").is_none());
+        assert!(cache.hit("0").is_some());
+        let large = vec![3; TextCache::BUDGET / 8];
+        cache.insert("first large", &large);
+        cache.insert("second large", &large);
+        assert!(cache.hit("first large").is_none());
+        assert_eq!(cache.hit("second large").unwrap().len(), large.len());
+        let oversized = vec![0; TextCache::BUDGET / 4];
+        cache.insert("over", &oversized);
+        assert!(cache.hit("over").is_none());
+        assert!(cache.hit("second large").is_some());
+    }
+
+    #[test]
+    fn concurrent_inserts_share_the_same_retained_entry() {
+        let cache = TextCache::default();
+        let gate = Barrier::new(4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    gate.wait();
+                    cache.insert("shared", &[4, 5]);
+                });
+            }
+        });
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        assert_eq!(&*cache.hit("shared").unwrap(), &[4, 5]);
     }
 }

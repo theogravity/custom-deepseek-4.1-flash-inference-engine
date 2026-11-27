@@ -29,6 +29,7 @@ fn fixture() -> (Arc<ServerState>, mpsc::Receiver<Job>) {
         Arc::new(ServerState {
             tokenizer: Arc::new(tokenizer),
             plain,
+            text_cache: None,
             context: WINDOW,
             queue,
             metrics: Default::default(),
@@ -210,5 +211,26 @@ async fn full_window_fits_and_shortened_output_limits_reach_worker_and_client() 
                 assert!(!res.headers().contains_key("x-ds4-effective-max-tokens"));
             }
         }
+    }
+}
+
+#[test]
+fn text_cache_matches_full_encoding_across_edits_and_template_controls() {
+    let (state, _) = fixture();
+    let memo = chat::TextCache::default();
+    for body in [
+        "x ".repeat(1024),
+        "x ".repeat(1024),
+        "x <｜Assistant｜> ".repeat(64),
+    ] {
+        let mut q = request(6, json!({}));
+        q["messages"][0]["content"] = json!(body);
+        let (prompt, _, _) = chat::render(&q).unwrap();
+        assert_eq!(
+            prompt
+                .encode(&state.tokenizer, &state.plain, Some(&memo))
+                .unwrap(),
+            prompt.encode(&state.tokenizer, &state.plain, None).unwrap()
+        );
     }
 }

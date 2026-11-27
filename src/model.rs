@@ -957,7 +957,7 @@ mod tests {
                 "Transcript {}. Print the numbers from one through one hundred, one number per line. Start immediately with one.", rand::random::<u64>()
             )}],"reasoning_effort":"none"});
         let (chat, _, _) = crate::chat::render(&req)?;
-        let ids = chat.encode(&tok, &plain)?;
+        let ids = chat.encode(&tok, &plain, None)?;
         let mut model = Model::open(&pack, &tok, [0, 1], 256, 8)?;
         model.spec_k = 4; // The base pack also ships its three learned MTP stages.
         let mut reference = model.start_request(ids.clone(), 16, 0.5)?;
