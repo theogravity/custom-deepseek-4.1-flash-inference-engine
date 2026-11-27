@@ -66,6 +66,17 @@ fn checkpoints(prompt: usize, chunk: usize) -> Vec<usize> {
     points
 }
 
+// At most eight RAM checkpoints for an idle replay, even at the full window.
+fn idle_checkpoints(start: usize, last: usize, chunk: usize) -> Vec<usize> {
+    if start >= last {
+        return Vec::new();
+    }
+    let stride = (last - start).div_ceil(8).max(512).div_ceil(chunk) * chunk;
+    ((start + stride..last).step_by(stride))
+        .chain(std::iter::once(last))
+        .collect()
+}
+
 fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
     match result {
         Ok(value) => Some(value),
@@ -253,7 +264,16 @@ struct DecodeWork<'a> {
     plan: DecodePlan,
 }
 
+// Only input IDs cross from a completed decode into this worker. Every KV
+// value it publishes is recomputed by the ordinary prompt-prefill kernels.
+enum IdleToolPrefill {
+    Pending(Vec<u32>, std::time::Instant),
+    Running(Box<Session>),
+}
+
 pub struct Model {
+    idle_tool_prefill: Option<IdleToolPrefill>,
+    idle_tool_limit: usize,
     prefix: PrefixCache,
     spec_k: usize,
     lookup: prompt_lookup::Config,
@@ -285,7 +305,16 @@ impl Model {
                 && cfg["eos_token_id"] == 1,
             "unexpected model configuration"
         );
+        let idle_tool_limit = match std::env::var("DS4_IDLE_TOOL_PREFILL_MAX_TOKENS") {
+            Ok(value) => value
+                .parse::<usize>()
+                .context("invalid DS4_IDLE_TOOL_PREFILL_MAX_TOKENS")?,
+            Err(std::env::VarError::NotPresent) => 0,
+            Err(e) => return Err(e.into()),
+        };
         Ok(Self {
+            idle_tool_prefill: None,
+            idle_tool_limit: idle_tool_limit.min(max_ctx),
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
             lookup: prompt_lookup::configured(tok)?,
@@ -438,6 +467,68 @@ impl Model {
         })
     }
 
+    pub(crate) fn finished_tool(&mut self, mut session: Session) {
+        if session.pos > self.idle_tool_limit
+            || !self.prefix.can_warm(session.pos)
+            || !session.finished
+            || session.emitted >= session.limit
+            || session.pos.saturating_sub(session.prompt_len) < 512
+        {
+            return;
+        }
+        session.ids.truncate(session.pos);
+        self.idle_tool_prefill = Some(IdleToolPrefill::Pending(
+            session.ids,
+            std::time::Instant::now(),
+        ));
+    }
+
+    pub(crate) fn idle_tool_delay(&self) -> Option<std::time::Duration> {
+        let IdleToolPrefill::Pending(_, since) = self.idle_tool_prefill.as_ref()? else {
+            return None;
+        };
+        // Most local reads and edits submit the next request immediately.
+        std::time::Duration::from_millis(200).checked_sub(since.elapsed())
+    }
+
+    pub(crate) fn interrupt_tool_prefill(&mut self) {
+        // Foreground admission must never perform a speculative snapshot write.
+        self.idle_tool_prefill = None;
+    }
+
+    pub(crate) fn idle_tool_step(&mut self) -> Result<usize> {
+        let Some(work) = self.idle_tool_prefill.take() else {
+            return Ok(0);
+        };
+        let mut warm = match work {
+            IdleToolPrefill::Pending(ids, _) => {
+                // Reserve three output positions to enable the normal drafter.
+                // No token is sampled: stop at the last full input checkpoint.
+                let mut w = self.start_request(ids, 3, 0.)?;
+                if !w.is_prefill() {
+                    return Ok(0);
+                }
+                let last = (w.prompt_len - 1) / self.chunk * self.chunk;
+                w.points = idle_checkpoints(w.pos, last, self.chunk);
+                w.next_point = 0;
+                Box::new(w)
+            }
+            IdleToolPrefill::Running(warm) => warm,
+        };
+        let before = warm.pos;
+        let last = (warm.prompt_len - 1) / self.chunk * self.chunk;
+        if before >= last {
+            if before > warm.reused {
+                self.store_prefill(&warm, true);
+            }
+            return Ok(0);
+        }
+        self.prefill_step(&mut warm, true)?;
+        let rows = warm.pos - before;
+        self.idle_tool_prefill = Some(IdleToolPrefill::Running(warm));
+        Ok(rows)
+    }
+
     /// Persist committed state before releasing either GPU cache. A failed
     /// backing allocation leaves this request runnable in its original slot.
     pub(crate) fn suspend(&mut self, session: &mut Session, backing: &SwapStore) -> Result<()> {
@@ -538,7 +629,7 @@ impl Model {
                     ..Step::default()
                 }));
             } else if session.is_prefill() {
-                results[index] = Some(self.prefill_step(session));
+                results[index] = Some(self.prefill_step(session, false));
             } else {
                 let remaining = session.limit - session.emitted - 1;
                 let width = self.spec_k.min(remaining);
@@ -615,24 +706,31 @@ impl Model {
         results.into_iter().map(Option::unwrap).collect()
     }
 
-    fn prefill_step(&mut self, session: &mut Session) -> Result<Step> {
+    fn store_prefill(&mut self, session: &Session, ram_only: bool) {
         let pos = session.pos;
         let prompt = &session.ids[..session.prompt_len];
         let span = prompt.len().min(128);
-        if session.points.get(session.next_point) == Some(&pos) {
-            if cached(
-                self.prefix.store(prompt, pos, span, &session.cache),
-                "store",
-            )
-            .is_some()
-            {
-                if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
-                    let saved = draft
-                        .snapshot(&mut self.rt, pos)
-                        .and_then(|data| self.prefix.write_draft(prompt, pos, span, &data));
-                    cached(saved, "DSpark store");
-                }
+        if cached(
+            self.prefix
+                .store(prompt, pos, span, &session.cache, ram_only),
+            "store",
+        )
+        .is_some()
+        {
+            if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
+                let saved = draft
+                    .snapshot(&mut self.rt, pos)
+                    .and_then(|data| self.prefix.write_draft(prompt, pos, span, &data, ram_only));
+                cached(saved, "DSpark store");
             }
+        }
+    }
+
+    fn prefill_step(&mut self, session: &mut Session, interruptible: bool) -> Result<Step> {
+        let pos = session.pos;
+        let prompt = &session.ids[..session.prompt_len];
+        if session.points.get(session.next_point) == Some(&pos) {
+            self.store_prefill(session, interruptible);
             session.next_point += 1;
         }
         let n = self.chunk.min(prompt.len() - pos);
@@ -642,7 +740,8 @@ impl Model {
             .get(session.next_point)
             .copied()
             .unwrap_or(prompt.len());
-        let observe = session.draft.is_some() && pos + n > horizon.saturating_sub(128);
+        let observe =
+            session.draft.is_some() && (interruptible || pos + n > horizon.saturating_sub(128));
         self.rt.target_prefill = true;
         let target = self.forward(
             &mut session.cache,
@@ -796,6 +895,25 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_checkpoints_are_aligned_bounded_and_include_the_last_reusable_token_block() {
+        for (start, last, chunk) in [
+            (0, 524224, 64),
+            (2752, 6848, 64),
+            (0, 512, 128),
+            (64, 128, 64),
+            (128, 128, 64),
+        ] {
+            let points = idle_checkpoints(start, last, chunk);
+            assert!(points.len() <= 8);
+            assert!(points
+                .iter()
+                .all(|&p| p > start && p <= last && p % chunk == 0));
+            assert!(points.windows(2).all(|p| p[0] < p[1]));
+            assert_eq!(points.last().copied(), (start < last).then_some(last));
+        }
+    }
 
     #[test]
     fn live_payload_checks_trailer_and_lengths() {

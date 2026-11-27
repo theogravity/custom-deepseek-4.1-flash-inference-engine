@@ -40,6 +40,13 @@ impl Limits {
 pub(super) trait BatchEngine {
     type Session;
     fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Self::Session>;
+    fn finished_tool(&mut self, _session: Self::Session) {}
+    fn idle_tool_delay(&self) -> Option<std::time::Duration> {
+        None
+    }
+    fn idle_tool_step(&mut self) -> Result<usize> {
+        Ok(0)
+    }
     fn prefill(session: &Self::Session) -> bool;
     fn processed(session: &Self::Session) -> usize;
     fn step(&mut self, sessions: &mut [&mut Self::Session]) -> Vec<Result<Step>>;
@@ -53,7 +60,17 @@ pub(super) struct ServingModel {
 impl BatchEngine for ServingModel {
     type Session = Session;
     fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Session> {
+        self.model.interrupt_tool_prefill();
         self.model.start_request(ids, limit, temperature)
+    }
+    fn finished_tool(&mut self, session: Session) {
+        self.model.finished_tool(session)
+    }
+    fn idle_tool_delay(&self) -> Option<std::time::Duration> {
+        self.model.idle_tool_delay()
+    }
+    fn idle_tool_step(&mut self) -> Result<usize> {
+        self.model.idle_tool_step()
     }
     fn prefill(session: &Session) -> bool {
         session.is_prefill()
@@ -265,8 +282,35 @@ pub(super) fn schedule<E: BatchEngine>(
         let active = slots.iter().flatten().count();
         if active == 0 && waiting.is_empty() {
             record::<E>(metrics, &slots, &waiting, false);
-            let Some(job) = jobs.blocking_recv() else {
-                break;
+            let job = match jobs.try_recv() {
+                Ok(job) => job,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if let Some(delay) = engine.idle_tool_delay() {
+                        match runtime
+                            .block_on(async { tokio::time::timeout(delay, jobs.recv()).await })
+                        {
+                            Ok(Some(job)) => {
+                                waiting.push_back(Waiting::New(job));
+                                continue;
+                            }
+                            Ok(None) => break,
+                            Err(_) => (),
+                        }
+                    }
+                    match engine.idle_tool_step() {
+                        Ok(0) => (),
+                        Ok(rows) => {
+                            metrics.lock().unwrap().idle_tool_prefill_tokens += rows as u64;
+                            continue;
+                        }
+                        Err(e) => eprintln!("idle tool prefill skipped: {e:#}"),
+                    }
+                    let Some(job) = jobs.blocking_recv() else {
+                        break;
+                    };
+                    job
+                }
             };
             waiting.push_back(Waiting::New(job));
         }
@@ -353,7 +397,11 @@ pub(super) fn schedule<E: BatchEngine>(
                 Err(e) => Err(e),
             };
             let a = slot.take().unwrap();
+            let tool = terminal.is_ok() && a.output.n_calls > 0 && a.parser.stop.is_none();
             respond(a.reply, a.output.wire, terminal, runtime);
+            if tool {
+                engine.finished_tool(a.session);
+            }
         }
     }
 }

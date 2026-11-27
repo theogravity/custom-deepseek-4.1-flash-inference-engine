@@ -153,6 +153,9 @@ impl PrefixCache {
     pub fn enabled(&self) -> bool {
         self.ram_limit > 0 || self.dir.is_some()
     }
+    pub fn can_warm(&self, pos: usize) -> bool {
+        AttentionState::snapshot_bytes(pos).is_ok_and(|size| size <= self.ram_limit)
+    }
     fn lock_dir(dir: &Path) -> Result<File> {
         let f = OpenOptions::new()
             .create(true)
@@ -220,14 +223,20 @@ impl PrefixCache {
         pos: usize,
         span: usize,
         data: &[u8],
+        ram_only: bool,
     ) -> Result<()> {
         if !self.enabled() {
             return Ok(());
         }
         crate::draft_attention::validate_snapshot(pos, data)?;
+        if ram_only
+            && AttentionState::snapshot_bytes(pos)?.saturating_add(data.len()) > self.ram_limit
+        {
+            return Ok(());
+        }
         let key = self.draft_key(tokens, pos, span)?;
         if !self.ram.iter().any(|e| e.0 == key) {
-            self.save(key, data.to_vec());
+            self.save(key, data.to_vec(), ram_only);
         }
         Ok(())
     }
@@ -415,6 +424,7 @@ impl PrefixCache {
         pos: usize,
         span: usize,
         state: &AttentionState,
+        ram_only: bool,
     ) -> Result<()> {
         if self.ram_limit == 0 && self.dir.is_none() {
             return Ok(());
@@ -428,13 +438,23 @@ impl PrefixCache {
             .last()
             .context("empty prefix cache key")?
             .1;
-        if self.ram.iter().any(|(k, _)| k == &key) {
+        if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
+            if ram_only {
+                // Keep the target ahead of unrelated entries when its drafter
+                // is appended to the same bounded LRU immediately afterwards.
+                let entry = self.ram.remove(i).unwrap();
+                self.ram.push_back(entry);
+            }
             return Ok(());
         }
-        self.save(key, state.encode_snapshot(pos)?);
+        self.save(key, state.encode_snapshot(pos)?, ram_only);
         Ok(())
     }
-    fn save(&mut self, key: Key, data: Vec<u8>) {
+    fn save(&mut self, key: Key, data: Vec<u8>, ram_only: bool) {
+        if ram_only {
+            self.remember(key, Bytes::from(data));
+            return;
+        }
         if let Some(path) = self
             .file(&key)
             .filter(|_| data.len() + HEADER <= self.disk_limit)
@@ -511,8 +531,20 @@ mod tests {
         data[..8].copy_from_slice(b"DS4ATT01");
         data[8] = 1;
         let state = AttentionState::decode_snapshot(&data, 1)?;
-        cache.store(&[22, 33], 1, 128, &state)?;
-        cache.store(&[23, 88], 1, 128, &state)?;
+        let mut warm = make();
+        warm.ram_limit = 2 * data.len();
+        warm.store(&[77], 1, 128, &state, true)?;
+        warm.ram_limit = data.len();
+        let mut sidecar = vec![0; 16 + 3 * 512 * 2];
+        sidecar[..8].copy_from_slice(b"DS4DRF01");
+        sidecar[8..16].copy_from_slice(&1u64.to_le_bytes());
+        warm.write_draft(&[77], 1, 128, &sidecar, true)?;
+        assert!(warm.read_draft(&[77], 1, 128)?.is_none());
+        assert!(warm.restore(&[77], 1, 128)?.is_some());
+        assert!(cache.restore(&[77], 1, 128)?.is_none());
+        assert!(!warm.file(&warm.keys(&[77], 1, 128)?[0].1).unwrap().exists());
+        cache.store(&[22, 33], 1, 128, &state, false)?;
+        cache.store(&[23, 88], 1, 128, &state, false)?;
         let mut restarted = make();
         restarted.ram_limit = 2 * data.len();
         let (pos, held, _) = restarted.restore(&[22, 99], 2, 128)?.unwrap();
@@ -524,13 +556,13 @@ mod tests {
         assert!(cache.restore(&[22], 1, 128)?.is_none());
         assert!(restarted.restore(&[22], 1, 128)?.is_some());
         // A partially upgraded writer could produce a checksummed but incompatible snapshot.
-        cache.save(key, vec![0; 24]);
+        cache.save(key, vec![0; 24], false);
         assert!(cache.restore(&[22], 1, 128)?.is_none());
         assert!(!cache.file(&key).unwrap().exists());
-        cache.store(&[22], 1, 128, &state)?;
+        cache.store(&[22], 1, 128, &state, false)?;
         assert!(cache.restore(&[22], 1, 128)?.is_some());
         restarted.ram_limit = data.len();
-        restarted.store(&[24], 1, 128, &state)?;
+        restarted.store(&[24], 1, 128, &state, false)?;
         assert_eq!(restarted.ram_bytes, data.len());
         assert!(restarted.ram.iter().all(|(k, _)| k != &key));
         assert_eq!(held.encode_snapshot(pos)?, data);
@@ -561,11 +593,11 @@ mod tests {
             ram_bytes: 0,
         };
         let mut cache = make();
-        cache.write_draft(&[1], 1, 128, &payload(1))?;
-        cache.write_draft(&[2], 1, 128, &payload(2))?;
+        cache.write_draft(&[1], 1, 128, &payload(1), false)?;
+        cache.write_draft(&[2], 1, 128, &payload(2), false)?;
         let old = cache.file(&cache.draft_key(&[1], 1, 128)?).unwrap();
         File::open(&old)?.set_modified(SystemTime::UNIX_EPOCH)?;
-        cache.write_draft(&[3], 1, 128, &payload(3))?;
+        cache.write_draft(&[3], 1, 128, &payload(3), false)?;
         assert!(!old.exists());
         assert!(cache.read_draft(&[2], 1, 128)?.is_some());
         let barrier = std::sync::Barrier::new(5);
@@ -575,7 +607,7 @@ mod tests {
                 let b = &barrier;
                 scope.spawn(move || {
                     b.wait();
-                    c.write_draft(&[token], 1, 128, &payload(4)).unwrap();
+                    c.write_draft(&[token], 1, 128, &payload(4), false).unwrap();
                 });
             }
         });

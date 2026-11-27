@@ -445,6 +445,7 @@ struct Metrics {
     swap_quantum_steps: usize,
     requests_started: u64,
     prefix_reused_tokens: u64,
+    idle_tool_prefill_tokens: u64,
     logical_active: usize,
     peak_logical_active: usize,
     resident: usize,
@@ -894,10 +895,15 @@ mod tests {
         large_state: Option<u32>,
         cancel_on_suspend: Option<(u32, oneshot::Receiver<Result<Value>>)>,
         restored: Vec<u32>,
+        idle_arrival: Option<(mpsc::Sender<Job>, Job)>,
+        grace_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
+        idle_calls: usize,
+        idle_calls_at_start: Option<usize>,
     }
     impl BatchEngine for TestEngine {
         type Session = TestSession;
         fn start(&mut self, ids: Vec<u32>, limit: usize, _: f32) -> Result<TestSession> {
+            self.idle_calls_at_start = Some(self.idle_calls);
             Ok(TestSession {
                 id: ids[0],
                 rounds: 0,
@@ -906,6 +912,21 @@ mod tests {
                 saved: None,
                 reused: self.reused,
             })
+        }
+        fn idle_tool_delay(&self) -> Option<std::time::Duration> {
+            self.grace_barrier.lock().unwrap().take().map(|gate| {
+                gate.wait();
+                std::time::Duration::from_secs(10)
+            })
+        }
+        fn idle_tool_step(&mut self) -> Result<usize> {
+            self.idle_calls += 1;
+            if let Some((tx, job)) = self.idle_arrival.take() {
+                tx.try_send(job)
+                    .unwrap_or_else(|_| panic!("queue full during idle step"));
+                return Ok(64);
+            }
+            Ok(0)
         }
         fn prefill(s: &TestSession) -> bool {
             s.rounds <= s.prefill_ticks
@@ -999,6 +1020,70 @@ mod tests {
             recv,
         )
     }
+    #[test]
+    fn foreground_arrivals_and_shutdown_preempt_idle_prefill() {
+        let (tok, token) = tokenizer();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let limits = Limits {
+            resident: 1,
+            live: 1,
+            quantum: 1,
+        };
+        // A request already in the queue and a request that arrives mid-chunk
+        // must be admitted before the next idle model step.
+        for mid_chunk in [false, true] {
+            let (tx, rx) = mpsc::channel(1);
+            let (j, reply) = job(7, 1);
+            let mut engine = TestEngine {
+                output_token: token,
+                ..Default::default()
+            };
+            if mid_chunk {
+                engine.idle_arrival = Some((tx, j));
+            } else {
+                tx.try_send(j).unwrap_or_else(|_| panic!("empty queue"));
+                drop(tx);
+            }
+            let metrics = Mutex::new(Metrics::default());
+            schedule(&mut engine, &tok, rx, limits, &metrics, runtime.handle());
+            assert!(reply.blocking_recv().unwrap().is_ok());
+            assert_eq!(engine.idle_calls, usize::from(mid_chunk));
+            assert_eq!(
+                metrics.into_inner().unwrap().idle_tool_prefill_tokens,
+                if mid_chunk { 64 } else { 0 }
+            );
+        }
+        // Synchronize with the grace period, then submit or disconnect. Both
+        // events must wake the worker without executing any speculative work.
+        for submit in [false, true] {
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let mut engine = TestEngine {
+                output_token: token,
+                grace_barrier: Mutex::new(Some(gate.clone())),
+                ..Default::default()
+            };
+            let (tx, rx) = mpsc::channel(1);
+            let (j, reply) = job(7, 1);
+            let sender = std::thread::spawn(move || {
+                gate.wait();
+                if submit {
+                    tx.blocking_send(j)
+                        .unwrap_or_else(|_| panic!("closed queue"));
+                }
+            });
+            let metrics = Mutex::new(Metrics::default());
+            schedule(&mut engine, &tok, rx, limits, &metrics, runtime.handle());
+            sender.join().unwrap();
+            if submit {
+                assert!(reply.blocking_recv().unwrap().is_ok());
+                assert_eq!(engine.idle_calls_at_start, Some(0));
+            } else {
+                assert_eq!(engine.idle_calls, 0);
+            }
+            assert_eq!(metrics.into_inner().unwrap().idle_tool_prefill_tokens, 0);
+        }
+    }
+
     #[test]
     fn continuous_admission_bounds_slots_and_isolates_a_failing_row() {
         let (tok, token) = tokenizer();
