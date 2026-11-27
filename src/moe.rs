@@ -337,7 +337,7 @@ struct DeviceCache {
     limit: usize,
     slots: HashMap<Key, (usize, u64)>,
     resident_bytes: usize,
-    lru: BTreeSet<(u64, Key)>,
+    eviction_order: BTreeSet<(u64, u64, Key)>,
     frequencies: Option<Box<[u64]>>,
     clock: u64,
     scratch: usize,
@@ -399,7 +399,7 @@ impl DeviceCache {
             limit,
             slots: HashMap::new(),
             resident_bytes: 0,
-            lru: BTreeSet::new(),
+            eviction_order: BTreeSet::new(),
             frequencies: match std::env::var("DS4_EXPERT_EVICTION").as_deref() {
                 Err(std::env::VarError::NotPresent) | Ok("lru") => None,
                 Ok("lfu") => Some(vec![0; EXPERT_KEYS].into_boxed_slice()),
@@ -426,19 +426,16 @@ impl DeviceCache {
     }
 
     fn evict_slot(&mut self, group_start: u64) -> Result<(usize, usize)> {
-        let key = if let Some(frequencies) = &self.frequencies {
-            // Already acquired slots are still referenced by this physical CUDA group.
-            self.slots
-                .iter()
-                .filter(|(_, (_, last))| *last <= group_start)
-                .min_by_key(|(key, (_, last))| (frequencies[frequency_index(**key)], *last))
-                .map(|(key, _)| *key)
-                .context("no evictable expert slot")?
-        } else {
-            let (age, _) = self.lru.first().context("empty expert cache")?;
-            ensure!(*age <= group_start, "no evictable expert slot");
-            self.lru.pop_first().unwrap().1
-        };
+        // Most entries predate this CUDA group. Skip its pinned slots even
+        // when their frequency is lower than every evictable slot.
+        let victim = self
+            .eviction_order
+            .iter()
+            .find(|(_, age, _)| *age <= group_start)
+            .copied()
+            .context("no evictable expert slot")?;
+        self.eviction_order.remove(&victim);
+        let key = victim.2;
         let bytes = key.2.bytes();
         self.resident_bytes -= bytes;
         Ok((
@@ -488,16 +485,38 @@ impl DeviceCache {
     }
 
     fn touch(&mut self, key: Key, stamp: u64) -> Option<usize> {
-        let (slot, age) = self.slots.get_mut(&key)?;
-        if let Some(frequencies) = &mut self.frequencies {
-            let frequency = &mut frequencies[frequency_index(key)];
-            *frequency = frequency.saturating_add(1);
+        let (slot, age) = *self.slots.get(&key)?;
+        self.record_access(key, Some(age), stamp);
+        self.slots.insert(key, (slot, stamp));
+        Some(slot)
+    }
+
+    fn record_access(&mut self, key: Key, old_age: Option<u64>, stamp: u64) {
+        let (old, new) = if let Some(frequencies) = &mut self.frequencies {
+            let counter = &mut frequencies[frequency_index(key)];
+            let old = *counter;
+            *counter = old.saturating_add(1);
+            (old, *counter)
         } else {
-            self.lru.remove(&(*age, key));
-            self.lru.insert((stamp, key));
+            (0, 0)
+        };
+        if let Some(age) = old_age {
+            self.eviction_order.remove(&(old, age, key));
         }
-        *age = stamp;
-        Some(*slot)
+        // Decode and both prefill shards share the expert's request history.
+        #[cfg(feature = "recipe-prefill")]
+        if old != new {
+            for format in [SlotFormat::Full, SlotFormat::Rank(0), SlotFormat::Rank(1)] {
+                let sibling = Key(key.0, key.1, format);
+                if sibling != key {
+                    if let Some(&(_, age)) = self.slots.get(&sibling) {
+                        self.eviction_order.remove(&(old, age, sibling));
+                        self.eviction_order.insert((new, age, sibling));
+                    }
+                }
+            }
+        }
+        self.eviction_order.insert((new, stamp, key));
     }
 
     fn acquire(
@@ -557,13 +576,8 @@ impl DeviceCache {
         let slot = slot as usize;
         self.resident_bytes += slot_bytes;
         self.uploads += 1;
+        self.record_access(key, None, stamp);
         self.slots.insert(key, (slot, stamp));
-        if let Some(frequencies) = &mut self.frequencies {
-            let frequency = &mut frequencies[frequency_index(key)];
-            *frequency = frequency.saturating_add(1);
-        } else {
-            self.lru.insert((stamp, key));
-        }
         Ok(slot)
     }
 }
@@ -1183,7 +1197,9 @@ mod tests {
         // that protects experts collected for a pending group kernel.
         for i in 0..3 {
             cache.slots.insert(Backbone(2).full(i), (0, i as u64));
-            cache.lru.insert((i as u64, Backbone(2).full(i)));
+            cache
+                .eviction_order
+                .insert((0, i as u64, Backbone(2).full(i)));
         }
         assert_eq!(cache.touch(Backbone(2).full(0), 3), Some(0));
         cache.evict_slot(u64::MAX).unwrap();
@@ -1204,6 +1220,9 @@ mod tests {
         for (i, key) in keys.iter().copied().enumerate() {
             cache.slots.insert(key, (0, i as u64 + 1));
             frequency[frequency_index(key)] = [8, 8, 1][i];
+            cache
+                .eviction_order
+                .insert(([8, 8, 1][i], i as u64 + 1, key));
         }
         cache.frequencies = Some(frequency);
         cache.resident_bytes = 3 * SLOT_BYTES;
@@ -1219,6 +1238,44 @@ mod tests {
         );
         assert!(cache.evict_slot(0).is_err());
         assert_eq!(cache.slots.len(), 1);
+    }
+
+    #[cfg(feature = "recipe-prefill")]
+    #[test]
+    fn ranked_eviction_matches_reference_with_shared_expert_formats() {
+        let mut cache = DeviceCache::new(0).unwrap();
+        cache.frequencies = Some(vec![0; EXPERT_KEYS].into_boxed_slice());
+        let mut seed = 17_u32;
+        for stamp in 1..=4000 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let format = [SlotFormat::Full, SlotFormat::Rank(0), SlotFormat::Rank(1)]
+                [(seed >> 16) as usize % 3];
+            let key = Key(Backbone(2), (seed >> 8) as usize % 24, format);
+            if cache.touch(key, stamp).is_none() {
+                cache.record_access(key, None, stamp);
+                cache.slots.insert(key, (0, stamp));
+                cache.resident_bytes += format.bytes();
+            }
+            if stamp % 3 == 0 {
+                let cutoff = stamp.saturating_sub(8);
+                let reference = cache
+                    .slots
+                    .iter()
+                    .filter(|(_, (_, age))| *age <= cutoff)
+                    .min_by_key(|(k, (_, age))| {
+                        (
+                            cache.frequencies.as_ref().unwrap()[frequency_index(**k)],
+                            *age,
+                        )
+                    })
+                    .map(|(key, _)| *key);
+                assert_eq!(cache.evict_slot(cutoff).is_ok(), reference.is_some());
+                if let Some(key) = reference {
+                    assert!(!cache.slots.contains_key(&key));
+                }
+            }
+            assert_eq!(cache.slots.len(), cache.eviction_order.len());
+        }
     }
 
     #[test]
