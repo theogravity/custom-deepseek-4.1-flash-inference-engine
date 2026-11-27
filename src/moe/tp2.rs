@@ -7,6 +7,14 @@ const GROUP_ROWS: usize = 2048;
 const COPY_FLOATS: usize = (2 << 20) / size_of::<f32>();
 
 unsafe extern "C" {
+    pub(super) fn ds_recipe_free_uploads(device: i32, work: *mut c_void);
+    pub(super) fn ds_recipe_staged_rank(
+        work: *mut *mut c_void,
+        slot: *mut c_void,
+        bytes: usize,
+        parts: *const *const c_void,
+        rank: i32,
+    ) -> i32;
     pub(super) fn ds_recipe_upload_rank(
         slot: *mut c_void,
         bytes: usize,

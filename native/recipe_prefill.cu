@@ -6,6 +6,8 @@
 #include <atomic>
 #include <mutex>
 #include <cstdint>
+#include <cstring>
+#include <new>
 #include "moe_types.cuh"
 #include "diffbot_device.cuh"
 #define CHECK(call) do { auto rc = (call); if (rc != cudaSuccess) return int(rc); } while(0)
@@ -217,6 +219,66 @@ extern "C" int ds_recipe_upload_rank(void *storage, size_t capacity, const void 
         CHECK(cudaMemcpy(dst + in_width, output, out_width * sizeof(half), cudaMemcpyHostToDevice));
     }
     return 0;
+}
+
+// Two pinned slabs let the CPU gather the next strided checkpoint shard
+// while the default stream consumes the preceding upload.
+struct RankUploads {
+    char *slab[2]{};
+    cudaEvent_t ready[2]{};
+    unsigned next = 0;
+    ~RankUploads() {
+        for (int i = 0; i < 2; ++i) {
+            if (ready[i]) { cudaEventSynchronize(ready[i]); cudaEventDestroy(ready[i]); }
+            if (slab[i]) cudaFreeHost(slab[i]);
+        }
+    }
+};
+
+extern "C" void ds_recipe_free_uploads(int device, RankUploads *uploads) {
+    if (uploads) { cudaSetDevice(device); delete uploads; }
+}
+
+extern "C" int ds_recipe_staged_rank(RankUploads **state, void *storage, size_t capacity,
+                                     const void *const *parts, int rank) {
+    if (!state || !storage || capacity < ds_recipe_rank_slot_bytes() || !parts || rank < 0 || rank > 1)
+        return int(cudaErrorInvalidValue);
+    for (int j=0; j<9; ++j) if (!parts[j]) return int(cudaErrorInvalidValue);
+    if (!*state) {
+        auto *created = new(std::nothrow) RankUploads{};
+        if (!created) return int(cudaErrorMemoryAllocation);
+        for (int i=0; i<2; ++i) {
+            auto status=cudaMallocHost(&created->slab[i],ds_recipe_rank_slot_bytes());
+            if (status==cudaSuccess) status=cudaEventCreateWithFlags(&created->ready[i],cudaEventDisableTiming);
+            if (status!=cudaSuccess) { delete created; return int(status); }
+        }
+        *state=created;
+    }
+    auto &work=**state;
+    const int i=work.next++%2;
+    CHECK(cudaEventSynchronize(work.ready[i]));
+    auto *slot=work.slab[i];
+    constexpr int shard=intermediate/2;
+    constexpr size_t packed=trellis_bytes<shard>;
+    constexpr size_t pitch=(intermediate/16)*48*sizeof(uint16_t);
+    for (auto proj : {Gate,Up}) {
+        auto *src=static_cast<const char *>(parts[proj==Gate ? 0 : 1])+rank*(pitch/2);
+        for (int r=0;r<H/16;++r)
+            std::memcpy(slot+proj*packed+r*(pitch/2),src+r*pitch,pitch/2);
+    }
+    std::memcpy(slot+Down*packed,static_cast<const char *>(parts[2])+rank*packed,packed);
+    auto *scales=reinterpret_cast<half *>(slot+3*packed);
+    for (auto proj : {Gate,Down,Up}) {
+        int first=proj==Gate ? 3 : proj==Up ? 5 : 7;
+        int inputs=proj==Down ? shard : H, outputs=proj==Down ? H : shard;
+        auto *dst=scales+proj*(H+shard);
+        std::memcpy(dst,static_cast<const half *>(parts[first])+(proj==Down?rank*shard:0),inputs*sizeof(half));
+        std::memcpy(dst+inputs,static_cast<const half *>(parts[first+1])+(proj==Down?0:rank*shard),outputs*sizeof(half));
+    }
+    CHECK(cudaMemcpyAsync(storage,slot,ds_recipe_rank_slot_bytes(),cudaMemcpyHostToDevice));
+    auto recorded=cudaEventRecord(work.ready[i],nullptr);
+    if (recorded!=cudaSuccess) cudaStreamSynchronize(nullptr);
+    return int(recorded);
 }
 
 // Ordered, bounded bridge between two local device buffers. Host synchronization

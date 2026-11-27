@@ -316,6 +316,10 @@ struct DeviceCache {
     #[cfg(feature = "recipe-prefill")]
     tp2_peer_dma: bool,
     #[cfg(feature = "recipe-prefill")]
+    stage_rank_weights: bool,
+    #[cfg(feature = "recipe-prefill")]
+    upload_workspace: *mut c_void,
+    #[cfg(feature = "recipe-prefill")]
     rank_workspace: tp2::Workspace,
     fused: bool,
     packed_decode: bool,
@@ -341,6 +345,10 @@ impl DeviceCache {
             tp2_prefill: tp2_prefill_enabled()?,
             #[cfg(feature = "recipe-prefill")]
             tp2_packed_input: switch("DS4_TP2_PACKED_INPUT", false)?,
+            #[cfg(feature = "recipe-prefill")]
+            stage_rank_weights: switch("DS4_TP2_STAGE_WEIGHTS", false)?,
+            #[cfg(feature = "recipe-prefill")]
+            upload_workspace: ptr::null_mut(),
             #[cfg(feature = "recipe-prefill")]
             tp2_peer_dma: switch("DS4_TP2_PEER_DMA", false)?,
             #[cfg(feature = "recipe-prefill")]
@@ -483,7 +491,17 @@ impl DeviceCache {
         let status = match key.2 {
             #[cfg(feature = "recipe-prefill")]
             SlotFormat::Rank(rank) => unsafe {
-                tp2::ds_recipe_upload_rank(slot, slot_bytes, parts.as_ptr(), rank.into())
+                if self.stage_rank_weights {
+                    tp2::ds_recipe_staged_rank(
+                        &mut self.upload_workspace,
+                        slot,
+                        slot_bytes,
+                        parts.as_ptr(),
+                        rank.into(),
+                    )
+                } else {
+                    tp2::ds_recipe_upload_rank(slot, slot_bytes, parts.as_ptr(), rank.into())
+                }
             },
             SlotFormat::Full => unsafe {
                 ds_moe_upload_parts(slot, parts.as_ptr(), self.packed_upload.into())
@@ -509,6 +527,11 @@ impl DeviceCache {
 
 impl Drop for DeviceCache {
     fn drop(&mut self) {
+        #[cfg(feature = "recipe-prefill")]
+        unsafe {
+            tp2::ds_recipe_free_uploads(self.device, self.upload_workspace);
+        }
+
         #[cfg(feature = "recipe-prefill")]
         self.rank_workspace.free(self.device);
         unsafe { ds_moe_peer_free(self.peer_link) };
