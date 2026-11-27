@@ -14,6 +14,10 @@ At 25,625 input tokens per request, the shared-prefix LFU engine delivered 462â€
 
 The selected attention scorer and 6 GiB prefix RAM tier measured **278 / 422 / 460 aggregate tok/s** at C1/C4/C6 on the unchanged published 25,625-token edit script's second pass. The tagged 375 W checkpoint previously measured 275 / 414 / 448. The published comparison points are 282 / 518 / 557; the largest remaining gaps on this edit are at four and six clients. These single script passes use the upstream timing convention. The 404k coding and full-window retrieval results use repeated waves and explicit cache checks. [Long-context measurements](long-context.md) Â· [Upstream replay](../results/upstream/long-context-published-375w.txt)
 
+## Follow-up after decoupling prefix blocks from prefill batches
+
+The 25,600-token reusable checkpoint raised the Rust engine's six-wave medians to **491.4 tok/s at C4** and **497.8 tok/s at C6**, with first-output medians of 0.219 s and 0.312 s. That leaves the native engine 5.1% and 10.6% below the published 600 W vLLM values. The native measurements used 375 W per GPU and one warm-up plus six measured waves. C1 was not included. Full method, caveats, and raw waves: [post-prefix-fix benchmark](prefix-fix-benchmark-20261127.md).
+
 ## Matched GPU power test on the tuned release
 
 The same server process ran at 600 W, then 375 W, then 600 W again on both inference cards. The table gives the second pass of the unchanged upstream code-edit script at each setting. All entries are output tok/s, aggregate across active clients. The measured CPU socket cap stayed at 225 W. [Runs, hardware readbacks and output hashes](../results/workstation/power-ab-tuned.json)

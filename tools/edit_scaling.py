@@ -38,6 +38,8 @@ def stream(url, key, start, text, barrier):
                 done = True
                 continue
             event = json.loads(data)
+            if event.get("error"):
+                raise ValueError(f"inference stream error at function {start}: {event['error']!r}")
             if event.get("usage"):
                 usage = event["usage"]
             for choice in event.get("choices", []):

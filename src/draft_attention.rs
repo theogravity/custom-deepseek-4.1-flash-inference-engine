@@ -358,7 +358,7 @@ mod tests {
             "select both inference GPUs"
         );
         let mut rt = Runtime::open(&PathBuf::from(std::env::var("DS4_TEST_PACK")?), [0, 1])?;
-        for pos in [7usize, 128, 241] {
+        for pos in [7usize, 128, 241, 25_600] {
             let mut bytes = vec![0; 16 + pos.min(WINDOW) * DIM * 2 * STAGES];
             bytes[..8].copy_from_slice(b"DS4DRF01");
             bytes[8..16].copy_from_slice(&(pos as u64).to_le_bytes());

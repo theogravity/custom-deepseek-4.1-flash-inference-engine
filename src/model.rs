@@ -307,6 +307,7 @@ enum IdleToolPrefill {
 }
 
 pub struct Model {
+    gpu_fault: Option<String>,
     idle_tool_prefill: Option<IdleToolPrefill>,
     idle_tool_limit: usize,
     prefix: PrefixCache,
@@ -359,6 +360,7 @@ impl Model {
             Err(e) => return Err(e.into()),
         };
         let model = Self {
+            gpu_fault: None,
             idle_tool_prefill: None,
             idle_tool_limit: idle_tool_limit.min(max_ctx),
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
@@ -445,6 +447,11 @@ impl Model {
         limit: usize,
         temperature: f32,
     ) -> Result<Session> {
+        ensure!(
+            self.gpu_fault.is_none(),
+            "CUDA runtime is unavailable after a prior cache snapshot/restore failure: {}",
+            self.gpu_fault.as_deref().unwrap_or_default()
+        );
         let prompt_len = ids.len();
         ensure!(
             prompt_len > 0 && prompt_len <= self.max_ctx && ids.iter().all(|t| *t < 129280),
@@ -479,9 +486,18 @@ impl Model {
                 if let Some(profile) = &mut timing {
                     profile.draft_restore(tier, bytes.len(), elapsed, restored.is_ok());
                 }
-                if let Some(state) = cached(restored, "DSpark restore") {
-                    eprintln!("prefix DSpark tokens={pos}");
-                    draft = Some(state);
+                match restored {
+                    Ok(state) => {
+                        eprintln!("prefix DSpark tokens={pos}");
+                        draft = Some(state);
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        self.gpu_fault = Some(message.clone());
+                        return Err(error).context(format!(
+                            "restoring cached DSpark state at {pos} tokens; engine marked unavailable"
+                        ));
+                    }
                 }
             }
         }
@@ -542,6 +558,11 @@ impl Model {
     }
 
     pub(crate) fn idle_tool_step(&mut self) -> Result<usize> {
+        ensure!(
+            self.gpu_fault.is_none(),
+            "CUDA runtime is unavailable after a prior cache snapshot/restore failure: {}",
+            self.gpu_fault.as_deref().unwrap_or_default()
+        );
         let Some(work) = self.idle_tool_prefill.take() else {
             return Ok(0);
         };
@@ -564,7 +585,7 @@ impl Model {
         let last = (warm.prompt_len - 1) / PREFIX_BLOCK_TOKENS * PREFIX_BLOCK_TOKENS;
         if before >= last {
             if before > warm.reused {
-                self.store_prefill(&warm, true);
+                self.store_prefill(&warm, true)?;
             }
             return Ok(0);
         }
@@ -655,6 +676,14 @@ impl Model {
     /// Advance each admitted request by one prefill chunk or one verification
     /// round. Each result corresponds to its input slot. Drop failed sessions.
     pub(crate) fn step_batch(&mut self, sessions: &mut [&mut Session]) -> Vec<Result<Step>> {
+        if let Some(fault) = &self.gpu_fault {
+            let message = format!(
+                "CUDA runtime is unavailable after a prior cache snapshot/restore failure: {fault}"
+            );
+            return (0..sessions.len())
+                .map(|_| Err(anyhow::anyhow!(message.clone())))
+                .collect();
+        }
         let mut results: Vec<_> = (0..sessions.len()).map(|_| None).collect();
         let single_client = sessions
             .iter()
@@ -675,6 +704,15 @@ impl Model {
                 }));
             } else if session.is_prefill() {
                 results[index] = Some(self.prefill_step(session, false));
+                if self.gpu_fault.is_some() {
+                    let fault = self.gpu_fault.as_deref().unwrap_or_default();
+                    let message = format!(
+                        "CUDA runtime is unavailable after a cache snapshot/restore failure: {fault}"
+                    );
+                    return (0..sessions.len())
+                        .map(|_| Err(anyhow::anyhow!(message.clone())))
+                        .collect();
+                }
             } else {
                 let remaining = session.limit - session.emitted - 1;
                 let width = self.spec_k.min(remaining);
@@ -751,7 +789,7 @@ impl Model {
         results.into_iter().map(Option::unwrap).collect()
     }
 
-    fn store_prefill(&mut self, session: &Session, ram_only: bool) {
+    fn store_prefill(&mut self, session: &Session, ram_only: bool) -> Result<()> {
         let pos = session.pos;
         let prompt = &session.ids[..session.prompt_len];
         let span = prompt.len().min(128);
@@ -763,19 +801,30 @@ impl Model {
         .is_some()
         {
             if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
-                let saved = draft
-                    .snapshot(&mut self.rt, pos)
-                    .and_then(|data| self.prefix.write_draft(prompt, pos, span, &data, ram_only));
-                cached(saved, "DSpark store");
+                let data = match draft.snapshot(&mut self.rt, pos) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        self.gpu_fault = Some(message);
+                        return Err(error).context(
+                            "snapshotting cached DSpark state; engine marked unavailable",
+                        );
+                    }
+                };
+                cached(
+                    self.prefix.write_draft(prompt, pos, span, &data, ram_only),
+                    "DSpark store",
+                );
             }
         }
+        Ok(())
     }
 
     fn prefill_step(&mut self, session: &mut Session, interruptible: bool) -> Result<Step> {
         let pos = session.pos;
         let prompt = &session.ids[..session.prompt_len];
         if session.points.get(session.next_point) == Some(&pos) {
-            self.store_prefill(session, interruptible);
+            self.store_prefill(session, interruptible)?;
             session.next_point += 1;
         }
         let horizon = session
@@ -1026,7 +1075,7 @@ mod tests {
                 .unwrap()
                 .snapshot(&mut model.rt, 1536)?
         );
-        model.store_prefill(&idle, true);
+        model.store_prefill(&idle, true)?;
         let mut branch = model.start_request(ids, 4, 0.)?;
         assert_eq!(branch.pos, 1536);
         let mut samples = Vec::new();

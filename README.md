@@ -19,13 +19,13 @@ On six different follow-ups to a warm 404k-token conversation, median time to fi
 
 ### Same workloads as the vLLM reference
 
-| Concurrent clients | Published vLLM at 600 W | Previous native release | Concurrent coding release | Recommended defaults at 375 W |
-|---:|---:|---:|---:|---:|
-| 1 | 282 | 382.5 | 383 | **343.1** |
-| 4 | 518 | 457.5 | **584** | 312.0 |
-| 6 | 557 | 502.5 | **583** | 261.2 |
+| Concurrent clients | Published vLLM at 600 W | Previous native release | Concurrent coding release | Recommended defaults before prefix fix | Native after prefix fix, 375 W |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 282 | 382.5 | 383 | **343.1** | — |
+| 4 | 518 | 457.5 | **584** | 312.0 | 491.4 |
+| 6 | 557 | 502.5 | **583** | 261.2 | 497.8 |
 
-Rates are aggregate output tok/s on the upstream 25,625-token Python edit. Previous-release native figures are medians of six warm second passes at 375 W per GPU; the published vLLM figures are one warm second pass at 600 W. The latest full-profile results used one warm-up and six measured waves. They retain the single-client gain, but four- and six-client rates are below the earlier concurrent coding release. Median first output on the recommended defaults was 1.71/6.43/9.69 s at 1/4/6 clients. The latest run and its cold-prefill and six-session capacity results are detailed in [Full headline benchmark](benchmarks/reports/default-profile-headline-20261127.md). [Concurrent coding experiment](benchmarks/reports/concurrent-repetition.md) · [Earlier headline comparison](benchmarks/reports/headline-reference.md)
+Rates are aggregate output tok/s on the upstream 25,625-token Python edit. Previous-release native figures are medians of six warm second passes at 375 W per GPU; the published vLLM figures are one warm second pass at 600 W. The new prefix-fix results are medians of six measured waves after one warm-up, with a 25,600-token prefix restore and 1,500 generated tokens per client. They reach 491.4/497.8 tok/s at C4/C6: 5.1%/10.6% below the published vLLM values. C1 was not remeasured in this run. Median first output was 0.22/0.31 s across C4/C6. The raw waves and failure-handling notes are in [Post-prefix-fix benchmark](benchmarks/reports/prefix-fix-benchmark-20261127.md). Earlier default-profile cold-prefill and six-session capacity results are detailed in [Full headline benchmark](benchmarks/reports/default-profile-headline-20261127.md). [Concurrent coding experiment](benchmarks/reports/concurrent-repetition.md) · [Earlier headline comparison](benchmarks/reports/headline-reference.md)
 
 ### Earlier C1 isolated candidate
 
