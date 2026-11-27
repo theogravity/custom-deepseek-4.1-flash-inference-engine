@@ -191,6 +191,13 @@ impl Model {
                 residual::capture(&self.rt, &h, features.as_mut().unwrap(), layer - 37, rows)?;
             }
             let x = residual::prepare(&mut self.rt, &stem, "attn", &h, &mut mix, rows)?;
+            if skip_decoder && self.bounded_replay && layer + 1 == attention::FIRST_LOCAL_DECODER {
+                let [s] = &mut *items else {
+                    anyhow::bail!("source-only replay expects a single prefill");
+                };
+                attention::write_last_source(&mut self.rt, s.cache, s.pos, s.rows, &x)?;
+                break;
+            }
             let y = attend(&mut self.rt, items, &mut errors, layer, &x)?;
             if errors.iter().all(Option::is_some) {
                 return Ok(errors.into_iter().map(|e| Err(e.unwrap())).collect());

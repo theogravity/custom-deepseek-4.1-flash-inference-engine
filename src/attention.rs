@@ -586,6 +586,7 @@ struct Verification {
 
 #[derive(Default)]
 pub struct AttentionState {
+    pub(crate) replay_fresh_window: bool,
     prompt_len: usize,
     capacity_limit: usize,
     verify: Option<Verification>,
@@ -1482,6 +1483,84 @@ pub(crate) struct Span<'a> {
     pub rows: usize,
     pub error: &'a mut Option<anyhow::Error>,
 }
+/// The last KV source owns both compressed KV and a full sliding window.
+pub(crate) fn write_last_source(
+    rt: &mut Runtime,
+    state: &mut AttentionState,
+    pos: usize,
+    batch: usize,
+    x: &Dev,
+) -> Result<()> {
+    let owner = FIRST_LOCAL_DECODER - 1;
+    let prefix = format!("layers.{owner}.attn");
+    require_state!(
+        state.verify.is_none() && state.windows.get(&owner).map_or(0, |w| w.next_pos) == pos,
+        "discontinuous replay KV write"
+    );
+    let src = state.sources.entry(owner).or_default();
+    if state.capacity_limit > 0 {
+        src.values
+            .plan(state.prompt_len, state.capacity_limit, 1, KV_BYTES);
+        src.keys
+            .plan(state.prompt_len, state.capacity_limit, 1, INDEX_BYTES);
+    }
+    append_source(
+        rt,
+        src,
+        &prefix,
+        x,
+        pos,
+        batch,
+        1,
+        owner,
+        None,
+        gpu_compress(),
+    )?;
+    let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
+    let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
+    cuda_ok(
+        unsafe { ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32) },
+        "normalizing replay window",
+    )?;
+    let kept = batch.min(2 * WINDOW);
+    let start = pos + batch - kept;
+    let freqs = device_freqs(rt, state, start, kept, true)?;
+    let mut packed = rt.buffer(kept * DIM / 2)?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_transform(
+                rt.device,
+                kv.as_mut_ptr().add((batch - kept) * DIM),
+                packed.as_mut_ptr().cast(),
+                freqs,
+                1,
+                DIM as i32,
+                64,
+                0,
+                kept as i32,
+            )
+        },
+        "packing replay window",
+    )?;
+    let window = state.windows.entry(owner).or_default();
+    let ring = window.on(rt.device, Some(&mut rt.moe_cache))?;
+    cuda_ok(
+        unsafe {
+            ds4_attn_window(
+                rt.device,
+                ring.ptr.as_ptr(),
+                start as i32,
+                kept as i32,
+                packed.as_mut_ptr().cast(),
+                DEVICE_TO_DEVICE,
+            )
+        },
+        "writing replay window",
+    )?;
+    window.next_pos = pos + batch;
+    state.advance_deferred_windows(pos, batch)
+}
+
 pub fn forward_dev(
     rt: &mut Runtime,
     state: &mut AttentionState,
@@ -1729,6 +1808,13 @@ fn apply_span(
     }
 
     let sink = rt.vector_ptr(&format!("{prefix}.attn_sink"), HEADS)?;
+    // A retained replay tail starts its own local decoder window. Absolute
+    // positions still drive rotary encoding, compressed selection and ring writes.
+    let window_pos = if state.replay_fresh_window && layer >= FIRST_LOCAL_DECODER {
+        0
+    } else {
+        pos
+    };
     let (span, decode) = state.window_layout(pos, batch);
     let window = state.windows.entry(layer).or_default();
     let ring = window.on(rt.device, Some(&mut rt.moe_cache))?;
@@ -1768,7 +1854,7 @@ fn apply_span(
                     q_ptr.add(t * HEADS * DIM),
                     ring.data(),
                     current.as_ptr().cast(),
-                    pos as i32,
+                    window_pos as i32,
                     t as i32,
                     span as i32,
                     i32::from(decode),

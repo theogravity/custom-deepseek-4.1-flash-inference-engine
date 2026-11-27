@@ -48,6 +48,25 @@ pub(crate) fn spec_k() -> Result<usize> {
     Ok(width)
 }
 
+pub(crate) fn bounded_replay() -> Result<bool> {
+    match std::env::var("DS4_PREFILL_BOUNDED_REPLAY").as_deref() {
+        Ok("1") => Ok(true),
+        Ok("0") | Err(std::env::VarError::NotPresent) => Ok(false),
+        _ => bail!("DS4_PREFILL_BOUNDED_REPLAY must be 0 or 1"),
+    }
+}
+
+// Every reusable boundary has 128 real decoder/DSpark rows. Keep the tail
+// in one call so replay-only layers can start with an empty sliding window.
+fn replay_chunk(pos: usize, horizon: usize, chunk: usize) -> (usize, bool) {
+    let remaining = horizon - pos;
+    if remaining > 128 && chunk > 128 {
+        (chunk.min(remaining - 128), true)
+    } else {
+        (remaining.min(chunk), false)
+    }
+}
+
 // Geometric boundaries bound the number of snapshots on long prefills while
 // retaining branches well before the final complete chunk.
 fn checkpoints(prompt: usize, chunk: usize) -> Vec<usize> {
@@ -175,6 +194,7 @@ pub(crate) struct Session {
     temperature: f32,
     rng: Option<StdRng>,
     suspended: Option<SwapHandle>,
+    decoder_gap: bool,
     cache: AttentionState,
     draft: Option<DraftState>,
     lookup: prompt_lookup::PromptLookup,
@@ -282,6 +302,7 @@ pub struct Model {
     engram: Arc<Engram>,
     overlap_prefill_engram: bool,
     prune_prefill_decoder: bool,
+    bounded_replay: bool,
     max_ctx: usize,
     chunk: usize,
 }
@@ -331,6 +352,7 @@ impl Model {
             },
             rt: Runtime::open(pack, devices)?,
             engram: Arc::new(Engram::new(tok)?),
+            bounded_replay: bounded_replay()?,
             prune_prefill_decoder: match std::env::var("DS4_PREFILL_DECODER_PRUNE").as_deref() {
                 Err(std::env::VarError::NotPresent) | Ok("0") => false,
                 Ok("1") => true,
@@ -445,6 +467,7 @@ impl Model {
             temperature,
             rng: (temperature > 0.).then(StdRng::from_entropy),
             suspended: None,
+            decoder_gap: false,
             cache,
             draft,
             lookup,
@@ -724,22 +747,31 @@ impl Model {
             self.store_prefill(session, interruptible);
             session.next_point += 1;
         }
-        let n = self.chunk.min(prompt.len() - pos);
-        let last = pos + n == prompt.len();
         let horizon = session
             .points
             .get(session.next_point)
             .copied()
             .unwrap_or(prompt.len());
-        let observe =
-            session.draft.is_some() && (interruptible || pos + n > horizon.saturating_sub(128));
+        let replay = self.bounded_replay && !interruptible && self.chunk > 128;
+        let (n, skip_replay) = if replay {
+            replay_chunk(pos, horizon, self.chunk)
+        } else {
+            (self.chunk.min(prompt.len() - pos), false)
+        };
+        let last = pos + n == prompt.len();
+        let observe = session.draft.is_some()
+            && !skip_replay
+            && (interruptible || pos + n > horizon.saturating_sub(128));
         self.rt.target_prefill = true;
-        let skip_decoder = self.prune_prefill_decoder
-            && !interruptible
-            && !observe
-            && !last
-            && !session.cache.decoder_restore_pending()
-            && crate::attention::can_defer_decoder(pos + n, horizon, self.chunk);
+        let skip_decoder = skip_replay
+            || (!self.bounded_replay
+                && self.prune_prefill_decoder
+                && !interruptible
+                && !observe
+                && !last
+                && !session.cache.decoder_restore_pending()
+                && crate::attention::can_defer_decoder(pos + n, horizon, self.chunk));
+        session.cache.replay_fresh_window = replay && !skip_replay && session.decoder_gap;
         let target = self.forward_prefill(
             ForwardItem {
                 cache: &mut session.cache,
@@ -752,7 +784,9 @@ impl Model {
             skip_decoder,
         );
         self.rt.target_prefill = false;
+        session.cache.replay_fresh_window = false;
         let target = target?;
+        session.decoder_gap = skip_replay;
         if let Some(draft) = session.draft.as_mut().filter(|_| observe) {
             draft.observe(
                 &mut self.rt,
@@ -895,6 +929,29 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_finishes_each_checkpoint_with_a_complete_window() {
+        for chunk in [129, 256, 512, 8192] {
+            for length in [1, 127, 128, 129, 511, 8193, 15864, 60013, 524288] {
+                let mut pos = 0;
+                for end in checkpoints(length, chunk).into_iter().chain([length]) {
+                    let start = pos;
+                    while pos < end {
+                        let (n, skip) = replay_chunk(pos, end, chunk);
+                        assert!(n > 0 && n <= chunk);
+                        pos += n;
+                        if skip {
+                            assert!(pos <= end - 128);
+                        } else {
+                            assert_eq!(n, (end - start).min(128));
+                            assert_eq!(end, pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn decoder_history_rounds_every_local_dependency_to_a_clean_chunk() {
@@ -1158,6 +1215,7 @@ mod tests {
                 temperature: 0.,
                 rng: None,
                 suspended: None,
+                decoder_gap: false,
                 cache: AttentionState::default(),
                 draft: None,
                 lookup: prompt_lookup::PromptLookup::new(&ids, Default::default()),
