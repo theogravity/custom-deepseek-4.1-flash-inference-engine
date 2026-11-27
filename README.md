@@ -40,6 +40,15 @@ Both servers used identical rendered prompt tokens, the released DSpark drafter 
 
 The installed vLLM profile uses an 8,192-token scheduling budget and TP2 within each layer. The measured native release still puts 20 backbone layers on each GPU. Matching the local vLLM settings and performance is the [native TP2 target](docs/engine.md#native-tp2-target). [Same-host measurements and model-kernel experiment](benchmarks/reports/local-vllm-prefill.md) · [Original published cold-prefill comparison](benchmarks/reports/headline-reference.md#single-client-cold-prefill)
 
+The experimental TP2 prefill backend also supports physical steps of 8,192 and 16,384 input tokens.
+
+| Cold input tokens | TP2 with 8,192-token steps | TP2 with 16,384-token steps | Installed vLLM with 8,192-token steps |
+|---:|---:|---:|---:|
+| 15,864 | 8.68 s | 12.74 s | 2.91 s |
+| 60,013 | 32.12 s | 29.73 s | 8.07 s |
+
+When a 68,049-token code review arrived during another agent’s Rust generation, both settings took 51.9 seconds to first output for the arriving agent. The existing agent’s longest stream gap increased from 13.24 to 17.94 seconds with the larger step. Each setting was measured once. [Cold prefill and agent overlap](benchmarks/reports/local-vllm-prefill.md#physical-prefill-steps-of-8192-and-16384-tokens)
+
 ## Build and serve from a fresh clone
 
 Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.

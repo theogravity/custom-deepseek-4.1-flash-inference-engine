@@ -1,0 +1,11 @@
+services:
+  dsv41-flash-exl3:
+    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-prefill-20261127}
+    environment:
+      DS4_TP_DENSE: "1"
+      DS4_TP2_PREFILL: "1"
+      DS4_PREFILL_LT: "1"
+      DS4_PREFILL_BOUNDED_REPLAY: "1"
+      DS4_PREFILL_INDEX_MMA: "1"
+      DS4_TP2_PACKED_INPUT: "1"
+    command: ["serve", "--bind", "0.0.0.0:8001", "--max-context", "524288", "--chunk-size", "${DS4_PREFILL_CHUNK:-8192}"]

@@ -59,3 +59,18 @@ This branch adds the rank-local CUDA entry points for a two-rank EXL3 expert. Fo
 To compare each rank with the installed vLLM extension, use the projection parity commands above with `/check/check_recipe_tp2.py` in the final Docker invocation. The test evaluates expert 3 at layers 0 and 20 on both ranks using 129 routed rows in two jobs. It checks the partial outputs before reduction and compares their host-side sum. This test covers the rank-local CUDA calculations. An on-device collective, TP2 attention, scheduler integration, full-model output fidelity and serving performance remain open.
 
 Both ranks matched the installed extension bit-for-bit in all four cases. The fixture ran with Python assertions disabled and verified that seven invalid job layouts per case were rejected before allocation. [Rank-local test results](../results/upstream/tp2-expert-shards.json)
+
+## Physical prefill steps of 8,192 and 16,384 tokens
+
+This experiment uses rank-local EXL3 expert shards, sharded large dense projections, cuBLASLt MXFP8, BF16 tensor-core index scoring, and layer-20 bounded decoder replay. Both arms used the released K=5 drafter, identical requests, separate empty prefix directories, six resident slots, and the same 375 W GPU and 225 W CPU limits as the installed reference. Each result is one run. [Per-request data](../results/upstream/tp2-prefill-chunks.json)
+
+| Workload | 8,192 step | 16,384 step |
+|---|---:|---:|
+| Cold first output, 15,864 input tokens | 8.68 s | 12.74 s |
+| Cold first output, 60,013 input tokens | 32.12 s | 29.73 s |
+| First output for a 68,049-token code review arriving during a Rust generation | 51.89 s | 51.91 s |
+| Longest interval between streamed text or reasoning events on the existing client during that prefill | 13.24 s | 17.94 s |
+
+The second coding client arrived after the first emitted eight stream events. The first client generated 1,500 tokens in both arms. The timing includes scheduling, weight loading, and streamed delivery. Both arms reported zero reused prefix tokens. The stream can deliver several tokens in one event.
+
+Build with `cargo build --release --features recipe-prefill` and `docker build -t ds4-flash-rs:tp2-prefill-20261127 .`. For the benchmark settings, append `-f deploy/profiles/reference-drafter.yml -f deploy/profiles/tp2-prefill.yml` to the concurrent coding Compose stack. Set `DS4_PREFILL_CHUNK=16384` to select the larger step. The default in the TP2 overlay is 8192. The model offers 524,288 tokens of context with either value.
