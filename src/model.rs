@@ -293,9 +293,14 @@ impl Model {
         max_ctx: usize,
         chunk: usize,
     ) -> Result<Self> {
+        let max_chunk = if crate::moe::tp2_prefill_enabled()? && crate::runtime::tp_dense() {
+            8192
+        } else {
+            512
+        };
         ensure!(
-            chunk > 0 && chunk <= 512 && (1..=524288).contains(&max_ctx),
-            "invalid chunk or context limit"
+            (1..=max_chunk).contains(&chunk) && (1..=524288).contains(&max_ctx),
+            "chunk must be 1..={max_chunk} and context must be 1..=524288"
         );
         let cfg: serde_json::Value =
             serde_json::from_reader(std::fs::File::open(pack.join("config.json"))?)?;
