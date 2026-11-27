@@ -2540,6 +2540,123 @@ mod tests {
 
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_index_signed_heads_resolve_close_cutoff_and_exact_ties() -> Result<()> {
+        let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let width = TOP + 8;
+        let rows = 2;
+        let pos = width - rows;
+
+        // 511 positions score above the cutoff. Row 0 must choose the earlier
+        // of two tied keys. Row 1 exposes a new key that beats both by 2^-15.
+        let mut keys = vec![0u8; width * INDEX_BYTES];
+        let mut expected_scores = Vec::with_capacity(width);
+        for (i, key) in keys.as_chunks_mut::<INDEX_BYTES>().0.iter_mut().enumerate() {
+            let step = if i < TOP - 1 {
+                -2.
+            } else if i == width - 1 {
+                -1.
+            } else if i == TOP + 1 || i == TOP + 3 {
+                0.
+            } else {
+                1.
+            };
+            key[..INDEX_DIM].fill(e4m3_code(1.));
+            key[1] = e4m3_code(step / 512.);
+            key[INDEX_DIM..].copy_from_slice(&1f32.to_le_bytes());
+            expected_scores.push(28. / 64. - step / 32768.);
+        }
+        let mut queries = vec![0f32; rows * INDEX_HEADS * INDEX_DIM];
+        let mut weights = vec![0f32; rows * INDEX_HEADS];
+        for (i, q) in queries
+            .as_chunks_mut::<INDEX_DIM>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            let head = i % INDEX_HEADS;
+            q[0] = [0.5, 1., 2., -1.][head % 4];
+            q[1] = f32::from(head == 1);
+            weights[i] = [1., -1., 2., -1.][head % 4];
+            // Opposite features cancel. ReLU suppresses every fourth head
+            // before the remaining positive and negative weights are applied.
+            for pair in q[2..].chunks_exact_mut(2) {
+                let v = ((head % 8) + 1) as f32 / 16.;
+                pair.copy_from_slice(&[v, -v]);
+            }
+        }
+        let keys = upload(dev, &keys)?;
+        let q = upload(dev, &queries)?;
+        let w = upload(dev, &weights)?;
+        let mut bytes = 0;
+        cuda_ok(
+            unsafe { ds4_attn_index_bytes(width as i32, rows as i32, &mut bytes) },
+            "sizing close-cutoff scratch",
+        )?;
+        let scratch = upload(dev, &vec![0xffu8; bytes])?;
+        for mode in [1, 2] {
+            let picks = upload(dev, &vec![-9i32; rows * TOP])?;
+            let mut actual = vec![f32::NAN; width * rows];
+            cuda_ok(
+                unsafe {
+                    ds4_attn_scores(
+                        dev,
+                        scratch.ptr.as_ptr(),
+                        keys.ptr.as_ptr(),
+                        q.data(),
+                        w.data(),
+                        ptr::null(),
+                        width as i32,
+                        rows as i32,
+                        actual.as_mut_ptr(),
+                        mode,
+                    )
+                },
+                "checking close-cutoff scores",
+            )?;
+            // This bound is less than half the 2^-15 cutoff gap. Ranking
+            // must agree exactly, including the lower-index tie breaker.
+            for row in actual.chunks_exact(width) {
+                for (&a, &b) in row.iter().zip(&expected_scores) {
+                    assert!((a - b).abs() <= 1e-5, "mode={mode}: {a} vs {b}");
+                }
+            }
+            cuda_ok(
+                unsafe {
+                    ds4_attn_index_select(
+                        dev,
+                        scratch.data(),
+                        keys.ptr.as_ptr(),
+                        q.data(),
+                        w.data(),
+                        ptr::null(),
+                        width as i32,
+                        pos as i32,
+                        1,
+                        rows as i32,
+                        picks.data(),
+                        ptr::null_mut(),
+                        mode,
+                    )
+                },
+                "ranking close-cutoff keys",
+            )?;
+            let mut actual = vec![-1i32; rows * TOP];
+            read(&picks, &mut actual)?;
+            for (i, row) in actual.chunks_exact(TOP).enumerate() {
+                let expected = best(&expected_scores[..pos + i + 1], TOP);
+                assert_eq!(expected[TOP - 1], if i == 0 { TOP + 1 } else { width - 1 });
+                assert_eq!(
+                    row,
+                    expected.into_iter().map(|id| id as i32).collect::<Vec<_>>(),
+                    "close-cutoff winners mode={mode}, row={i}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn cuda_index_matches_cpu_ranking_across_causal_thresholds() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         let short = upload(device, &[-9i32; 6])?;
@@ -2983,21 +3100,43 @@ mod tests {
                     selected.extend(best(visible, TOP).into_iter().map(|id| id as i32));
                     selected.resize((j + 1) * TOP, -1);
                     if has_blocks {
-                        candidates
-                            .extend(candidate_blocks(visible).into_iter().map(|id| id as i32));
+                        candidates.extend(
+                            if visible.len() <= TOP_BLOCKS * BLOCK {
+                                // The native tile emits blocks for every row, even if the
+                                // caller ignores these below the filtering threshold.
+                                (0..visible.len().div_ceil(BLOCK)).collect()
+                            } else {
+                                candidate_blocks(visible)
+                            }
+                            .into_iter()
+                            .map(|id| id as i32),
+                        );
+                        candidates.resize((j + 1) * TOP_BLOCKS, -1);
                     }
                 }
                 Ok((selected, candidates))
             };
-            run(1)?;
             let (expected, expected_blocks) = reference()?;
-            let mut got = vec![0i32; n * TOP];
-            read(&picks, &mut got)?;
-            assert_eq!(got, expected, "512k index token winners");
-            if has_blocks && pos >= TOP_BLOCKS * BLOCK {
-                let mut got = vec![0i32; n * TOP_BLOCKS];
-                read(&blocks, &mut got)?;
-                assert_eq!(got, expected_blocks, "512k index block winners");
+            for mode in [1, 2] {
+                // Poison both outputs so an omitted write by the second
+                // scorer cannot inherit a passing result from the first.
+                picks.write(&vec![-9i32; n * TOP])?;
+                blocks.write(&vec![-9i32; n * TOP_BLOCKS])?;
+                run(mode)?;
+                let mut got = vec![0i32; n * TOP];
+                read(&picks, &mut got)?;
+                assert_eq!(
+                    got, expected,
+                    "index token winners width={width} rows={n} mode={mode}"
+                );
+                if has_blocks {
+                    let mut got = vec![0i32; n * TOP_BLOCKS];
+                    read(&blocks, &mut got)?;
+                    assert_eq!(
+                        got, expected_blocks,
+                        "index block winners width={width} rows={n} mode={mode}"
+                    );
+                }
             }
             let time_gpu = |mode| -> Result<f64> {
                 run(mode)?;
