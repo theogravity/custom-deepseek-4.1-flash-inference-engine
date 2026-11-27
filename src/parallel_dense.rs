@@ -335,6 +335,67 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires DS4_TEST_PACK and two peer-accessible inference GPUs"]
+    fn wide_bf16_wire_matches_f32_transport_with_both_return_formats() -> Result<()> {
+        let pack = std::env::var("DS4_TEST_PACK")?;
+        let mut rt = Runtime::open(Path::new(&pack), [0, 1])?;
+        let mut parallel = ParallelDense::new([0, 1])?;
+        let (rows, cols, batch) = (1024, 256, 131);
+        let weights: Vec<_> = (0..rows * cols).map(|i| (i * 37 % 77 + 11) as u8).collect();
+        let scales = vec![127; rows * cols / 1024];
+        let input: Vec<_> = (0..batch * cols)
+            .map(|i| ((i * 79 % 193) as f32 - 96.3) / 17.1)
+            .collect();
+        assert!(input.iter().any(|&x| half::bf16::from_f32(x).to_f32() != x));
+        for owner in [0, 1] {
+            rt.layer(if owner == 0 { 0 } else { 20 })?;
+            let mut matrix = upload_matrix(
+                &mut rt.moe_cache,
+                owner,
+                1 - owner,
+                4,
+                &weights,
+                &scales,
+                rows,
+                cols,
+                true,
+            )?;
+            let x = rt.to_device(&input)?;
+            for round in [false, true] {
+                matrix.round_output = round;
+                let mut results = Vec::new();
+                for packed in [false, true] {
+                    for link in &mut parallel.0 {
+                        link.packed_wire = packed;
+                    }
+                    let mut out = rt.buffer(batch * rows)?;
+                    parallel.project(
+                        &mut rt.moe_cache,
+                        &matrix,
+                        rt.contexts[&owner],
+                        rt.contexts[&(1 - owner)],
+                        x.as_ptr(),
+                        out.as_mut_ptr(),
+                        batch,
+                        true,
+                        1,
+                    )?;
+                    results.push(rt.to_host(&out)?);
+                }
+                assert_eq!(results[0], results[1], "owner {owner}, rounded {round}");
+                assert_eq!(
+                    results[1]
+                        .chunks_exact(rows)
+                        .flat_map(|row| &row[rows / 2..])
+                        .all(|&v| half::bf16::from_f32(v).to_f32() == v),
+                    round
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires DS4_TEST_PACK and CUDA_VISIBLE_DEVICES set to two peer-accessible inference GPUs"]
     fn peer_dense_preserves_shard_order_and_split_k_in_both_directions() -> Result<()> {
         ensure!(
