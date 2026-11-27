@@ -503,6 +503,7 @@ mod tests {
         let routes = routes::<EXPERTS, TOP_K>(&logits, &bias, batch, false)?;
         let mut sums = [vec![0f32; input.len()], vec![0.; input.len()]];
         let mut cache = DeviceCache::new(rt.device)?;
+        cache.stage_rank_weights = false;
         for (rank, sum) in sums.iter_mut().enumerate() {
             for expert in routes.chunk_by(|a, b| a.expert == b.expert) {
                 let key = Key(
@@ -596,6 +597,7 @@ mod tests {
             for d in [0, 1] {
                 let c = rt.moe_cache.device(d)?;
                 c.tp2_prefill = true;
+                c.stage_rank_weights = true;
                 c.limit = 2; // three rank slots; more than six selected experts.
             }
             assert!(input.iter().any(|&v| half::f16::from_f32(v).to_f32() != v));

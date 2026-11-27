@@ -349,7 +349,7 @@ extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
     return -1;
   CUDA(cudaMemcpy(c->input.ptr, x, nx * 4, cudaMemcpyHostToDevice));
   if (ds_project(c, w, (const float *)c->input.ptr, (float *)c->output.ptr,
-                 rows, cols, batch, groups, mode, 0, 1, 1, rows))
+                 rows, cols, batch, groups, mode, 0, mode != 5 && mode != 6, 1, rows))
     return -1;
   CUDA(cudaMemcpy(y, c->output.ptr, ny * 4, cudaMemcpyDeviceToHost));
   return 0;

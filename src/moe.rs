@@ -151,7 +151,7 @@ impl MoeCache {
     /// weight and conversion buffers. Freeing a slot waits for pending uses.
     pub fn reserve(&mut self, device: i32, bytes: usize) -> Result<()> {
         let pool = self.reclaimable.get(&device).and_then(|p| p.upgrade());
-        let mut cache = self.devices.get_mut(&device);
+        let cache = self.devices.get_mut(&device);
         if pool.is_none() && cache.as_ref().is_none_or(|c| c.slots.is_empty()) {
             return Ok(());
         }
@@ -167,7 +167,7 @@ impl MoeCache {
                     .reclaim(missing);
             }
         }
-        let Some(cache) = cache.take() else {
+        let Some(cache) = cache else {
             return Ok(());
         };
         while released < missing && !cache.slots.is_empty() {

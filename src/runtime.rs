@@ -830,6 +830,114 @@ mod tests {
         Ok(())
     }
     #[test]
+    #[ignore = "requires DS4_PREFILL_BLAS=1 and DS4_TEST_DEVICE"]
+    fn wide_blas_controls_match_grouped_dyadic_reference() -> Result<()> {
+        ensure!(
+            std::env::var("DS4_PREFILL_BLAS")? == "1",
+            "enable wide BLAS"
+        );
+        let device = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let (rows, cols, tokens, groups) = (48, 160, 193, 2);
+        let mut raw = ptr::null_mut();
+        checked(unsafe { ds_dense_create(device, &mut raw) })?;
+        struct Guard(*mut c_void);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe { ds_dense_destroy(self.0) }
+            }
+        }
+        let ctx = Guard(raw);
+        let mut weights = vec![0f32; rows * cols];
+        for r in 0..rows {
+            weights[r * cols + r * 19 % cols] = if r % 2 == 0 { 2. } else { -0.25 };
+        }
+        let half: Vec<_> = weights.iter().copied().map(half::bf16::from_f32).collect();
+        let inputs: Vec<f32> = (0..tokens * groups * cols)
+            .map(|i| ((i * 13 % 73) as f32 - 36.) / 8.)
+            .collect();
+        for (mode, source) in [
+            (5, weights.as_ptr().cast::<c_void>()),
+            (6, half.as_ptr().cast()),
+        ] {
+            let mut data = ptr::null_mut();
+            checked(unsafe {
+                ds_upload(
+                    device,
+                    &mut data,
+                    source,
+                    ptr::null(),
+                    rows as i32,
+                    cols as i32,
+                    mode,
+                )
+            })?;
+            let w = Matrix {
+                peer: None,
+                device,
+                ptr: data,
+                rows,
+                cols,
+                mode,
+                round_output: false,
+            };
+            let mut expected = vec![0.; rows * tokens];
+            checked(unsafe {
+                ds_gemm(
+                    ctx.0,
+                    w.ptr,
+                    inputs.as_ptr(),
+                    expected.as_mut_ptr(),
+                    rows as i32,
+                    cols as i32,
+                    tokens as i32,
+                    groups as i32,
+                    mode,
+                )
+            })?;
+            let alloc = |n| -> Result<Allocation> {
+                let mut raw = ptr::null_mut();
+                checked(unsafe { ds_alloc_f32(device, &mut raw, n) })?;
+                Ok(Allocation {
+                    device,
+                    ptr: raw,
+                    capacity: n,
+                })
+            };
+            let x = alloc(inputs.len())?;
+            let y = alloc(expected.len())?;
+            checked(unsafe { ds_copy_f32(device, x.ptr, inputs.as_ptr(), inputs.len(), 0) })?;
+            checked(unsafe {
+                ds_project(
+                    ctx.0,
+                    w.ptr,
+                    x.ptr,
+                    y.ptr,
+                    rows as i32,
+                    cols as i32,
+                    tokens as i32,
+                    groups as i32,
+                    mode,
+                    0,
+                    1,
+                    4,
+                    rows as i32,
+                )
+            })?;
+            let mut actual = vec![0.; expected.len()];
+            checked(unsafe { ds_copy_f32(device, actual.as_mut_ptr(), y.ptr, actual.len(), 1) })?;
+            for i in 0..actual.len() {
+                let r = i % rows;
+                let k = r * 19 % cols;
+                let value = weights[r * cols + k]
+                    * inputs[((i / rows) * groups + r / (rows / groups)) * cols + k];
+                assert_eq!(expected[i], value);
+                assert_eq!(actual[i], value);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires DS4_PREFILL_LT=1 and DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn wide_mxfp8_checks_groups_scales_and_workspace_reuse() -> Result<()> {
         ensure!(
