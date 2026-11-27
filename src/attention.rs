@@ -454,6 +454,18 @@ struct Source {
     pending_gate: Vec<f32>,
 }
 
+/// Layer 20 produces the last shared compressed KV source. Subsequent layers
+/// can affect later rows only through their own 128-token sliding windows.
+/// Keep a full 128-row DSpark feature history after the last dependency expires.
+pub(crate) const FIRST_LOCAL_DECODER: usize = 21;
+pub(crate) fn can_defer_decoder(end: usize, next_snapshot_or_output: usize, chunk: usize) -> bool {
+    // One altered router assignment can change the split-K plan for other
+    // tokens in that chunk. Require entirely clean chunks at every layer.
+    let history = (40 - FIRST_LOCAL_DECODER) * (WINDOW - 1).next_multiple_of(chunk)
+        + WINDOW.next_multiple_of(chunk);
+    next_snapshot_or_output.saturating_sub(end) >= history
+}
+
 #[derive(Default)]
 struct Window {
     restored: Option<RestoredPart>,
@@ -661,6 +673,38 @@ impl AttentionState {
             self.width = 0;
         }
         self.verify = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deferred_decoder_window(&self) -> bool {
+        self.windows
+            .get(&39)
+            .is_some_and(|w| w.next_pos > 0 && w.ring.is_none())
+    }
+
+    pub(crate) fn decoder_restore_pending(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|(&layer, w)| layer >= FIRST_LOCAL_DECODER && w.restored.is_some())
+    }
+
+    pub(crate) fn advance_deferred_windows(&mut self, pos: usize, count: usize) -> Result<()> {
+        require_state!(
+            self.verify.is_none(),
+            "deferred attention during verification"
+        );
+        for layer in FIRST_LOCAL_DECODER..40 {
+            let w = self.windows.entry(layer).or_default();
+            require_state!(w.next_pos == pos, "deferred window position changed");
+            w.ring = None;
+            w.restored = None;
+            w.next_pos = pos + count;
+            // A live request may rotate at this point. Its placeholder rows are
+            // serializable, and expire before its next reusable prefix or output.
+            w.rows.resize(w.next_pos.min(WINDOW - 1) * DIM, 0);
+            w.rows.fill(0);
+        }
         Ok(())
     }
 

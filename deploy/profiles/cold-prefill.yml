@@ -1,0 +1,5 @@
+services:
+  dsv41-flash-exl3:
+    image: ds4-flash-rs:uniform-coding-20261126
+    environment:
+      DS4_PREFILL_DECODER_PRUNE: "${DS4_PREFILL_DECODER_PRUNE:-1}"

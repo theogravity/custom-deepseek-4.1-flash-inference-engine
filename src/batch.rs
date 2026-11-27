@@ -77,7 +77,7 @@ impl Model {
         ensure!(!items.is_empty(), "empty target batch");
         if let [s] = items {
             let ids = history(s)?;
-            return self.forward_valid(&mut [s], ids);
+            return self.forward_valid(&mut [s], ids, false);
         }
         let mut ids = Vec::new();
         let mut active = Vec::with_capacity(items.len());
@@ -95,7 +95,7 @@ impl Model {
         let outcomes = if active.is_empty() {
             Vec::new()
         } else {
-            self.forward_valid(&mut active, &ids)?
+            self.forward_valid(&mut active, &ids, false)?
         };
         let mut outcomes = outcomes.into_iter();
         Ok(invalid
@@ -107,10 +107,26 @@ impl Model {
             .collect())
     }
 
+    pub(super) fn forward_prefill(
+        &mut self,
+        mut item: ForwardItem<'_>,
+        skip_decoder: bool,
+    ) -> Result<Target> {
+        ensure!(
+            !skip_decoder || (item.logit_rows == 0 && !item.capture_features),
+            "requested output from deferred decoder"
+        );
+        let ids = history(&item)?;
+        self.forward_valid(&mut [&mut item], ids, skip_decoder)?
+            .pop()
+            .context("missing prefill result")?
+    }
+
     fn forward_valid(
         &mut self,
         items: &mut [&mut ForwardItem<'_>],
         ids: &[u32],
+        skip_decoder: bool,
     ) -> Result<Vec<Result<Target>>> {
         if self.overlap_prefill_engram && self.rt.target_prefill && ids.len() >= 32 {
             if let [item] = items {
@@ -119,17 +135,18 @@ impl Model {
                 let engram = self.engram.clone();
                 return with_prefetched_engrams(
                     move |layer| engram.gather(&weights, layer, history, pos, rows),
-                    |source| self.forward_layers(items, ids, Some(source)),
+                    |source| self.forward_layers(items, ids, skip_decoder, Some(source)),
                 );
             }
         }
-        self.forward_layers(items, ids, None)
+        self.forward_layers(items, ids, skip_decoder, None)
     }
 
     fn forward_layers(
         &mut self,
         items: &mut [&mut ForwardItem<'_>],
         ids: &[u32],
+        skip_decoder: bool,
         engram_rows: Option<std::sync::mpsc::Receiver<Result<EngramRows>>>,
     ) -> Result<Vec<Result<Target>>> {
         let mut errors = (0..items.len()).map(|_| None).collect::<Vec<_>>();
@@ -141,6 +158,12 @@ impl Model {
         let mut mix = residual::initial_mix(&mut self.rt, rows)?;
         let mut gathered: Option<EngramRows> = None;
         for layer in 0..40 {
+            if layer == attention::FIRST_LOCAL_DECODER && skip_decoder {
+                for s in items.iter_mut() {
+                    s.cache.advance_deferred_windows(s.pos, s.rows)?;
+                }
+                break;
+            }
             let stem = format!("layers.{layer}");
             if layer == 20 {
                 let host_h = self.rt.to_host(&h)?;

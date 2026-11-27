@@ -281,6 +281,7 @@ pub struct Model {
     rt: Runtime,
     engram: Arc<Engram>,
     overlap_prefill_engram: bool,
+    prune_prefill_decoder: bool,
     max_ctx: usize,
     chunk: usize,
 }
@@ -325,6 +326,11 @@ impl Model {
             },
             rt: Runtime::open(pack, devices)?,
             engram: Arc::new(Engram::new(tok)?),
+            prune_prefill_decoder: match std::env::var("DS4_PREFILL_DECODER_PRUNE").as_deref() {
+                Err(std::env::VarError::NotPresent) | Ok("0") => false,
+                Ok("1") => true,
+                _ => anyhow::bail!("DS4_PREFILL_DECODER_PRUNE must be 0 or 1"),
+            },
             overlap_prefill_engram: match std::env::var("DS4_OVERLAP_PREFILL_ENGRAM").as_deref() {
                 Ok("1") => true,
                 Ok("0") | Err(std::env::VarError::NotPresent) => false,
@@ -336,26 +342,6 @@ impl Model {
     }
     pub fn max_context(&self) -> usize {
         self.max_ctx
-    }
-    fn forward(
-        &mut self,
-        cache: &mut AttentionState,
-        ids: &[u32],
-        pos: usize,
-        b: usize,
-        logit_rows: usize,
-        capture_features: bool,
-    ) -> Result<Target> {
-        self.forward_batch(&mut [ForwardItem {
-            cache,
-            ids,
-            pos,
-            rows: b,
-            logit_rows,
-            capture_features,
-        }])?
-        .pop()
-        .context("missing single-sequence target")?
     }
     pub fn generate(
         &mut self,
@@ -743,13 +729,22 @@ impl Model {
         let observe =
             session.draft.is_some() && (interruptible || pos + n > horizon.saturating_sub(128));
         self.rt.target_prefill = true;
-        let target = self.forward(
-            &mut session.cache,
-            prompt,
-            pos,
-            n,
-            usize::from(last),
-            observe,
+        let skip_decoder = self.prune_prefill_decoder
+            && !interruptible
+            && !observe
+            && !last
+            && !session.cache.decoder_restore_pending()
+            && crate::attention::can_defer_decoder(pos + n, horizon, self.chunk);
+        let target = self.forward_prefill(
+            ForwardItem {
+                cache: &mut session.cache,
+                ids: prompt,
+                pos,
+                rows: n,
+                logit_rows: usize::from(last),
+                capture_features: observe,
+            },
+            skip_decoder,
         );
         self.rt.target_prefill = false;
         let target = target?;
@@ -895,6 +890,113 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_history_rounds_every_local_dependency_to_a_clean_chunk() {
+        for chunk in [1, 48, 64, 127, 129, 512] {
+            let end = 4096;
+            let history =
+                19 * 127_usize.next_multiple_of(chunk) + 128_usize.next_multiple_of(chunk);
+            assert!(!crate::attention::can_defer_decoder(
+                end,
+                end + history - 1,
+                chunk
+            ));
+            assert!(crate::attention::can_defer_decoder(
+                end,
+                end + history,
+                chunk
+            ));
+            assert!(crate::attention::can_defer_decoder(
+                end,
+                end + history + 1,
+                chunk
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK, DS4_DRAFTER=code, independent prefix tiers and both inference GPUs"]
+    fn deferred_decoder_rebuilds_every_target_and_draft_checkpoint() -> Result<()> {
+        let pack = std::path::PathBuf::from(std::env::var("DS4_TEST_PACK")?);
+        let tok = Tokenizer::from_file(pack.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let text: String = (0..1400)
+            .map(|i| {
+                format!(
+                    "def checksum_{i}(x):\n    return (x * {} + {}) % 65519\n",
+                    2 * i + 1,
+                    i * 31
+                )
+            })
+            .collect();
+        let prompt = tok
+            .encode(text, false)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ids = &prompt.get_ids()[..9607];
+        let extended = [ids, &prompt.get_ids()[9607..9615]].concat();
+        for chunk in [64, 127] {
+            let mut model = Model::open(&pack, &tok, [0, 1], 16384, chunk)?;
+            assert!(model.prefix.enabled() && model.spec_k > 0);
+            let mut control = model.start_request(ids.to_vec(), 12, 0.)?;
+            let mut trial = model.start_request(ids.to_vec(), 12, 0.)?;
+            let mut uncached = model.start_request(extended.clone(), 12, 0.)?;
+            assert_eq!((control.pos, trial.pos, uncached.pos), (0, 0, 0));
+            let ram = SwapStore::new(512 << 20, 0, None)?;
+            let mut control_prefix = PrefixCache::new(&pack, chunk, 16384)?;
+            let mut rotated = false;
+            let mut compared = 0;
+            while !control.finished {
+                model.prune_prefill_decoder = false;
+                std::mem::swap(&mut model.prefix, &mut control_prefix);
+                let a = model.step_batch(&mut [&mut control]).pop().unwrap()?;
+                std::mem::swap(&mut model.prefix, &mut control_prefix);
+                model.prune_prefill_decoder = true;
+                let b = model.step_batch(&mut [&mut trial]).pop().unwrap()?;
+                assert_eq!((a.tokens, a.eos, a.finished), (b.tokens, b.eos, b.finished));
+                assert_eq!(control.pos, trial.pos);
+                let pos = trial.pos;
+                if trial.is_prefill() && trial.cache.has_deferred_decoder_window() && !rotated {
+                    model.suspend(&mut trial, &ram)?;
+                    model.resume(&mut trial)?;
+                    rotated = true;
+                }
+                if trial.points.contains(&pos) {
+                    let expected = control.cache.encode_snapshot(pos)?;
+                    let actual = trial.cache.encode_snapshot(pos)?;
+                    ensure!(
+                        actual == expected,
+                        "target checkpoint mismatch at {pos}, chunk {chunk}"
+                    );
+                    let expected = control
+                        .draft
+                        .as_ref()
+                        .unwrap()
+                        .snapshot(&mut model.rt, pos)?;
+                    let actual = trial.draft.as_ref().unwrap().snapshot(&mut model.rt, pos)?;
+                    ensure!(
+                        actual == expected,
+                        "draft checkpoint mismatch at {pos}, chunk {chunk}"
+                    );
+                    compared += 1;
+                }
+            }
+            assert!(rotated && compared == trial.points.len());
+            let mut cached = model.start_request(extended.clone(), 12, 0.)?;
+            assert_eq!(cached.pos, (ids.len() - 1) / chunk * chunk);
+            let mut outputs = Vec::new();
+            for (session, prune) in [(&mut uncached, false), (&mut cached, true)] {
+                model.prune_prefill_decoder = prune;
+                let mut out = Vec::new();
+                while !session.finished {
+                    out.extend(model.step_batch(&mut [session]).pop().unwrap()?.tokens);
+                }
+                outputs.push(out);
+            }
+            assert_eq!(outputs[0], outputs[1]);
+        }
+        Ok(())
+    }
 
     #[test]
     fn idle_checkpoints_are_aligned_bounded_and_include_the_last_reusable_token_block() {

@@ -22,6 +22,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_C1_OUTPUT_CONSENSUS` | 1 in the selected overlay | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. The concurrent mode is selected independently by `DS4_OUTPUT_LOOKUP=repeated`. |
 | `DS4_EXTEND_REPETITION` | 1 in the selected overlay | Extend strongly supported repetition proposals to two periods and up to 96 tokens for a single client and for concurrent clients using `repeated`. |
 | `DS4_HEAD_ROW_TILES` | 1 in the selected overlay | Reuse vocabulary-head weights across multiple eight-row tiles during target verification. |
+| `DS4_PREFILL_DECODER_PRUNE` | 0 | Set to 1 to defer the 19 local decoder layers on prompt chunks whose state will expire before the next reusable prefix or output. [Cold-prefill measurements](../benchmarks/reports/cold-prefill-optimization.md) |
 | `DS4_PREFILL_MX_TILES`, `DS4_VERIFY_MX_TILES` | 4, 4 | Number of packed projection tiles per block during prompt ingestion and multi-token target verification |
 | `DS4_PARALLEL_PREFILL_ROUTER` | 1 | Select routed experts across prompt rows using the CPU worker pool |
 | `DS4_OVERLAP_PREFILL_ENGRAM` | 0 | Optionally overlap Engram reads with target GPU work during prefill |

@@ -36,6 +36,8 @@ Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At si
 
 The native cold-prefill rows above were measured on the previous coding profile. Cold time to first output (TTFT) ends at the first reasoning or visible text. The GPU power limit for the published cold-prefill runs was unrecorded. Each native row used one fresh prompt and restored zero prefix tokens. The six-client ~404k run was stopped during cold prefill. Its completion time and retrieval result are unmeasured, and the cache repeat was skipped. [Methodology and raw results](benchmarks/reports/headline-reference.md)
 
+An opt-in cold-prefill change reduced native time to first output at 60k to **43.61 s**, versus 60.83 s and 63.99 s with the change disabled in the same image. [Cold-prefill controls and local vLLM configuration](benchmarks/reports/cold-prefill-optimization.md)
+
 ## Build and serve from a fresh clone
 
 Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.

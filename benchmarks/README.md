@@ -2,6 +2,7 @@
 
 | What do you want to measure? | Reports |
 |---|---|
+| Cold-prefill experiments | [First-output latency, GPU trace and cache-state parity](reports/cold-prefill-optimization.md) |
 | Concurrent coding release at 375 W | [Same-image controls, stream identity and the upstream code-edit client](reports/concurrent-repetition.md) |
 | Same workloads as the published vLLM reference | [1/4/6-client code edits, cold prefill and six 404k sessions](reports/headline-reference.md) |
 | Coding-agent latency and task completion | [Changing 404k conversations](reports/agent-followups.md) · [Pi coding task](reports/pi-coding.md) · [Time after tool calls](reports/tool-return.md) |
