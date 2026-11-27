@@ -7,6 +7,7 @@
 | Cold-prefill experiments | [First-output latency, GPU trace and cache-state parity](reports/cold-prefill-optimization.md) |
 | Concurrent coding release at 375 W | [Same-image controls, stream identity and the upstream code-edit client](reports/concurrent-repetition.md) |
 | Same workloads as the published vLLM reference | [1/4/6-client code edits, cold prefill and six 404k sessions](reports/headline-reference.md) |
+| Full run on the recommended TP2 defaults | [1/4/6-client code edits, four cold-prefill lengths and six 404k sessions](reports/default-profile-headline-20261127.md) |
 | Coding-agent latency and task completion | [Changing 404k conversations](reports/agent-followups.md) · [Pi coding task](reports/pi-coding.md) · [Time after tool calls](reports/tool-return.md) |
 | Context, concurrency and KV | [Long-context decode](reports/long-context.md) · [Concurrent code edits](reports/concurrent-edits.md) · [Shared prefixes](reports/shared-prefix.md) |
 | Throughput ceilings and comparisons | [Hardware roofline](reports/roofline.md) · [vLLM comparison](reports/vllm-comparison.md) · [Single-client context sweep](reports/single-client-context.md) |

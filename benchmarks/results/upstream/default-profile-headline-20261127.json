@@ -1,0 +1,184 @@
+{
+  "date": "2026-11-27",
+  "commit": "a586b10",
+  "image": "ds4-flash-rs:tp2-peer-index-20261127",
+  "hardware": {
+    "gpus": "2x NVIDIA RTX PRO 6000 Blackwell",
+    "gpu_power_limit_w_each": 375,
+    "cpu_power_cap_w_readback": 225
+  },
+  "profile": {
+    "context_tokens": 524288,
+    "prefill_chunk_tokens": 8192,
+    "moe_cache_gib": 68,
+    "tp2_index": 1,
+    "expert_eviction": "lfu",
+    "batch_topk": 1,
+    "c1_output_consensus": 1,
+    "extend_repetition": 1,
+    "head_row_tiles": 1,
+    "output_lookup": "repeated",
+    "agent_text_cache": 1,
+    "idle_tool_prefill_max_tokens": 32768
+  },
+  "workloads": {
+    "code_edit": {
+      "1": {
+        "measured_waves": 6,
+        "median_aggregate_decode_tok_s": 343.141,
+        "wave_aggregate_decode_tok_s": [
+          343.176,
+          343.106,
+          344.002,
+          345.253,
+          340.264,
+          341.958
+        ],
+        "median_whole_wave_tok_s": 245.888,
+        "median_first_output_s_all_streams": 1.711,
+        "all_first_functions_present": true,
+        "all_1500_completions": true
+      },
+      "4": {
+        "measured_waves": 6,
+        "median_aggregate_decode_tok_s": 312.042,
+        "wave_aggregate_decode_tok_s": [
+          262.497,
+          320.184,
+          309.633,
+          318.194,
+          314.013,
+          310.07
+        ],
+        "median_whole_wave_tok_s": 240.025,
+        "median_first_output_s_all_streams": 6.429,
+        "all_first_functions_present": true,
+        "all_1500_completions": true
+      },
+      "6": {
+        "measured_waves": 6,
+        "median_aggregate_decode_tok_s": 261.236,
+        "wave_aggregate_decode_tok_s": [
+          231.324,
+          225.959,
+          293.633,
+          285.087,
+          255.977,
+          266.496
+        ],
+        "median_whole_wave_tok_s": 222.774,
+        "median_first_output_s_all_streams": 9.689,
+        "all_first_functions_present": true,
+        "all_1500_completions": true
+      }
+    },
+    "cold_prefill_timing_only": [
+      {
+        "seed": 2811270501,
+        "words": 5000,
+        "prompt_tokens": 15824,
+        "ttft_s": 19.302134213008685,
+        "input_tok_s": 819.8057181332521,
+        "reused": 0,
+        "passed": true,
+        "answer_graded": false
+      },
+      {
+        "seed": 2811270502,
+        "words": 19000,
+        "prompt_tokens": 59958,
+        "ttft_s": 29.173877760011237,
+        "input_tok_s": 2055.1947359628925,
+        "reused": 0,
+        "passed": true,
+        "answer_graded": false
+      },
+      {
+        "seed": 2811270503,
+        "words": 62000,
+        "prompt_tokens": 195786,
+        "ttft_s": 63.24441180497524,
+        "input_tok_s": 3095.7043383333057,
+        "reused": 0,
+        "passed": true,
+        "answer_graded": false
+      },
+      {
+        "seed": 2811270504,
+        "words": 160000,
+        "prompt_tokens": 505082,
+        "ttft_s": 164.40013088099658,
+        "input_tok_s": 3072.2724932963156,
+        "reused": 0,
+        "passed": true,
+        "answer_graded": false
+      }
+    ],
+    "six_independent_404k_capacity": {
+      "passed": true,
+      "seed": 65726807611977,
+      "elapsed_s": 882.016,
+      "prompt_tokens_each": 403998,
+      "output_tokens_each": 128,
+      "prompt_tokens_total": 2423988,
+      "first_output_ttft_s": [
+        854.146,
+        833.52,
+        854.142,
+        854.143,
+        854.147,
+        854.148
+      ],
+      "median_first_output_ttft_s": 854.144,
+      "counters": {
+        "requests_started": 6,
+        "prefix_reused_tokens": 0,
+        "rotations": 0,
+        "resumes": 0,
+        "suspend_failures": 0,
+        "resume_failures": 0
+      },
+      "full_resident_decode_proof": {
+        "elapsed_s": 879.0797261609987,
+        "logical_active": 6,
+        "resident": 6,
+        "prefilling": 0,
+        "decoding": 6,
+        "waiting": 0,
+        "swapped": 0,
+        "processed_tokens": 2424683
+      },
+      "min_local_memory_mib": {
+        "host_available_mib": 234872,
+        "gpu_1_free_mib": 1200,
+        "gpu_2_free_mib": 2604
+      }
+    }
+  },
+  "references": {
+    "published_vllm_600w_aggregate_tok_s": {
+      "1": 282,
+      "4": 518,
+      "6": 557
+    },
+    "previous_concurrent_coding_native_tok_s": {
+      "1": 383,
+      "4": 584,
+      "6": 583
+    }
+  },
+  "omissions": [
+    "cache-repeat timing",
+    "needle retrieval checks",
+    "LiteLLM/native comparison"
+  ],
+  "sources": {
+    "code_edit": [
+      "c1-code-edit-default-20261127.jsonl",
+      "c4-code-edit-default-20261127.jsonl",
+      "c6-code-edit-default-20261127.jsonl"
+    ],
+    "cold_prefill": "cold-prefill-default-20261127.jsonl",
+    "six_capacity": "six-404k-default-20261127.json"
+  }
+}

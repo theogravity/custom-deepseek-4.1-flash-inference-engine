@@ -92,7 +92,7 @@ python3 tools/six_capacity.py --base http://127.0.0.1:8001 --out six-capacity.js
 
 The GPU test compares both rank directions, append-only mirror copies, truncation, eviction and the memory-cap fallback.
 
-On two RTX PRO 6000 Blackwell cards, the 512-query index-stage median with resident mirrors was 1.178/4.298/8.624 ms on the owner GPU versus 0.713/2.295/4.496 ms split across both GPUs at 32,768/131,072/252,500 indexed positions. Batched-MQA medians were 1.090/3.923/7.958 ms versus 0.671/2.106/4.186 ms. These are index-stage timings only; end-to-end request TTFT has not been qualified. The flag remains off by default (`DS4_TP2_INDEX=0`).
+On two RTX PRO 6000 Blackwell cards, the 512-query index-stage median with resident mirrors was 1.178/4.298/8.624 ms on the owner GPU versus 0.713/2.295/4.496 ms split across both GPUs at 32,768/131,072/252,500 indexed positions. Batched-MQA medians were 1.090/3.923/7.958 ms versus 0.671/2.106/4.186 ms. These are index-stage timings only; end-to-end request TTFT has not been qualified. The recommended TP2 profile enables the flag; set `DS4_TP2_INDEX=0` to disable it.
 
 ```bash
 export CUDA_VISIBLE_DEVICES="$(nvidia-smi -i 1,2 --query-gpu=uuid --format=csv,noheader | paste -sd,)"

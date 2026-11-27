@@ -4,7 +4,7 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 ## Benchmarks
 
-These warm workload measurements use the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches. The recommended TP2 profile now enables the measured decode and coding improvements by default while retaining the 68 GiB MoE cache and 524k context.
+These warm workload measurements are from the previous coding profile on the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches. The latest results on the recommended defaults are recorded below.
 
 | Coding workload | Clients | Input tokens per client | Output tokens per client | Decode tok/s | End-to-end tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -19,15 +19,15 @@ On six different follow-ups to a warm 404k-token conversation, median time to fi
 
 ### Same workloads as the vLLM reference
 
-| Concurrent clients | Published vLLM tok/s | Previous native tok/s | Current native tok/s | Current vs. vLLM |
+| Concurrent clients | Published vLLM at 600 W | Previous native release | Concurrent coding release | Recommended defaults at 375 W |
 |---:|---:|---:|---:|---:|
-| 1 | 282 | 382.5 | 383 | +35.8% |
-| 4 | 518 | 457.5 | **584** | **+12.7%** |
-| 6 | 557 | 502.5 | **583** | **+4.7%** |
+| 1 | 282 | 382.5 | 383 | **343.1** |
+| 4 | 518 | 457.5 | **584** | 312.0 |
+| 6 | 557 | 502.5 | **583** | 261.2 |
 
-Rates are aggregate output tok/s on the upstream 25,625-token Python edit. At six clients, dividing 583 by six gives about 97 tok/s per client over the longest decode interval. Individual streams finish at different times. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM figure is one warm second pass at 600 W. The concurrent coding profile lets each client draft repeated patterns from its own verified output. In the separate matched four- and six-client runs, every measured stream reproduced the control’s visible code and reasoning. [Concurrent decoding experiment](benchmarks/reports/concurrent-repetition.md) · [Original headline comparison](benchmarks/reports/headline-reference.md)
+Rates are aggregate output tok/s on the upstream 25,625-token Python edit. Previous-release native figures are medians of six warm second passes at 375 W per GPU; the published vLLM figures are one warm second pass at 600 W. The latest full-profile results used one warm-up and six measured waves. They retain the single-client gain, but four- and six-client rates are below the earlier concurrent coding release. Median first output on the recommended defaults was 1.71/6.43/9.69 s at 1/4/6 clients. The latest run and its cold-prefill and six-session capacity results are detailed in [Full headline benchmark](benchmarks/reports/default-profile-headline-20261127.md). [Concurrent coding experiment](benchmarks/reports/concurrent-repetition.md) · [Earlier headline comparison](benchmarks/reports/headline-reference.md)
 
-### C1 code-edit comparison on the current TP2 peer-index build
+### Earlier C1 isolated candidate
 
 This additional one-client run uses the same 25,625-token upstream Python edit and 1,500-token completion. Both GPUs were capped at 375 W and the CPU package cap read 225 W. Each arm used one warm-up and six measured waves; the table shows median decode rate and median time to first output. The C1 candidate added LFU expert eviction, batched top-k and output consensus to the native TP2 peer-index baseline. The local vLLM figure is the same-host reference. Native code-edit output was validated for the requested function; output identity across engines was not assessed.
 
@@ -38,7 +38,7 @@ This additional one-client run uses the same 25,625-token upstream Python edit a
 | Native recommended TP2 profile, all defaults enabled | **323.9** | 1.96 s |
 | Local vLLM reference | 265.0 | **0.20 s** |
 
-The two C1-only rows use six measured waves; the combined recommended profile row is a deployment smoke with only two measured waves, so treat its rate as provisional. The C1-only candidate is 18.5% faster than this local vLLM reference in decode, while vLLM still has lower first-output latency. The recommended profile now enables the positive decode and coding experiments by default; the C1-only candidate predates enabling repeated-output drafting, extended repetition, head-row tiles and the agent text cache together. Peer-index improved the isolated index stage; its request-level impact is not established. [Run details and sources](benchmarks/results/upstream/c1-code-edit-peer-index-20261127-summary.json)
+This earlier six-wave candidate test preceded the full profile benchmark. On the full run, the combined defaults measured 343.1 tok/s at C1, 312.0 at C4 and 261.2 at C6. Peer-index improved the isolated index stage; its request-level impact has not been isolated. [Earlier C1 run data](benchmarks/results/upstream/c1-code-edit-peer-index-20261127-summary.json) · [Full profile results](benchmarks/reports/default-profile-headline-20261127.md)
 
 ### Cold first output on the same workstation
 
