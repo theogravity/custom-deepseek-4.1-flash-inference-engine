@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from six_streams import MODEL, api_keys, query
 
 
-def probe(base, key, word_count, seed):
+def probe(base, key, word_count, seed, timing_only=False):
     rng = random.Random(seed)
     words = [f"{rng.choice(('alpha', 'beta', 'gamma', 'delta', 'omega', 'kappa'))}{rng.randint(0, 99999)}"
              for _ in range(word_count)]
@@ -57,23 +57,32 @@ def probe(base, key, word_count, seed):
     reused = after["prefix_reused_tokens"] - before["prefix_reused_tokens"]
     started = after["requests_started"] - before["requests_started"]
     answer = "".join(text).strip()
-    valid = (done and first is not None and finish == "stop" and answer == words[0] and
+    valid = (done and first is not None and finish == "stop" and usage.get("completion_tokens", 0) > 0 and
              started == 1 and after["logical_active"] == reused == 0 and
-             after["multi_sequence_steps"] == before["multi_sequence_steps"])
+             all(after[k] == before[k] for k in ("multi_sequence_steps", "rotations", "resumes",
+                                                 "suspend_failures", "resume_failures")))
+    if not timing_only:
+        valid = valid and answer == words[0]
     tokens = usage["prompt_tokens"]
     row = dict(seed=seed, words=word_count, prompt_tokens=tokens, prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
                output=usage["completion_tokens"], finish=finish, ttft_s=first, total_s=elapsed,
-               input_tok_s=tokens / first if first is not None else None, answer=answer, needle=words[0],
+               input_tok_s=tokens / first if first is not None else None,
                reasoning_sha256=hashlib.sha256("".join(reasoning).strip().encode()).hexdigest(),
                reused=reused, passed=valid, terminal=done, requests_started=started, logical_active=after["logical_active"])
+    if timing_only:
+        row.update(answer_graded=False, content_sha256=hashlib.sha256("".join(text).encode()).hexdigest())
+    else:
+        row.update(answer=answer, needle=words[0])
     print(json.dumps(row), flush=True)
     if not valid:
-        raise RuntimeError("cold prefill retrieval or execution check failed")
+        raise RuntimeError("cold prefill check failed")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://127.0.0.1:8001")
+    parser.add_argument("--timing-only", action="store_true",
+                        help="check completion and isolated cold execution without grading the answer")
     parser.add_argument("cases", nargs="+", metavar="WORDS,SEED")
     args = parser.parse_args()
     key, _ = api_keys(False)
@@ -81,7 +90,7 @@ def main():
         words, seed = map(int, case.split(","))
         if words < 1:
             parser.error("word counts must be positive")
-        probe(args.base, key, words, seed)
+        probe(args.base, key, words, seed, args.timing_only)
 
 
 if __name__ == "__main__":

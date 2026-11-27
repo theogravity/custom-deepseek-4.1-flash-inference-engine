@@ -42,12 +42,12 @@ The installed vLLM profile uses an 8,192-token scheduling budget and TP2 within 
 
 The experimental TP2 prefill backend also supports physical steps of 8,192 and 16,384 input tokens.
 
-| Cold input tokens | TP2 with 8,192-token steps | TP2 with 16,384-token steps | Installed vLLM with 8,192-token steps |
+| Cold input tokens | TP2 with 8,192-token steps | TP2 with 16,384-token steps | Installed vLLM, 8,192-token scheduling budget |
 |---:|---:|---:|---:|
 | 15,864 | 8.68 s | 12.74 s | 2.91 s |
 | 60,013 | 32.12 s | 29.73 s | 8.07 s |
 
-When a 68,049-token code review arrived during another agent’s Rust generation, both settings took 51.9 seconds to first output for the arriving agent. The existing agent’s longest stream gap increased from 13.24 to 17.94 seconds with the larger step. Each setting was measured once. [Cold prefill and agent overlap](benchmarks/reports/local-vllm-prefill.md#physical-prefill-steps-of-8192-and-16384-tokens)
+When a 68,049-token code review arrived during another agent’s Rust generation, both settings took 51.9 seconds to first output for the arriving agent. The longest full gap between the existing agent’s output events that overlapped the arriving agent’s wait was 13.24 seconds at 8,192 and 17.94 seconds at 16,384. Each setting was measured once. [Cold prefill and agent overlap](benchmarks/reports/local-vllm-prefill.md#physical-prefill-steps-of-8192-and-16384-tokens)
 
 ## Build and serve from a fresh clone
 

@@ -1,14 +1,25 @@
 """Measure an arriving repository review and the coding stream already in flight."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import random
+import subprocess
+import sys
 import threading
 import time
 from urllib.request import Request, urlopen
 
 from six_streams import MODEL, api_keys, query
+
+
+@dataclass
+class Stream:
+    started: float
+    events: list[float]
+    done: float
+    usage: dict
 
 
 def stream(base, key, prompt, limit, ready=None):
@@ -18,14 +29,14 @@ def stream(base, key, prompt, limit, ready=None):
                   {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     started = time.monotonic()
     events = []
-    usage, finish, done = None, None, False
-    with urlopen(req, timeout=600) as response:
+    usage, finish, done = None, None, None
+    with urlopen(req, timeout=120) as response:
         for line in response:
             if not line.startswith(b"data:"):
                 continue
             body = line[5:].strip()
             if body == b"[DONE]":
-                done = True
+                done = time.monotonic()
                 break
             message = json.loads(body)
             if "error" in message:
@@ -38,9 +49,49 @@ def stream(base, key, prompt, limit, ready=None):
                     events.append(time.monotonic())
                     if ready and len(events) == 8:
                         ready.set()
-    if not (events and usage and done and finish in ("length", "stop")):
+    if not (events and usage and done is not None and finish in ("length", "stop")):
         raise RuntimeError("incomplete coding stream")
-    return started, events, usage
+    return Stream(started, events, done, usage)
+
+
+def idle(base, key):
+    deadline = time.monotonic() + 20
+    while True:
+        state = query(base, "/metrics", key)
+        if all(state[k] == 0 for k in ("logical_active", "resident", "waiting", "swapped")):
+            return state
+        if time.monotonic() >= deadline:
+            raise RuntimeError("engine did not drain")
+        time.sleep(0.05)
+
+
+def summarize(first, second, before, after):
+    counters = {k: after[k] - before[k] for k in (
+        "requests_started", "prefix_reused_tokens", "rotations", "resumes", "suspend_failures", "resume_failures")}
+    if counters["requests_started"] != 2 or any(v for k, v in counters.items() if k != "requests_started"):
+        raise RuntimeError(f"unexpected workload counters: {counters}")
+    for result, inputs, outputs in ((first, 70, 1500), (second, 68049, 64)):
+        expected = (inputs, outputs, inputs + outputs)
+        actual = tuple(result.usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens"))
+        if actual != expected:
+            raise RuntimeError(f"expected workload token counts {expected}, got {actual}")
+
+    start, end = second.started, second.events[0]
+    peer = first.events
+    if not (len(peer) >= 8 and peer[7] <= start < end < peer[-1]):
+        raise RuntimeError("the first stream must span the arriving request through its first output")
+    inside = sum(start < event < end for event in peer)
+    if not inside:
+        raise RuntimeError("no peer event during the arriving request's wait for first output")
+    gaps = [(left, right) for left, right in zip(peer, peer[1:]) if left < end and right > start]
+    left, right = max(gaps, key=lambda pair: pair[1] - pair[0])
+    return dict(first_client=first.usage, second_client=second.usage,
+                first_client_stream_events=len(peer), second_ttft_s=end-start,
+                peer_events_during_second_ttft=inside, max_peer_interevent_s=right-left,
+                # Endpoints are relative to the arriving HTTP request starting.
+                max_gap_start_from_second_start_s=left-start, max_gap_end_from_second_start_s=right-start,
+                first_client_to_last_event_s=peer[-1]-first.started,
+                first_client_to_done_s=first.done-first.started, counters=counters)
 
 
 def run(base, key):
@@ -50,33 +101,39 @@ def run(base, key):
     review = "Review this Python module and implement a deduplicated version with identical outputs. Explain your choice briefly.\n" + code
     coding = ("Implement a small Rust JSON lexer from scratch with zero allocations. Show every token variant, handling for "
               "escape sequences and numbers, and 25 tests. Provide the complete implementation and tests in one response.")
-    before = query(base, "/metrics", key)
-    if before["logical_active"]:
-        raise RuntimeError("run the probe on an idle engine")
+    before = idle(base, key)
     ready = threading.Event()
     with ThreadPoolExecutor(2) as pool:
         first = pool.submit(stream, base, key, coding, 1500, ready)
         if not ready.wait(120):
             raise RuntimeError("first coding client did not emit eight events")
-        arrival = time.monotonic()
         second = pool.submit(stream, base, key, review, 64)
-        a, ta, ua = first.result()
-        b, tb, ub = second.result()
-    after = query(base, "/metrics", key)
-    gaps = [end-start for start, end in zip(ta, ta[1:]) if start < tb[0] and end >= arrival]
-    if not gaps or ta[-1] <= arrival or after["prefix_reused_tokens"] != before["prefix_reused_tokens"]:
-        raise RuntimeError("expected overlapping streams with zero reused prefix tokens")
-    return dict(first_client=ua, second_client=ub, first_client_stream_events=len(ta), second_ttft_s=tb[0]-b,
-                peer_prefill_overlap=True, overlap_gap_observed=True, max_peer_interevent_s=max(gaps),
-                first_client_e2e_s=ta[-1]-a, prefix_reused_tokens=0)
+        a, b = first.result(), second.result()
+    return summarize(a, b, before, idle(base, key))
+
+
+def measure(base, output):
+    if output.exists():
+        raise FileExistsError(output)
+    # A socket read timeout resets on each SSE heartbeat. Bound the entire pair,
+    # including executor shutdown and metrics calls, in a separate process.
+    child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", "--base", base],
+                           stdout=subprocess.PIPE, check=True, timeout=600)
+    receipt = json.loads(child.stdout)
+    with output.open("x") as f:
+        json.dump(receipt, f, indent=2)
+        f.write("\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://127.0.0.1:8001")
-    parser.add_argument("--out", type=Path, required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--out", type=Path)
+    group.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    key, _ = api_keys(None)
-    with args.out.open("x") as output:
-        json.dump(run(args.base, key), output, indent=2)
-        output.write("\n")
+    if args.worker:
+        key, _ = api_keys(None)
+        print(json.dumps(run(args.base, key)))
+    else:
+        measure(args.base, args.out)

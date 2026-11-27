@@ -56,7 +56,7 @@ docker run --rm --network none --gpus '"device=1,2"' -e CUDA_VISIBLE_DEVICES=0,1
 
 This branch adds the rank-local CUDA entry points for a two-rank EXL3 expert. For the gate and up projections, the loader splits the output dimension of the trellis and its output scale vector. For the down projection, it splits the input dimension of the trellis and its input scale vector. Each rank processes 1,152 intermediate channels. The other scales are replicated. The input is still the original quantized model pack.
 
-To compare each rank with the installed vLLM extension, use the projection parity commands above with `/check/check_recipe_tp2.py` in the final Docker invocation. The test evaluates expert 3 at layers 0 and 20 on both ranks using 129 routed rows in two jobs. It checks the partial outputs before reduction and compares their host-side sum. This test covers the rank-local CUDA calculations. An on-device collective, TP2 attention, scheduler integration, full-model output fidelity and serving performance remain open.
+To compare each rank with the installed vLLM extension, use the projection parity commands above with `/check/check_recipe_tp2.py` in the final Docker invocation. The test evaluates expert 3 at layers 0 and 20 on both ranks using 129 routed rows in two jobs. It checks the partial outputs before reduction and compares their host-side sum. That projection-only checkpoint tested the rank-local CUDA calculations. The later serving experiment below measures the integrated expert and dense paths. It used the native attention head layout and did not grade model-wide output fidelity.
 
 Both ranks matched the installed extension bit-for-bit in all four cases. The fixture ran with Python assertions disabled and verified that seven invalid job layouts per case were rejected before allocation. [Rank-local test results](../results/upstream/tp2-expert-shards.json)
 
@@ -69,8 +69,46 @@ This experiment uses rank-local EXL3 expert shards, sharded large dense projecti
 | Cold first output, 15,864 input tokens | 8.68 s | 12.74 s |
 | Cold first output, 60,013 input tokens | 32.12 s | 29.73 s |
 | First output for a 68,049-token code review arriving during a Rust generation | 51.89 s | 51.91 s |
-| Longest interval between streamed text or reasoning events on the existing client during that prefill | 13.24 s | 17.94 s |
+| Longest full interval between existing-client output events intersecting the arriving client’s wait | 13.24 s | 17.94 s |
 
-The second coding client arrived after the first emitted eight stream events. The first client generated 1,500 tokens in both arms. The timing includes scheduling, weight loading, and streamed delivery. Both arms reported zero reused prefix tokens. The stream can deliver several tokens in one event.
+The client submitted the review after the Rust stream emitted eight nonempty text or reasoning events. The Rust request used 70 input and 1,500 output tokens. The review used 68,049 input and 64 output tokens. Some events contained multiple tokens. The published longest gap uses the **whole** interval between consecutive Rust events if it intersected the time from review submission through first review output. Either end of that interval can fall outside the review’s wait. Review TTFT starts when the worker opens the HTTP request. Both timings include scheduling and delivery. The historical JSON field `first_client_e2e_s` ends at the last nonempty Rust event.
 
-Build with `cargo build --release --features recipe-prefill` and `docker build -t ds4-flash-rs:tp2-prefill-20261127 .`. For the benchmark settings, append `-f deploy/profiles/reference-drafter.yml -f deploy/profiles/tp2-prefill.yml` to the concurrent coding Compose stack. Set `DS4_PREFILL_CHUNK=16384` to select the larger step. The default in the TP2 overlay is 8192. The model offers 524,288 tokens of context with either value.
+Both historical runs began and ended with idle scheduler snapshots, reported zero reused prefix tokens, and recorded usage and finish reasons. They did not retain the full event timeline or the mixed pair’s admission count. The current driver also requires exactly two admissions, matching token counts, zero reuse or rotations, both terminal SSE markers, and at least one Rust output strictly between the review worker starting its request and receiving its first output. The Rust stream must continue past that first review output. New receipts report the full gap that intersects this worker-to-first-output interval, its endpoints relative to worker start, and the Rust stream’s time to its last content event and terminal marker separately.
+
+### Reproduce the two arms
+
+Use the current checkout for the profiles and benchmark drivers. Build the measured engine revision in a separate worktree. Its historical image config SHA-256 was `3d3aac20569105af552341eb2553423ced2574c9514a115b880457941e6e42c1`. It predates the optional FlashInfer backend. Later engine revisions change the kernels. Use the build prerequisites and model pack from the [main setup](../../README.md#build-and-serve-from-a-fresh-clone).
+
+```bash
+bench_dir="$(mktemp -d)"
+git worktree add --detach "$bench_dir/engine" ecd8e2a96e1eee48c49100d1fe6c8e58eb0c8ce4
+(
+  cd "$bench_dir/engine" &&
+  CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked --features recipe-prefill &&
+  docker build -t ds4-flash-rs:tp2-measured-ecd8e2a .
+)
+```
+
+On an idle benchmark host, with the API key exported, this Bash block recreates the service on port 8001 for each arm. Keep the 375 W cap on each inference GPU and the 225 W CPU socket cap to match the original. A new process and empty prefix directory per arm precede the 11,080-token warm-up, both isolated cold cases and finally the mixed requests. The warm-up is excluded from the tables.
+
+```bash
+(
+  set -e
+  export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
+  export DS4_TP2_IMAGE=ds4-flash-rs:tp2-measured-ecd8e2a
+  export DS4_PREFILL_DECODER_PRUNE=1 DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=0 DS4_FLASHINFER_PREFILL=0
+  stack=(-f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml
+         -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/reference-drafter.yml
+         -f deploy/profiles/tp2-prefill.yml)
+  for step in 8192 16384; do
+    export DS4_PREFILL_CHUNK="$step" DS4_HOST_PREFIX_DIR="$bench_dir/prefix-$step"
+    mkdir -m 700 "$DS4_HOST_PREFIX_DIR"
+    docker compose "${stack[@]}" up -d --force-recreate --no-build --wait
+    python3 tools/cold_prefill.py --timing-only 3500,91570510 5000,91570511 19000,91570512 \
+      > "$bench_dir/cold-$step.jsonl"
+    python3 tools/prefill_overlap.py --out "$bench_dir/mixed-$step.json"
+  done
+)
+```
+
+The configured context limit is 524,288 in both arms. Restore the original serving image and prefix directory using the same Compose files and environment that were active before the experiment.

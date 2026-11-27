@@ -1,5 +1,5 @@
 {
-  "source_revision": "ecd8e2a",
+  "source_revision": "ecd8e2a96e1eee48c49100d1fe6c8e58eb0c8ce4",
   "gpu_power_cap_w_each": 375,
   "cpu_socket_cap_w": 225,
   "max_context": 524288,
@@ -17,6 +17,36 @@
     "DS4_TP2_PACKED_INPUT",
     "DS4_PREFILL_INDEX_MMA"
   ],
+  "measured_image_config_sha256": "3d3aac20569105af552341eb2553423ced2574c9514a115b880457941e6e42c1",
+  "runtime_overrides": {
+    "DS4_DRAFTER": "released",
+    "DS4_SPEC_K": "5",
+    "DS4_PROMPT_LOOKUP": "0",
+    "DS4_OUTPUT_LOOKUP": "0",
+    "DS4_PREFIX_RAM_MIB": "49152",
+    "DS4_PREFIX_DISK_MIB": "131072",
+    "DS4_PREFILL_DECODER_PRUNE": "1",
+    "DS4_TP_DENSE": "1",
+    "DS4_TP2_PREFILL": "1",
+    "DS4_PREFILL_LT": "1",
+    "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+    "DS4_PREFILL_BOUNDED_REPLAY": "1",
+    "DS4_TP2_PACKED_INPUT": "1",
+    "DS4_PREFILL_INDEX_MMA": "1"
+  },
+  "sequence_per_fresh_process": [
+    "isolated_cold[0] (warm-up excluded from the comparison)",
+    "isolated_cold[1]",
+    "isolated_cold[2]",
+    "mixed_coding"
+  ],
+  "mixed_timing_method": {
+    "samples_per_arm": 1,
+    "second_ttft_s": "Client-side time immediately before opening the review HTTP request to its first nonempty text or reasoning event.",
+    "max_peer_interevent_s": "Length of the longest full interval between consecutive nonempty Rust-stream events intersecting the window from review task submission to first review output. An interval can extend outside that window.",
+    "first_client_e2e_s": "Historical field measuring the Rust request start to the last nonempty output event. The stream-close time was not recorded.",
+    "recorded_controls": "The client submitted the review after observing eight Rust-stream events, checked both finish reasons and usages, sampled idle states before and after the pair, and observed zero reused prefix tokens. Per-event timestamps, exact admission deltas and terminal SSE markers were not recorded for independent retrospective validation."
+  },
   "cases": [
     {
       "max_chunk_tokens": 8192,
