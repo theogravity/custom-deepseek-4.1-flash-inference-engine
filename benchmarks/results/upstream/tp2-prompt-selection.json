@@ -1,0 +1,114 @@
+{
+  "hardware": "One RTX PRO 6000 Blackwell Workstation Edition, SM120; physical inference GPU 1.",
+  "scope": "CUDA stage microbenchmarks. GPU requests were serialized with other workstation benchmarks.",
+  "workload": {
+    "rank_only": "Signed scores with exact cutoff ties, causal padding and deterministic integer keys. Median of five trials of twenty launches, including chronological ID ordering.",
+    "fp8_selection": "Packed 132-byte index keys, FP8 MMA scoring, causal IDs, exact top-512 positions, top-2048 blocks, and chronological ordering. Wall time per GPU call over five launches after warm-up; synchronized before and after.",
+    "correctness": "Each implementation matched CPU position and block selections where applicable. Separate mixed-row stress checks include both rescue branches, signed zero, ties and masking."
+  },
+  "settings": {
+    "DS4_BATCH_TOPK": "1",
+    "baseline_DS4_PREFILL_SAMPLED_TOPK": "0",
+    "candidate_DS4_PREFILL_SAMPLED_TOPK": "1"
+  },
+  "initial": {
+    "source_revision": "05db2cd",
+    "shapes": [
+      {
+        "queries": 64,
+        "candidates": 16391,
+        "baseline_fp8_selection_us": 126.5,
+        "sampled_fp8_selection_us": 120.5,
+        "baseline_rank_only_us": 52.0,
+        "sampled_rank_only_us": 44.3,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 32,
+        "candidates": 65536,
+        "baseline_fp8_selection_us": 778.5,
+        "sampled_fp8_selection_us": 251.4,
+        "baseline_rank_only_us": 607.5,
+        "sampled_rank_only_us": 45.6,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 16,
+        "candidates": 131072,
+        "baseline_fp8_selection_us": 573.7,
+        "sampled_fp8_selection_us": 311.0,
+        "baseline_rank_only_us": 291.0,
+        "sampled_rank_only_us": 90.6,
+        "rescue_rows": 1
+      },
+      {
+        "queries": 8,
+        "candidates": 262144,
+        "baseline_fp8_selection_us": 524.3,
+        "sampled_fp8_selection_us": 395.6,
+        "baseline_rank_only_us": 153.2,
+        "sampled_rank_only_us": 37.1,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 4,
+        "candidates": 505000,
+        "baseline_fp8_selection_us": 268.0,
+        "sampled_fp8_selection_us": 210.7,
+        "baseline_rank_only_us": 97.3,
+        "sampled_rank_only_us": 115.4,
+        "rescue_rows": 2
+      }
+    ]
+  },
+  "stratified": {
+    "source_revision": "f889198",
+    "shapes": [
+      {
+        "queries": 64,
+        "candidates": 16391,
+        "baseline_fp8_selection_us": 126.5,
+        "sampled_fp8_selection_us": 114.7,
+        "baseline_rank_only_us": 52.0,
+        "sampled_rank_only_us": 44.5,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 32,
+        "candidates": 65536,
+        "baseline_fp8_selection_us": 778.5,
+        "sampled_fp8_selection_us": 245.2,
+        "baseline_rank_only_us": 607.6,
+        "sampled_rank_only_us": 45.6,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 16,
+        "candidates": 131072,
+        "baseline_fp8_selection_us": 573.7,
+        "sampled_fp8_selection_us": 317.2,
+        "baseline_rank_only_us": 291.1,
+        "sampled_rank_only_us": 48.8,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 8,
+        "candidates": 262144,
+        "baseline_fp8_selection_us": 524.3,
+        "sampled_fp8_selection_us": 404.3,
+        "baseline_rank_only_us": 153.0,
+        "sampled_rank_only_us": 45.5,
+        "rescue_rows": 0
+      },
+      {
+        "queries": 4,
+        "candidates": 505000,
+        "baseline_fp8_selection_us": 268.0,
+        "sampled_fp8_selection_us": 219.3,
+        "baseline_rank_only_us": 97.2,
+        "sampled_rank_only_us": 44.4,
+        "rescue_rows": 0
+      }
+    ]
+  }
+}
