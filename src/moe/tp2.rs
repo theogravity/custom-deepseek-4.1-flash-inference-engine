@@ -189,6 +189,23 @@ fn run_rank(
     Ok(())
 }
 
+fn run_ranks(
+    thread: std::thread::Builder,
+    peer: impl FnOnce() -> Result<()> + Send,
+    local: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    std::thread::scope(|scope| {
+        let worker = thread
+            .spawn_scoped(scope, peer)
+            .context("starting TP2 peer worker")?;
+        let local = local();
+        let peer = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("peer expert worker panicked"))?;
+        local.and(peer)
+    })
+}
+
 pub(super) fn dispatch(
     rt: &mut Runtime,
     layer: usize,
@@ -244,8 +261,9 @@ pub(super) fn dispatch(
         let peer_input = replica as usize;
         let peer_output = partials as usize;
         let before = [local_cache.uploads, peer_cache.uploads];
-        std::thread::scope(|scope| -> Result<()> {
-            let worker = scope.spawn(move || -> Result<()> {
+        run_ranks(
+            std::thread::Builder::new(),
+            move || {
                 run_rank(
                     peer_cache,
                     weights,
@@ -257,21 +275,18 @@ pub(super) fn dispatch(
                 cuda(unsafe {
                     ds_recipe_sum_rank(peer_output as *const f32, peer_input as *mut f32, len)
                 })
-            });
-            let local = run_rank(
-                local_cache,
-                weights,
-                (layer, 0),
-                routes,
-                x.as_ptr() as usize,
-                weighted.as_mut_ptr() as usize,
-            );
-            let remote = worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("peer expert worker panicked"))?;
-            local?;
-            remote
-        })?;
+            },
+            || {
+                run_rank(
+                    local_cache,
+                    weights,
+                    (layer, 0),
+                    routes,
+                    x.as_ptr() as usize,
+                    weighted.as_mut_ptr() as usize,
+                )
+            },
+        )?;
         for start in (0..len).step_by(COPY_FLOATS) {
             let count = COPY_FLOATS.min(len - start);
             cuda(unsafe {
@@ -355,6 +370,51 @@ mod tests {
             DeviceCache::available_slots(2 * SLOT_BYTES, 512 << 20, 2, RANK_SLOT_BYTES),
             3
         );
+    }
+
+    #[test]
+    fn peer_thread_exhaustion_fails_only_this_dispatch() {
+        // This stack exceeds the workstation's userspace address range. The
+        // actual OS spawn fails before either rank's closure is entered.
+        let unavailable = std::thread::Builder::new().stack_size(usize::MAX / 4);
+        let error = run_ranks(
+            unavailable,
+            || panic!("unexpected peer launch"),
+            || panic!("unexpected local launch"),
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        run_ranks(std::thread::Builder::new(), || Ok(()), || Ok(())).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an inference GPU"]
+    fn failed_rank_allocation_leaves_next_cuda_launch_clean() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> i32;
+            fn cudaMemset(ptr: *mut c_void, value: i32, bytes: usize) -> i32;
+            fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
+        }
+        let device = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let mut cache = DeviceCache::new(device)?;
+        let workspace = &mut cache.rank_workspace;
+        workspace.grow_io(device, 8)?;
+        let (mut free, mut total) = (0, 0);
+        cuda(unsafe { cudaMemGetInfo(&mut free, &mut total) })?;
+        // Exceeds the physical device's entire memory; this cannot consume
+        // memory belonging to another GPU client.
+        let error = workspace.grow_io(device, total + 1).unwrap_err();
+        ensure!(
+            error.to_string().contains("CUDA MoE error 2:"),
+            "expected CUDA OOM, received {error}"
+        );
+        assert_eq!((workspace.io, workspace.io_bytes), (0, 0));
+        assert_eq!(unsafe { cudaPeekAtLastError() }, 0);
+        workspace.grow_io(device, 8)?;
+        let values = workspace.io as *mut f32;
+        cuda(unsafe { cudaMemset(values.cast(), 0, 8) })?;
+        cuda(unsafe { ds_moe_shared_swiglu(values, values.add(1), 1) })?;
+        cuda(unsafe { cudaStreamSynchronize(ptr::null_mut()) })
     }
 
     // Independent single-device reference. Gather the expert's selected input

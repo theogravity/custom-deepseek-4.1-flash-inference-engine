@@ -45,6 +45,8 @@ struct RoutedRow {
 unsafe extern "C" {
     fn ds_moe_error(error: i32) -> *const c_char;
     fn ds_moe_free_bytes(device: i32, bytes: *mut usize) -> i32;
+    fn cudaPeekAtLastError() -> i32;
+    fn cudaGetLastError() -> i32;
     fn cudaMalloc(slot: *mut *mut c_void, bytes: usize) -> i32;
     fn ds_moe_upload_parts(slot: *mut c_void, parts: *const *const c_void, coalesce: i32) -> i32;
     fn ds_moe_router_start(
@@ -110,6 +112,13 @@ unsafe extern "C" {
 
 fn cuda(code: i32) -> Result<()> {
     if code != 0 {
+        // cudaErrorMemoryAllocation is 2 in the CUDA runtime ABI. An exhausted
+        // request may retire its state and retry on this same worker thread.
+        // Leave unrelated asynchronous errors available to their own caller.
+        const CUDA_ERROR_MEMORY_ALLOCATION: i32 = 2;
+        if code == CUDA_ERROR_MEMORY_ALLOCATION && unsafe { cudaPeekAtLastError() } == code {
+            unsafe { cudaGetLastError() };
+        }
         let message = unsafe { CStr::from_ptr(ds_moe_error(code)) }.to_string_lossy();
         bail!("CUDA MoE error {code}: {message}");
     }
