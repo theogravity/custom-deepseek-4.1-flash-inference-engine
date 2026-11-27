@@ -1,8 +1,21 @@
 # ds4-flash-rs
 
-A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of DeepSeek V4.1 Flash on two RTX PRO 6000 Blackwell workstation cards. The server opens the original 48 safetensors shards and generates tokens locally. Rust owns checkpoint loading, tokenization, scheduling, sampling, and the model loop. The GPU runtime uses CUDA C++, tensor-core instructions and cuBLAS. The HTTP server uses Axum.
+A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of DeepSeek V4.1 Flash on two RTX PRO 6000 Blackwell workstation cards. The server opens the original 48 safetensors shards and generates tokens locally. Rust owns checkpoint loading, tokenization, scheduling, sampling, and the model loop. The GPU runtime uses CUDA C++, tensor-core instructions and cuBLAS. The HTTP server uses Axum. [Download the Diffbot 3-bit EXL3 model on Hugging Face](https://huggingface.co/diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000)
 
-The engine serves six independent 524,288-token windows and can rotate additional live sessions through RAM and disk. On the 375 W profile, one warm 404k coding session decoded at 256.6 tok/s. Six such sessions delivered 304.5 tok/s **in aggregate**. [Coding results and methodology](benchmarks/reports/agent-followups.md)
+## Benchmarks
+
+Warm requests on the native Rust/CUDA engine with the code-tuned DSpark drafter and two RTX PRO 6000 Blackwell cards at 375 W each. Rates are medians of six requests or six concurrent batches.
+
+| Coding workload | Clients | Input tokens per client | Output tokens per client | Decode tok/s | End-to-end tok/s |
+|---|---:|---:|---:|---:|---:|
+| Captured Pi reasoning turn | 1 | 2,786 | 256 | 178.8 | 174.2 |
+| Structured Python edit | 1 | 25,625 | 1,500 | 383.5 | 379.0 |
+| Code generation on a long history | 1 | 404,151 | 512 | 256.6 | 240.4 |
+| Code generation on six independent histories | 6 | ~404,000 | 512 | **304.5 aggregate** | **299.7 aggregate** |
+
+Decode spans the first through last output. The Python edit follows the upstream convention of counting all 1,500 output tokens from first output to stream close. End-to-end includes the wait for first output and runs until the request or batch finishes.
+
+On six different follow-ups to a warm 404k-token conversation, median time to first output was **0.48 s** with tokenized-text caching enabled. The engine supports six independent 524,288-token windows and can rotate additional sessions through RAM and disk. [Methodology](benchmarks/reports/agent-followups.md) · [Raw measurements](benchmarks/agent-followups/measurements/) · [All benchmarks](benchmarks/)
 
 ## Build and serve from a fresh clone
 
