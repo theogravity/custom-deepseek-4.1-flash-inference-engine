@@ -79,6 +79,13 @@ void run_case(int rows, int width, bool stress) {
             chronological_ids<top><<<rows,block>>>(output.data,width,picks.data);
             check(cudaGetLastError());
         };
+        // A missing write must not inherit the reference arm's valid result.
+        check(cudaMemset(output.data,0xa5,size*sizeof(Rank)));
+        check(cudaMemset(scratch.data,0xa5,((size+1)/2)*sizeof(Rank)));
+        check(cudaMemset(picks.data,0xa5,size_t(rows)*top*sizeof(int)));
+        check(cudaMemset(thresholds.data,0xa5,rows*sizeof(Rank)));
+        check(cudaMemset(counters.data,0xa5,rows*sizeof(int)));
+        check(cudaMemset(sort_space.data,0xa5,std::max<size_t>(1,bytes)));
         run();
         std::vector<int> got(size_t(rows)*top);
         check(cudaMemcpy(got.data(),picks.data,got.size()*sizeof(int),cudaMemcpyDeviceToHost));
