@@ -1,0 +1,57 @@
+[
+  {
+    "instruction": "Inspect the test.",
+    "wire": "2a8f8adbc51b03b3a9fc7109659455d37061540b3c708e7aeb4e67c20c97fae8",
+    "tokens": 404137,
+    "ids": "3a7fa7003a1ef1c1a19efe6b1589e5749b31a24f8d1dc82c6708d0eee3285df0",
+    "reply": "8d809e6090671b130cb0e7125520fef17e7434a2bac5fc9bf1dbd66a354337a0"
+  },
+  {
+    "instruction": "Explain the parser bug and suggest a fix.",
+    "wire": "f5a6e5ce8a32b9fbfbb76ac7342081df44063abd237ee8a8ddbcbb43d4c16071",
+    "tokens": 404141,
+    "ids": "a8adf40e387ac25285c4fba783af71dc6bba887b40bf1b21bece4cfca8a11306",
+    "reply": "261beb3fed131f180aaed6aba01035da3781588ab7b24582cb28637ba01a709f",
+    "warm_prefix_tokens": 404096
+  },
+  {
+    "instruction": "List the file names and give a proposed test case.",
+    "wire": "2ae0e015bc088e3bc4697cec1649f66106237e22423a2ecceb694f492afdfabb",
+    "tokens": 404143,
+    "ids": "4389547e40b69ce8a19cdcb01f61c886050f223ce0c1bcc19500a772bff32413",
+    "reply": "3e215f4705d73fea35bd8c06de76963c7f8c612f8b87f00b4ab463c405c5dbe6",
+    "warm_prefix_tokens": 404096
+  },
+  {
+    "instruction": "Return a small Python example containing an escaped option followed by an argument.",
+    "wire": "d1a6c40c7b9be9845aaa415cbe9af81d3ceeb24105c617b884dbcae237f0df98",
+    "tokens": 404146,
+    "ids": "65fb4246180e11dcc15d47aa45d9a152f04d60d2ddf7d0af5c85033e3c47ede8",
+    "reply": "6eefa1fa5ab3e7e1118c9c059958ed1478a9cc9def42e01e198684b84a6ba580",
+    "warm_prefix_tokens": 404096
+  },
+  {
+    "instruction": "Explain why the test failed. Suggest a minimal fix and give two edge cases for the reviewer.",
+    "wire": "52a4beef41e2c3089cca8180258398eaa5bda4b28c87d511cfa18400ce8dbd4d",
+    "tokens": 404151,
+    "ids": "7472085af4117bb0c6c2ab3d438fa78c165121aca0fa46be2fb42521746bb4de",
+    "reply": "daf6b8245864bedc185b74eae7d872a1bbef78b648dd3421b5db78ebe378d01d",
+    "warm_prefix_tokens": 404096
+  },
+  {
+    "instruction": "Summarize the earlier debugging history and identify the remaining bug. Name the failing case, the relevant parser branch, and one way to test the fix.",
+    "wire": "f2f87a1eb7fba79349cd4c4310e0528b18684f79557846c3fec7973f42e31d3a",
+    "tokens": 404162,
+    "ids": "1deaa74e39f1c5664d9c201ec6fe74a2218ad942f46ea33b7882f02e49c32c4a",
+    "reply": "0ebfae4198c0fa9219d892ef00e36ccf572ecea7211b37fcdfd5b20f562a4cb9",
+    "warm_prefix_tokens": 404160
+  },
+  {
+    "instruction": "Review the proposed shell argument parser. Describe in four numbered steps how to handle escaped quotes, adjacent arguments, empty strings, and an unset environment variable. Include one concrete command and its expected result.",
+    "wire": "aae8d86cdd502c77f5556458c06d87b4de2e35f9ef26f55f4e0427b2c02cfdcf",
+    "tokens": 404172,
+    "ids": "39bbd9c72aa22ed5fd8c9814b723f48cd4277d783262e108c7c6800666da3651",
+    "reply": "e7b4371124246204e257c7d177a493d697d9dd30562aa5470cf5fbccb640ad0b",
+    "warm_prefix_tokens": 404160
+  }
+]

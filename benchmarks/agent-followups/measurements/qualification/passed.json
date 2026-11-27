@@ -1,0 +1,134 @@
+{
+  "image": "sha256:983107c9a28b26a9c486431b4a6a9d25ef9fee386e1fa13f790eaac326ca0522",
+  "pi-tool-exchange": [
+    {
+      "wire_sha": "70ae5ffe20832f3163708eebc2cb250c6ca149ca57281534883d6d302073a293",
+      "ordered_output_sha": "dd3f5ac04a647ea44663408fe61c60b80de889bbd4fe98fcf56733a77d2df26e",
+      "prompt": 2780,
+      "tokens": 4103,
+      "finish": "tool_calls"
+    },
+    {
+      "wire_sha": "3ae42ddc73773e3d8784eb4003f960b83328115e813189fbf978346e81eaf047",
+      "ordered_output_sha": "01d994a7a221529098d4085030e3a7dde35f23b0c0eff74669355083690447b7",
+      "prompt": 6908,
+      "tokens": 62,
+      "finish": "tool_calls"
+    },
+    {
+      "wire_sha": "446b8e1441caf84964125c1497286df6f7998b8c4ee9097f796f33b1643604d3",
+      "ordered_output_sha": "a959a2660aeba410fcdac04b01d81d422c206f3d7d218d874247fc0ffc6268fd",
+      "prompt": 6993,
+      "tokens": 542,
+      "finish": "tool_calls"
+    }
+  ],
+  "needles": [
+    266174,
+    520362
+  ],
+  "short-edit": {
+    "samples": [
+      376.0766032356998,
+      383.1616728640213,
+      383.3076426289136,
+      383.70044657151686,
+      385.83775909994966,
+      385.847779355354
+    ],
+    "median": 383.50404460021525
+  },
+  "long-c1": {
+    "samples": [
+      225.2830005378963,
+      233.8495290452887,
+      239.98312468728727,
+      242.97356573000962,
+      245.64808329257616,
+      246.92068225174557
+    ],
+    "median": 241.47834520864845
+  },
+  "six-full-waves": 3,
+  "eight-ram": {
+    "peak_resident": 6,
+    "peak_swapped": 2,
+    "passed": true,
+    "concurrent": 8,
+    "total_including_controls": 16,
+    "io": {
+      "ram_reads": 8,
+      "ram_writes": 8,
+      "disk_reads": 0,
+      "disk_writes": 0,
+      "read_failures": 0,
+      "write_failures": 0
+    }
+  },
+  "eight-disk": {
+    "peak_resident": 6,
+    "peak_swapped": 2,
+    "passed": true,
+    "concurrent": 8,
+    "total_including_controls": 16,
+    "io": {
+      "ram_reads": 0,
+      "ram_writes": 0,
+      "disk_reads": 8,
+      "disk_writes": 8,
+      "read_failures": 0,
+      "write_failures": 0
+    }
+  },
+  "gpu-tests": 95,
+  "memory": {
+    "context-needles": {
+      "min_free_mib": [
+        524,
+        514,
+        238475
+      ],
+      "peak_sampled_cgroup_anon_mib": 2043.36328125
+    },
+    "short-edit": {
+      "min_free_mib": [
+        516,
+        512,
+        238106
+      ],
+      "peak_sampled_cgroup_anon_mib": 2119.80078125
+    },
+    "long-c1": {
+      "min_free_mib": [
+        380,
+        512,
+        237024
+      ],
+      "peak_sampled_cgroup_anon_mib": 2857.5859375
+    },
+    "six-full": {
+      "min_free_mib": [
+        318,
+        514,
+        232770
+      ],
+      "peak_sampled_cgroup_anon_mib": 7546.74609375
+    },
+    "eight-ram": {
+      "min_free_mib": [
+        27724,
+        24550,
+        233264
+      ],
+      "peak_sampled_cgroup_anon_mib": 6232.8671875
+    },
+    "eight-disk": {
+      "min_free_mib": [
+        26792,
+        23922,
+        234467
+      ],
+      "peak_sampled_cgroup_anon_mib": 4609.55859375
+    }
+  }
+}

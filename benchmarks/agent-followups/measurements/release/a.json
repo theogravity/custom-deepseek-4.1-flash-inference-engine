@@ -1,0 +1,133 @@
+{
+  "pi": {
+    "median": 178.46103191547027,
+    "ttft": 0.04536008650029544,
+    "rows": [
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 9.801203009992605,
+        "ttft_s": 2.9220573990023695,
+        "stream_s": 6.879063590997248,
+        "decode_tok_s": 37.06899880002898,
+        "api_tok_s": 26.11924268265852
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4718708509899443,
+        "ttft_s": 0.04615280099096708,
+        "stream_s": 1.4256480900075985,
+        "decode_tok_s": 178.86602015413277,
+        "api_tok_s": 173.92830344307768
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4771652490017004,
+        "ttft_s": 0.04575691900390666,
+        "stream_s": 1.431295479007531,
+        "decode_tok_s": 178.16027769249894,
+        "api_tok_s": 173.3049164086484
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4737942009960534,
+        "ttft_s": 0.0450028250052128,
+        "stream_s": 1.42873264598893,
+        "decode_tok_s": 178.47985815673437,
+        "api_tok_s": 173.70132127469643
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4749452760006534,
+        "ttft_s": 0.04510929499519989,
+        "stream_s": 1.4297446310083615,
+        "decode_tok_s": 178.3535286438916,
+        "api_tok_s": 173.56576150008064
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.473550750000868,
+        "ttft_s": 0.04540554700361099,
+        "stream_s": 1.428083232996869,
+        "decode_tok_s": 178.5610208901312,
+        "api_tok_s": 173.73001913904167
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4744395739980973,
+        "ttft_s": 0.045314625996979885,
+        "stream_s": 1.4290341180021642,
+        "decode_tok_s": 178.44220567420618,
+        "api_tok_s": 173.62529093398462
+      }
+    ]
+  },
+  "long": {
+    "decode": 256.4057960809389,
+    "ttft": 0.6273097244993551,
+    "wall": 195.23932575876356,
+    "samples": [
+      0.6225039349956205,
+      0.6325063670083182,
+      0.6264958349929657,
+      0.6152567560056923,
+      0.6361828759982018,
+      0.6281236140057445
+    ]
+  },
+  "six": {
+    "decode": 299.5170950744615,
+    "wall": 282.90665481544784,
+    "samples": [
+      269.52915599426876,
+      297.4264373407305,
+      297.57423981504763,
+      309.1223352872579,
+      305.4145502515741,
+      301.45995033387544
+    ]
+  },
+  "image": "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274",
+  "flags": {}
+}

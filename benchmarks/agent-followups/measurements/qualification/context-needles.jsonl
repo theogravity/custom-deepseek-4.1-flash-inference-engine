@@ -1,0 +1,4 @@
+{"starting": "half", "prompt_tokens": 266174, "seed": 268815548685955}
+{"context": "half", "prompt_tokens": 266174, "output_tokens": 25, "seed": 268815548685955, "wall_s": 1.127, "exact": true, "expected": ["R141e00b51c33", "Ref29ee268d60", "R4a4e1c918e01"], "received": ["R141e00b51c33", "Ref29ee268d60", "R4a4e1c918e01"], "finish": "stop"}
+{"starting": "full", "prompt_tokens": 520362, "seed": 268815548685955}
+{"context": "full", "prompt_tokens": 520362, "output_tokens": 26, "seed": 268815548685955, "wall_s": 1.707, "exact": true, "expected": ["R141e00b51c33", "R4a4e1c918e01", "R735f90959a97"], "received": ["R141e00b51c33", "R4a4e1c918e01", "R735f90959a97"], "finish": "stop"}

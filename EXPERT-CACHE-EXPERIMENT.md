@@ -63,7 +63,7 @@ In a separate six-wave run, the LFU engine recorded a median of **1,191 uploads*
 The local tag `checkpoint-2026-11-26-before-expert-cache` identifies engine commit `38f4fc6`, parent integration commit `d8ac007` and the matching pre-experiment Docker image. The trace recorder and standalone C++17 replay tool are on `experiment/expert-cache-replay` at `f42b9de`. The original per-device trace files and wave boundaries are in `~/.cache/ds4-flash-rs/profiles/expert-cache-38f4fc6/`. To reproduce the replay from that revision on this host, run the following commands.
 
 ```sh
-git show f42b9de:tools/replay_expert_cache.cpp > /tmp/replay_expert_cache.cpp
+git show 01f95dc:tools/replay_expert_cache.cpp > /tmp/replay_expert_cache.cpp
 c++ -O3 -std=c++17 /tmp/replay_expert_cache.cpp -o /tmp/replay_expert_cache
 trace_dir="$HOME/.cache/ds4-flash-rs/profiles/expert-cache-38f4fc6"
 for card in 0 1; do

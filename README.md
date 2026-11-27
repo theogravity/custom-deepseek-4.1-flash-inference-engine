@@ -6,6 +6,34 @@ The native benchmarks cover code generation at 404k context and six independent 
 
 For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md) · [Tool-return latency](TOOL-RETURN.md) · [Long-history coding requests](AGENT-ROUND3.md)
 
+## Benchmark workstation
+
+| Component | Configuration |
+|---|---|
+| CPU | AMD Ryzen Threadripper PRO 9965WX, 24 cores / 48 threads |
+| System memory | 256 GB DDR5-5600, approximately 247 GiB visible to Linux |
+| Inference GPUs | 2 × NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 96 GB GDDR7 each, host GPU indices 1 and 2 |
+| Desktop GPU | GeForce RTX 5080, excluded from engine benchmarks |
+| Storage | Samsung 9100 PRO 2 TB NVMe drives for the model pack and the host cache |
+| Software used | Ubuntu 26.04.1 LTS, NVIDIA driver 615.71.09, CUDA Toolkit 13.5.37, Rust 1.100.0 |
+
+The current coding profile was benchmarked at **375 W per inference GPU** and a measured **225 W CPU socket cap**. The GPU P0 offsets were +450 MHz core and +4,000 MHz VRAM. Separate 600 W GPU runs are labeled in the results. The workstation's 180 W CPU boot setting was prepared for a later boot. [GPU settings](results/benchmark-gpu-settings.json) · [CPU power measurements](results/benchmark-cpu-power.json) · [Boot unit](workstation/cpu-power-cap.service)
+
+## Build and serve from a fresh clone
+
+Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.
+
+```sh
+hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --local-dir /mnt/models/dsv41-flash-exl3
+cargo build --release --locked
+docker build -t ds4-flash-rs:agent-coding-20261126 .
+install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
+docker compose -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
+curl -fsS http://127.0.0.1:8001/health
+```
+
+The optional proxy patch preserves oversized-request errors for Codex. The benchmark directory contains the public replay drivers and per-run data. The archived Engram prototype uses a separate vLLM-based executor and has its own branch. [Model pack](https://huggingface.co/diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000) · [Benchmark materials](benchmarks/) · [LiteLLM patch](integrations/litellm-context-errors/) · [Archived prototype](https://github.com/theogravity/custom-deepseek-4.1-flash-inference-engine/tree/archive/vllm-engram-prototype)
+
 ## Run on this workstation
 
 The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. The HTTP server reuses tokenized text when an agent sends the same file or tool result in a later turn. [Performance and checkpoints](DECODE-ROUND2.md)
@@ -208,3 +236,7 @@ Peak sampled memory was 96,828 and 96,888 MiB on GPUs 1 and 2. These measurement
 ### Choosing between the learned and source drafters
 
 When DSpark is ready, the scheduler uses it if fewer than 16 consecutive tokens agree with a source occurrence. With 16–31 matches it can propose the next 16 source tokens, with 32–63 it can propose 64, and with at least 64 it can propose the configured maximum. The target verifies every proposal. The Python rewrite used 25,598 input tokens and reached its 512-output-token limit in both modes. It measured 166.2 tok/s with fixed 128-token lookup and 308.1 tok/s after this change, with identical generated text. The complete Go edit measured 866.5 tok/s and passed the same tests. [Partial rewrite before](results/long-edit-fixed.jsonl) · [Partial rewrite after](results/hybrid-long.jsonl) · [Source lookup controls](results/lookup-tuning.json) · [Generated Go diff and tests](results/edit-validation.json)
+
+## License
+
+The engine, tools and documentation are licensed under MIT. The bundled DeepSeek tool prompt retains its original copyright and MIT notice. Downloaded weights, CUDA libraries and other dependencies retain their respective licenses. [Project license](LICENSE) · [DeepSeek prompt notice](src/tool_prompt.LICENSE)

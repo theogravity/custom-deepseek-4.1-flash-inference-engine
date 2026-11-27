@@ -1,0 +1,30 @@
+[Unit]
+Description=Apply and verify the 180 W CPU socket power cap (AMD HSMP)
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=:/bin/sh -ec '\
+    for attempt in $(seq 1 30); do \
+        found=0; \
+        for sensor in /sys/class/hwmon/hwmon*; do \
+            case "$(cat "$sensor/name" 2>/dev/null)" in \
+                amd_hsmp|amd_hsmp_hwmon) \
+                    cap="$sensor/power1_cap"; \
+                    [ -e "$cap" ] || continue; \
+                    echo 180000000 > "$cap"; \
+                    read -r actual < "$cap"; \
+                    if [ "$actual" != 180000000 ]; then \
+                        echo "$cap reported $actual microwatts after requesting 180000000" >&2; exit 1; \
+                    fi; \
+                    echo "Verified 180 W CPU socket cap at $cap"; found=1 ;; \
+            esac; \
+        done; \
+        [ "$found" -eq 0 ] || exit 0; \
+        sleep 1; \
+    done; \
+    echo "AMD HSMP socket power control did not appear within 30 seconds" >&2; exit 1'
+
+[Install]
+WantedBy=multi-user.target

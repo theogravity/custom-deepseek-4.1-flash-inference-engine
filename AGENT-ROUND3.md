@@ -34,7 +34,9 @@ All throughput figures are medians of six warm native requests or waves per fres
 
 An earlier release run was discarded when its test list exposed a stale executable in a shared Cargo build directory. The reported release was rebuilt from the tagged source in an empty target directory. Its server and test executable hashes were checked before qualification. The clean release build reproduced the complete 4,103-token Pi edit, its 62-token tool-return reply and the 542-token following reply. It passed 95 tests with the model and both GPUs. It recovered the exact receipts at 266,174 and 520,362 tokens. It served three waves of six independent full windows, then eight agents with six resident and two swapped on each of the RAM and forced-disk tiers. Both tiers returned the reference replies with zero read or write failures. The 25,625-token edit measured 383.5 tok/s. Previous tool-return idle prefill remains enabled. [Prior tool-return measurements](TOOL-RETURN.md)
 
-The three source checkpoints are `checkpoint-2026-11-26-agent3-01-text`, `checkpoint-2026-11-26-agent3-02-markov`, and `checkpoint-2026-11-26-agent3-03-prefix`. Raw samples and per-run settings are archived on this workstation under `~/.cache/ds4-flash-rs/profiles/agent-round3-20261126/`.
+The three source checkpoints are `checkpoint-2026-11-26-agent3-01-text`, `checkpoint-2026-11-26-agent3-02-markov`, and `checkpoint-2026-11-26-agent3-03-prefix`. The public archive includes the per-arm timings and a replay driver. [Measurement files](benchmarks/agent-followups/measurements/) · [Replay instructions](benchmarks/README.md)
+
+The full workstation archive is under `~/.cache/ds4-flash-rs/profiles/agent-round3-20261126/`.
 
 ## Build and rollback
 

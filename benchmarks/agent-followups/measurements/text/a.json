@@ -1,0 +1,121 @@
+{
+  "pi": {
+    "median": 178.0292903796184,
+    "ttft": 0.04528232199663762,
+    "rows": [
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 61.034699454001384,
+        "ttft_s": 57.35222259099828,
+        "stream_s": 3.682358182995813,
+        "decode_tok_s": 69.24910270204694,
+        "api_tok_s": 4.194335391016935
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.6658668509917334,
+        "ttft_s": 0.22442066800431348,
+        "stream_s": 1.4413784819917055,
+        "decode_tok_s": 176.91397726962003,
+        "api_tok_s": 153.67374640271916
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4864696090080542,
+        "ttft_s": 0.046037100997637026,
+        "stream_s": 1.4403262070118217,
+        "decode_tok_s": 177.04322726241074,
+        "api_tok_s": 172.22013719529255
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4831135330023244,
+        "ttft_s": 0.04615338199073449,
+        "stream_s": 1.4368662600027164,
+        "decode_tok_s": 177.46954403363742,
+        "api_tok_s": 172.60984698977782
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4725701689894777,
+        "ttft_s": 0.044527542995638214,
+        "stream_s": 1.4278592049959116,
+        "decode_tok_s": 178.58903672559939,
+        "api_tok_s": 173.8457055500961
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4715432340017287,
+        "ttft_s": 0.043914930007304065,
+        "stream_s": 1.4275338629959151,
+        "decode_tok_s": 178.6297380468723,
+        "api_tok_s": 173.967025966224
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.471571264002705,
+        "ttft_s": 0.04444990299816709,
+        "stream_s": 1.4270241699996404,
+        "decode_tok_s": 178.6935395775842,
+        "api_tok_s": 173.9637123000585
+      }
+    ]
+  },
+  "long": {
+    "decode": 253.5472359590047,
+    "ttft": 0.5971880504948786,
+    "wall": 195.98165989347206,
+    "samples": [
+      0.6916096950008068,
+      0.6136910939967493,
+      0.6134246619913029,
+      0.5766538769967156,
+      0.5809514389984543,
+      0.5726182469952619
+    ]
+  },
+  "image": "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274",
+  "flags": {}
+}

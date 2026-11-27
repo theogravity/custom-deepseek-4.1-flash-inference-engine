@@ -1,0 +1,80 @@
+{
+  "image": "sha256:34190883f05d4f291fca5c083d5cb4df4dfe1614eca886651dfd5e8b4372958d",
+  "settings": {
+    "DS4_AGENT_TEXT_CACHE": "0"
+  },
+  "count_s": [
+    0.5096363109914819,
+    0.4831838070094818,
+    0.47827097299159504,
+    0.47566083999117836,
+    0.45683627600374166,
+    0.45386633000453,
+    0.4295426390017383
+  ],
+  "generations": [
+    {
+      "prompt": 404137,
+      "tokens": 16,
+      "wire_sha": "2a8f8adbc51b03b3a9fc7109659455d37061540b3c708e7aeb4e67c20c97fae8",
+      "ordered_output_sha": "8d809e6090671b130cb0e7125520fef17e7434a2bac5fc9bf1dbd66a354337a0",
+      "ttft": 4.067752279006527,
+      "reuse": 404096,
+      "finish": "length"
+    },
+    {
+      "prompt": 404141,
+      "tokens": 16,
+      "wire_sha": "f5a6e5ce8a32b9fbfbb76ac7342081df44063abd237ee8a8ddbcbb43d4c16071",
+      "ordered_output_sha": "261beb3fed131f180aaed6aba01035da3781588ab7b24582cb28637ba01a709f",
+      "ttft": 1.0500775870023062,
+      "reuse": 404096,
+      "finish": "length"
+    },
+    {
+      "prompt": 404143,
+      "tokens": 16,
+      "wire_sha": "2ae0e015bc088e3bc4697cec1649f66106237e22423a2ecceb694f492afdfabb",
+      "ordered_output_sha": "3e215f4705d73fea35bd8c06de76963c7f8c612f8b87f00b4ab463c405c5dbe6",
+      "ttft": 0.9211865789984586,
+      "reuse": 404096,
+      "finish": "length"
+    },
+    {
+      "prompt": 404146,
+      "tokens": 16,
+      "wire_sha": "d1a6c40c7b9be9845aaa415cbe9af81d3ceeb24105c617b884dbcae237f0df98",
+      "ordered_output_sha": "6eefa1fa5ab3e7e1118c9c059958ed1478a9cc9def42e01e198684b84a6ba580",
+      "ttft": 0.8940028320066631,
+      "reuse": 404096,
+      "finish": "length"
+    },
+    {
+      "prompt": 404151,
+      "tokens": 16,
+      "wire_sha": "52a4beef41e2c3089cca8180258398eaa5bda4b28c87d511cfa18400ce8dbd4d",
+      "ordered_output_sha": "daf6b8245864bedc185b74eae7d872a1bbef78b648dd3421b5db78ebe378d01d",
+      "ttft": 0.8191725659999065,
+      "reuse": 404096,
+      "finish": "length"
+    },
+    {
+      "prompt": 404162,
+      "tokens": 16,
+      "wire_sha": "f2f87a1eb7fba79349cd4c4310e0528b18684f79557846c3fec7973f42e31d3a",
+      "ordered_output_sha": "0ebfae4198c0fa9219d892ef00e36ccf572ecea7211b37fcdfd5b20f562a4cb9",
+      "ttft": 0.9387062559981132,
+      "reuse": 404160,
+      "finish": "length"
+    },
+    {
+      "prompt": 404172,
+      "tokens": 16,
+      "wire_sha": "aae8d86cdd502c77f5556458c06d87b4de2e35f9ef26f55f4e0427b2c02cfdcf",
+      "ordered_output_sha": "e7b4371124246204e257c7d177a493d697d9dd30562aa5470cf5fbccb640ad0b",
+      "ttft": 1.0395897830021568,
+      "reuse": 404160,
+      "finish": "length"
+    }
+  ]
+}

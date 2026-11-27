@@ -1,0 +1,52 @@
+{
+  "image": "sha256:983107c9a28b26a9c486431b4a6a9d25ef9fee386e1fa13f790eaac326ca0522",
+  "pi-tool-exchange": [
+    {
+      "wire_sha": "70ae5ffe20832f3163708eebc2cb250c6ca149ca57281534883d6d302073a293",
+      "ordered_output_sha": "dd3f5ac04a647ea44663408fe61c60b80de889bbd4fe98fcf56733a77d2df26e",
+      "prompt": 2780,
+      "tokens": 4103,
+      "finish": "tool_calls"
+    },
+    {
+      "wire_sha": "3ae42ddc73773e3d8784eb4003f960b83328115e813189fbf978346e81eaf047",
+      "ordered_output_sha": "01d994a7a221529098d4085030e3a7dde35f23b0c0eff74669355083690447b7",
+      "prompt": 6908,
+      "tokens": 62,
+      "finish": "tool_calls"
+    },
+    {
+      "wire_sha": "446b8e1441caf84964125c1497286df6f7998b8c4ee9097f796f33b1643604d3",
+      "ordered_output_sha": "a959a2660aeba410fcdac04b01d81d422c206f3d7d218d874247fc0ffc6268fd",
+      "prompt": 6993,
+      "tokens": 542,
+      "finish": "tool_calls"
+    }
+  ],
+  "needles": [
+    266174,
+    520362
+  ],
+  "short-edit": {
+    "samples": [
+      376.1864590816295,
+      384.4988852005995,
+      386.7507312979996,
+      384.92634301863296,
+      386.3269462206052,
+      386.3152315616741
+    ],
+    "median": 385.62078729015354
+  },
+  "long-c1": {
+    "samples": [
+      225.27599572804067,
+      234.7583643076246,
+      240.02746195997673,
+      242.38709255979302,
+      245.89122251329394,
+      249.130058433352
+    ],
+    "median": 241.20727725988488
+  }
+}

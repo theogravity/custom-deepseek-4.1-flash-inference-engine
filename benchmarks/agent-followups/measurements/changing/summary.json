@@ -1,0 +1,50 @@
+{
+  "exact_responses": 21,
+  "count_s": [
+    0.4451424120052252,
+    0.0019342895029694773,
+    0.46624855799746
+  ],
+  "ttft_s": [
+    0.8473358675037161,
+    0.4815582945011556,
+    0.9299464174982859
+  ],
+  "reference": [
+    {
+      "wire": "2a8f8adbc51b03b3a9fc7109659455d37061540b3c708e7aeb4e67c20c97fae8",
+      "tokens": 404137,
+      "ids": "3a7fa7003a1ef1c1a19efe6b1589e5749b31a24f8d1dc82c6708d0eee3285df0"
+    },
+    {
+      "wire": "f5a6e5ce8a32b9fbfbb76ac7342081df44063abd237ee8a8ddbcbb43d4c16071",
+      "tokens": 404141,
+      "ids": "a8adf40e387ac25285c4fba783af71dc6bba887b40bf1b21bece4cfca8a11306"
+    },
+    {
+      "wire": "2ae0e015bc088e3bc4697cec1649f66106237e22423a2ecceb694f492afdfabb",
+      "tokens": 404143,
+      "ids": "4389547e40b69ce8a19cdcb01f61c886050f223ce0c1bcc19500a772bff32413"
+    },
+    {
+      "wire": "d1a6c40c7b9be9845aaa415cbe9af81d3ceeb24105c617b884dbcae237f0df98",
+      "tokens": 404146,
+      "ids": "65fb4246180e11dcc15d47aa45d9a152f04d60d2ddf7d0af5c85033e3c47ede8"
+    },
+    {
+      "wire": "52a4beef41e2c3089cca8180258398eaa5bda4b28c87d511cfa18400ce8dbd4d",
+      "tokens": 404151,
+      "ids": "7472085af4117bb0c6c2ab3d438fa78c165121aca0fa46be2fb42521746bb4de"
+    },
+    {
+      "wire": "f2f87a1eb7fba79349cd4c4310e0528b18684f79557846c3fec7973f42e31d3a",
+      "tokens": 404162,
+      "ids": "1deaa74e39f1c5664d9c201ec6fe74a2218ad942f46ea33b7882f02e49c32c4a"
+    },
+    {
+      "wire": "aae8d86cdd502c77f5556458c06d87b4de2e35f9ef26f55f4e0427b2c02cfdcf",
+      "tokens": 404172,
+      "ids": "39bbd9c72aa22ed5fd8c9814b723f48cd4277d783262e108c7c6800666da3651"
+    }
+  ]
+}

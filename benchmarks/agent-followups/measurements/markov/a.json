@@ -1,0 +1,124 @@
+{
+  "pi": {
+    "median": 178.00473829907781,
+    "ttft": 0.0432385175008676,
+    "rows": [
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 8.794985171000008,
+        "ttft_s": 2.6713162819942227,
+        "stream_s": 6.123599519007257,
+        "decode_tok_s": 41.64217454268466,
+        "api_tok_s": 29.10749649062709
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4774226040026406,
+        "ttft_s": 0.045064177000313066,
+        "stream_s": 1.4322934160009027,
+        "decode_tok_s": 178.03614619131872,
+        "api_tok_s": 173.27472810179265
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4743289780017221,
+        "ttft_s": 0.043079776005470194,
+        "stream_s": 1.431156660997658,
+        "decode_tok_s": 178.17755871830252,
+        "api_tok_s": 173.6383153419243
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.475222702996689,
+        "ttft_s": 0.04268073500134051,
+        "stream_s": 1.4324479670030996,
+        "decode_tok_s": 178.0169373506104,
+        "api_tok_s": 173.53312112128916
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4763742590002948,
+        "ttft_s": 0.04322353799943812,
+        "stream_s": 1.4330921799992211,
+        "decode_tok_s": 177.93691400935464,
+        "api_tok_s": 173.39776715786596
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4762058070045896,
+        "ttft_s": 0.04325349700229708,
+        "stream_s": 1.4328584400063846,
+        "decode_tok_s": 177.96594058437745,
+        "api_tok_s": 173.4175538297446
+      },
+      {
+        "hashes": {
+          "reasoning_content": "75eb92e164855441f2aba7a93a70a04650e1adb4d4bc28dbf4359c8289312a71",
+          "content": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "prompt_tokens": 2786,
+        "output_tokens": 256,
+        "events": 256,
+        "wall_s": 1.4760539469862124,
+        "ttft_s": 0.04331486798764672,
+        "stream_s": 1.4326443180034403,
+        "decode_tok_s": 177.9925392475452,
+        "api_tok_s": 173.43539544926352
+      }
+    ]
+  },
+  "long": {
+    "decode": 256.03733816012243,
+    "ttft": 0.13536245049908757,
+    "wall": 240.1513725983916,
+    "samples": [
+      0.140851586998906,
+      0.13660080698900856,
+      0.1341191340034129,
+      0.13412409400916658,
+      0.13691841800755356,
+      0.13044262600305956
+    ]
+  },
+  "image": "sha256:07cc7a523a801126372917b57c749c204ab9e6a5051b9f51dc540bc8fadc6d05",
+  "flags": {
+    "DS4_AGENT_TEXT_CACHE": "1",
+    "DS4_MARKOV_PAIRS": "0"
+  }
+}
