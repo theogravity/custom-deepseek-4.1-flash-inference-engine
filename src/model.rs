@@ -309,7 +309,7 @@ impl Model {
         chunk: usize,
     ) -> Result<Self> {
         let max_chunk = if crate::moe::tp2_prefill_enabled()? && crate::runtime::tp_dense() {
-            8192
+            16384
         } else {
             512
         };
