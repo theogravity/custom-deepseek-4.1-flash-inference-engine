@@ -65,6 +65,7 @@ impl DraftState {
         pos: usize,
         seed: u32,
         width: usize,
+        concurrent_sessions: usize,
     ) -> Result<Vec<u32>> {
         propose_many(
             rt,
@@ -74,6 +75,7 @@ impl DraftState {
                 seed,
                 width,
             }],
+            concurrent_sessions,
         )?
         .pop()
         .context("missing draft result")
@@ -93,8 +95,13 @@ pub(crate) struct DraftInput<'a> {
 pub(crate) fn propose_many(
     rt: &mut Runtime,
     requests: &mut [DraftInput<'_>],
+    concurrent_sessions: usize,
 ) -> Result<Vec<Vec<u32>>> {
     ensure!(!requests.is_empty(), "empty draft batch");
+    ensure!(
+        concurrent_sessions >= requests.len(),
+        "draft batch exceeds active sessions"
+    );
     let mut noise = Vec::new();
     for r in requests.iter() {
         ensure!(
@@ -134,7 +141,7 @@ pub(crate) fn propose_many(
     }
     let x = residual::readout(rt, &h, &mut mix, "mtp.2.norm.weight", 0, rows)?;
     let logits = rt.linear_dev("head.weight", &x, rows, 1)?;
-    let gate = confidence::Gate::configured()?;
+    let gate = confidence::Gate::configured(concurrent_sessions)?;
     if let [r] = requests {
         let ids = rt.markov(&logits, r.seed, r.width)?;
         return Ok(vec![finish_proposal(rt, r, gate.as_ref(), &h, &mix, &ids)?]);

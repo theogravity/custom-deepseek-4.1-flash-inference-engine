@@ -4,17 +4,18 @@ A ground-up Rust and CUDA inference engine for [DeepSeek V4.1 Flash, Diffbot EXL
 
 ## Headline benchmarks
 
-Warm coding-edit decode throughput. Concurrent rates are aggregate across clients.
+Warm 25.6k-token coding-edit decode throughput. Concurrent rates are aggregate across clients.
 
 | Clients | Native engine | vLLM reference |
 |---:|---:|---:|
-| 1 | 343 tok/s¹ | 282 tok/s |
-| 4 | 491 tok/s² | 518 tok/s |
-| 6 | 498 tok/s² | 557 tok/s |
+| 1 | **410 tok/s** | 282 tok/s |
+| 4 | 498 tok/s | 518 tok/s |
+| 6 | 504 tok/s | 557 tok/s |
 
-¹ Earlier full-profile run; the latest prefix-fix run did not measure C1. ² Latest run, 25.6k-token prompt with restored shared prefix. Six independent ~404k-token sessions measured 304.5 aggregate tok/s in a separate run. The published vLLM numbers used a different run and power limit; see the detailed reports for methodology and raw data.
+The native rates are medians of six waves at 375 W per GPU with batch-aware speculative confidence enabled. vLLM reference rates were published at 600 W per GPU. Six independent ~404k-token sessions measured 304.5 aggregate tok/s in a separate run. See the reports for methods and raw data.
 
 - [Latest C4/C6 comparison and run data](benchmarks/reports/prefix-fix-benchmark-20261127.md)
+- [Batch-aware decode optimization and matched controls](benchmarks/reports/batch-adaptive-confidence.md)
 - [Long-context, cold-prefill and session-capacity results](benchmarks/reports/default-profile-headline-20261127.md)
 - [All benchmark reports and raw data](benchmarks/)
 
@@ -36,7 +37,7 @@ docker compose -f compose.yml -f deploy/profiles/tp2-prefill.yml up --no-build -
 curl -fsS http://127.0.0.1:8001/health
 ```
 
-The root Compose file enables the recommended measured TP2 coding defaults: the 8k prefill chunk, LFU expert eviction, peer-index split, speculative drafting, batched top-k, output consensus, repeated-output lookup, and text caching. It serves six resident sessions with a 512k context and RAM/disk KV rotation. The `tp2-prefill.yml` overlay selects the pinned benchmark image. For this workstation's existing `model-cli` setup, build that image and select it with `model-cli switch dsv41-flash-rust`; the vLLM profile remains available as `dsv41-flash-exl3`.
+The root Compose file enables the recommended measured TP2 coding defaults: the 8k prefill chunk, LFU expert eviction, peer-index split, batch-aware speculative confidence, batched top-k, output consensus, repeated-output lookup, and text caching. It serves six resident sessions with a 512k context and RAM/disk KV rotation. The `tp2-prefill.yml` overlay selects the pinned benchmark image. For this workstation's existing `model-cli` setup, build that image and select it with `model-cli switch dsv41-flash-rust`; the vLLM profile remains available as `dsv41-flash-exl3`.
 
 ## Project guide
 

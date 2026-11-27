@@ -25,7 +25,7 @@ pub(super) struct Gate {
     trace: bool,
 }
 impl Gate {
-    pub(super) fn configured() -> Result<Option<Self>> {
+    pub(super) fn configured(concurrent_sessions: usize) -> Result<Option<Self>> {
         let threshold = match std::env::var("DS4_CONFIDENCE_THRESHOLD") {
             Ok(v) => v
                 .parse::<f32>()
@@ -37,7 +37,19 @@ impl Gate {
             (0. ..=1.).contains(&threshold),
             "DS4_CONFIDENCE_THRESHOLD must be in [0,1]"
         );
+        let batch_delta = match std::env::var("DS4_CONFIDENCE_BATCH_DELTA") {
+            Ok(v) => v
+                .parse::<f32>()
+                .context("invalid DS4_CONFIDENCE_BATCH_DELTA")?,
+            Err(std::env::VarError::NotPresent) => 0.1,
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(
+            (0. ..=1.).contains(&batch_delta),
+            "DS4_CONFIDENCE_BATCH_DELTA must be in [0,1]"
+        );
         let trace = std::env::var_os("DS4_CONFIDENCE_TRACE").is_some_and(|v| v == "1");
+        let threshold = threshold_for_batch(threshold, batch_delta, concurrent_sessions);
         Ok((threshold > 0. || trace).then_some(Self { threshold, trace }))
     }
     pub(super) fn evaluate(
@@ -79,6 +91,14 @@ impl Gate {
     }
 }
 
+fn threshold_for_batch(threshold: f32, delta: f32, concurrent_sessions: usize) -> f32 {
+    if threshold > 0. && concurrent_sessions > 1 {
+        (threshold + delta).min(1.)
+    } else {
+        threshold
+    }
+}
+
 fn select(logits: &[f32], threshold: f32) -> Result<(usize, Vec<f32>)> {
     ensure!(
         logits.iter().all(|v| v.is_finite()),
@@ -104,6 +124,15 @@ mod tests {
         assert_eq!(select(&logits, 0.9)?.0, 0);
         assert!(select(&[f32::NAN], 0.).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn confidence_threshold_rises_only_for_batched_decode() {
+        assert_eq!(threshold_for_batch(0.4, 0.1, 1), 0.4);
+        assert_eq!(threshold_for_batch(0.4, 0.1, 6), 0.5);
+        assert_eq!(threshold_for_batch(0.4, 0.0, 6), 0.4);
+        assert_eq!(threshold_for_batch(0.8, 0.5, 6), 1.0);
+        assert_eq!(threshold_for_batch(0.0, 0.1, 6), 0.0);
     }
 
     #[test]

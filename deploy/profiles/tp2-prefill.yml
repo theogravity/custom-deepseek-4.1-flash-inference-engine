@@ -34,4 +34,4 @@ services:
       DS4_IDLE_TOOL_PREFILL_MAX_TOKENS: "${DS4_IDLE_TOOL_PREFILL_MAX_TOKENS:-32768}"
       # Peer-index improves the measured TP2 index stage; callers can disable it if needed.
       DS4_TP2_INDEX: "${DS4_TP2_INDEX:-1}"
-    command: ["serve", "--bind", "0.0.0.0:8001", "--max-context", "524288", "--chunk-size", "${DS4_PREFILL_CHUNK:-8192}"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "8001", "--served-model-name", "DeepSeek V4.1 Flash", "--max-model-len", "524288", "--chunk-size", "${DS4_PREFILL_CHUNK:-8192}"]

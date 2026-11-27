@@ -742,6 +742,7 @@ impl Model {
         }
         let mut inputs = Vec::new();
         let mut slots = Vec::new();
+        let concurrent_sessions = decoding.len();
         for (slot, (_, s, plan)) in decoding.iter_mut().enumerate() {
             if plan.source == ProposalSource::Learned {
                 slots.push(slot);
@@ -753,7 +754,7 @@ impl Model {
                 });
             }
         }
-        let drafts = self.learned_proposals(&mut inputs);
+        let drafts = self.learned_proposals(&mut inputs, concurrent_sessions);
         for (slot, proposed) in slots.into_iter().zip(drafts) {
             match proposed {
                 Ok(tokens) => decoding[slot].2.tokens = tokens,
@@ -889,7 +890,11 @@ impl Model {
         Ok(session.emit(Vec::new(), token))
     }
 
-    fn learned_proposals(&mut self, inputs: &mut [DraftInput<'_>]) -> Vec<Result<Vec<u32>>> {
+    fn learned_proposals(
+        &mut self,
+        inputs: &mut [DraftInput<'_>],
+        concurrent_sessions: usize,
+    ) -> Vec<Result<Vec<u32>>> {
         if inputs.is_empty() {
             return Vec::new();
         }
@@ -900,7 +905,7 @@ impl Model {
                 .collect();
         }
         if self.batch_drafter && inputs.len() > 1 {
-            match draft::propose_many(&mut self.rt, inputs) {
+            match draft::propose_many(&mut self.rt, inputs, concurrent_sessions) {
                 Ok(proposals) => return proposals.into_iter().map(Ok).collect(),
                 // No target or draft KV has been modified. Retry on the smaller
                 // per-request workspace, isolating a malformed individual ring.
@@ -909,7 +914,10 @@ impl Model {
         }
         inputs
             .iter_mut()
-            .map(|r| r.state.propose(&mut self.rt, r.pos, r.seed, r.width))
+            .map(|r| {
+                r.state
+                    .propose(&mut self.rt, r.pos, r.seed, r.width, concurrent_sessions)
+            })
             .collect()
     }
 
