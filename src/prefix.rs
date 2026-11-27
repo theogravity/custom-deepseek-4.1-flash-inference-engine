@@ -21,6 +21,9 @@ type Key = [u8; 32];
 const MAGIC: &[u8; 8] = b"DS4KV004";
 const HEADER: usize = 8 + 32 + 32;
 const MIB: usize = 1 << 20;
+/// Keep KV prefix keys on the same block boundary used by the vLLM profile,
+/// independent of the engine's physical prefill batch size.
+pub const PREFIX_BLOCK_TOKENS: usize = 64;
 
 fn mib_env(name: &str, default: usize) -> Result<usize> {
     std::env::var(name)
@@ -120,7 +123,7 @@ pub struct PrefixCache {
     ram_bytes: usize,
 }
 impl PrefixCache {
-    pub fn new(root: &Path, chunk: usize, capacity: usize) -> Result<Self> {
+    pub fn new(root: &Path, prefill_chunk: usize, capacity: usize) -> Result<Self> {
         let ram_limit = mib_env("DS4_PREFIX_RAM_MIB", 2048)?;
         let disk_limit = mib_env("DS4_PREFIX_DISK_MIB", 65536)?;
         let mut dir = std::env::var_os("DS4_PREFIX_DIR")
@@ -161,8 +164,10 @@ impl PrefixCache {
         }
         let mut out = Self {
             draft_identity: dh.finalize().into(),
-            identity: namespace(root, chunk)?,
-            chunk,
+            // Keep cache content isolated by the physical prefill configuration,
+            // while keying/restoring snapshots at independent 64-token blocks.
+            identity: namespace(root, prefill_chunk)?,
+            chunk: PREFIX_BLOCK_TOKENS,
             capacity,
             ram_limit,
             disk_limit,
@@ -200,11 +205,7 @@ impl PrefixCache {
             pos > 0 && pos.is_multiple_of(self.chunk),
             "invalid drafter cache boundary"
         );
-        let base = self
-            .keys(tokens, pos, span)?
-            .last()
-            .context("empty drafter cache key")?
-            .1;
+        let base = self.keys_at(tokens, &[pos], span)?[0].1;
         let mut h = Sha256::new();
         h.update(self.draft_identity);
         h.update(base);
@@ -268,22 +269,40 @@ impl PrefixCache {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn keys(&self, tokens: &[u32], pos: usize, span: usize) -> Result<Vec<(usize, Key)>> {
+        let positions: Vec<_> = (self.chunk..=pos).step_by(self.chunk).collect();
+        self.keys_at(tokens, &positions, span)
+    }
+    fn keys_at(
+        &self,
+        tokens: &[u32],
+        positions: &[usize],
+        span: usize,
+    ) -> Result<Vec<(usize, Key)>> {
         ensure!(
-            pos <= tokens.len()
-                && pos <= self.capacity
-                && self.chunk > 0
-                && (1..=128).contains(&span),
+            self.chunk > 0 && (1..=128).contains(&span),
             "invalid prefix lookup"
         );
         let mut state = self.identity.clone();
         state.update((span as u32).to_le_bytes());
-        let mut output = Vec::with_capacity(pos / self.chunk);
-        for (i, chunk) in tokens[..pos].chunks_exact(self.chunk).enumerate() {
-            for x in chunk {
+        let mut output = Vec::with_capacity(positions.len());
+        let mut cursor = 0;
+        let mut previous = 0;
+        for &pos in positions {
+            ensure!(
+                pos > previous
+                    && pos <= tokens.len()
+                    && pos <= self.capacity
+                    && pos.is_multiple_of(self.chunk),
+                "invalid prefix checkpoint position"
+            );
+            for x in &tokens[cursor..pos] {
                 state.update(x.to_le_bytes());
             }
-            output.push(((i + 1) * self.chunk, state.clone().finalize().into()));
+            cursor = pos;
+            previous = pos;
+            output.push((pos, state.clone().finalize().into()));
         }
         Ok(output)
     }
@@ -406,11 +425,20 @@ impl PrefixCache {
         max_pos: usize,
         span: usize,
     ) -> Result<Option<(usize, AttentionState, Option<Host>)>> {
+        let positions: Vec<_> = (self.chunk..=max_pos).step_by(self.chunk).collect();
+        self.restore_at(tokens, &positions, span)
+    }
+    pub fn restore_at(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        span: usize,
+    ) -> Result<Option<(usize, AttentionState, Option<Host>)>> {
         if self.ram_limit == 0 && self.dir.is_none() {
             return Ok(None);
         }
         let mut timing = Host::start("prefix");
-        for (pos, key) in self.keys(tokens, max_pos, span)?.into_iter().rev() {
+        for (pos, key) in self.keys_at(tokens, positions, span)?.into_iter().rev() {
             if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
                 let entry = self.ram.remove(i).unwrap();
                 let state = Self::decode_target(&entry.1, pos, Tier::Ram, &mut timing)?;
@@ -461,11 +489,7 @@ impl PrefixCache {
             pos > 0 && pos.is_multiple_of(self.chunk),
             "invalid prefill boundary"
         );
-        let key = self
-            .keys(tokens, pos, span)?
-            .last()
-            .context("empty prefix cache key")?
-            .1;
+        let key = self.keys_at(tokens, &[pos], span)?[0].1;
         if let Some(i) = self.ram.iter().position(|(k, _)| k == &key) {
             if ram_only {
                 // Keep the target ahead of unrelated entries when its drafter
@@ -597,6 +621,26 @@ mod tests {
         restarted.disk_limit = 0;
         restarted.trim_disk(0)?;
         assert!(fs::read_dir(d.path())?.all(|entry| entry.unwrap().file_name() == ".cache.lock"));
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_prefix_lookup_keys_match_the_full_block_key_stream() -> Result<()> {
+        let cache = PrefixCache {
+            identity: Sha256::new(),
+            draft_identity: [0; 32],
+            chunk: PREFIX_BLOCK_TOKENS,
+            capacity: 1024,
+            ram_limit: 0,
+            disk_limit: 0,
+            dir: None,
+            ram: VecDeque::new(),
+            ram_bytes: 0,
+        };
+        let tokens: Vec<_> = (0..1024).map(|n| n as u32).collect();
+        let all = cache.keys(&tokens, 768, 128)?;
+        let sparse = cache.keys_at(&tokens, &[64, 256, 768], 128)?;
+        assert_eq!(sparse, [all[0].clone(), all[3].clone(), all[11].clone()]);
         Ok(())
     }
     #[test]

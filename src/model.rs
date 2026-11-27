@@ -2,7 +2,7 @@ use crate::{
     attention::AttentionState,
     draft::{self, DraftInput, DraftState},
     engram::Engram,
-    prefix::PrefixCache,
+    prefix::{PrefixCache, PREFIX_BLOCK_TOKENS},
     restore_timing::{timed, Host},
     runtime::{Dev, Runtime},
     swap::{SwapHandle, SwapStore},
@@ -65,30 +65,51 @@ fn skip_replay_chunk(pos: usize, rows: usize, horizon: usize) -> bool {
 // Geometric boundaries bound the number of snapshots on long prefills while
 // retaining branches well before the final complete chunk.
 fn checkpoints(prompt: usize, chunk: usize) -> Vec<usize> {
-    let last = (prompt - 1) / chunk * chunk;
+    let last_compute = (prompt - 1) / chunk * chunk;
+    let last_prefix = (prompt - 1) / PREFIX_BLOCK_TOKENS * PREFIX_BLOCK_TOKENS;
+    let last = last_compute.min(last_prefix);
     let mut points = Vec::new();
     let mut boundary = chunk;
     while boundary < last {
-        if boundary >= 256 {
+        if boundary >= 256 && boundary.is_multiple_of(PREFIX_BLOCK_TOKENS) {
             points.push(boundary);
         }
         boundary *= 2;
     }
-    if last > 0 {
-        points.push(last);
+    if last_compute > 0
+        && last_compute.is_multiple_of(PREFIX_BLOCK_TOKENS)
+        && points.last() != Some(&last_compute)
+    {
+        points.push(last_compute);
     }
+    if last_prefix > 0 && points.last() != Some(&last_prefix) {
+        points.push(last_prefix);
+    }
+    points.sort_unstable();
+    points.dedup();
     points
 }
 
 // At most eight RAM checkpoints for an idle replay, even at the full window.
-fn idle_checkpoints(start: usize, last: usize, chunk: usize) -> Vec<usize> {
+fn idle_checkpoints(start: usize, last: usize) -> Vec<usize> {
     if start >= last {
         return Vec::new();
     }
-    let stride = (last - start).div_ceil(8).max(512).div_ceil(chunk) * chunk;
+    let stride = (last - start)
+        .div_ceil(8)
+        .max(512)
+        .div_ceil(PREFIX_BLOCK_TOKENS)
+        * PREFIX_BLOCK_TOKENS;
     ((start + stride..last).step_by(stride))
         .chain(std::iter::once(last))
         .collect()
+}
+
+fn prefill_rows(pos: usize, prompt: usize, chunk: usize, next_checkpoint: Option<usize>) -> usize {
+    let rows = chunk.min(prompt - pos);
+    next_checkpoint
+        .filter(|&point| point > pos)
+        .map_or(rows, |point| rows.min(point - pos))
 }
 
 fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
@@ -440,9 +461,9 @@ impl Model {
             vec![]
         };
         let span = prompt_len.min(128);
-        let (pos, mut cache, mut timing) = points
-            .last()
-            .and_then(|&last| cached(self.prefix.restore(&ids, last, span), "restore").flatten())
+        let (pos, mut cache, mut timing) = (!points.is_empty())
+            .then(|| cached(self.prefix.restore_at(&ids, &points, span), "restore").flatten())
+            .flatten()
             .unwrap_or_default();
         let mut draft = (self.spec_k > 0 && limit > 2).then(DraftState::new);
         if pos > 0 && draft.is_some() {
@@ -532,15 +553,15 @@ impl Model {
                 if !w.is_prefill() {
                     return Ok(0);
                 }
-                let last = (w.prompt_len - 1) / self.chunk * self.chunk;
-                w.points = idle_checkpoints(w.pos, last, self.chunk);
+                let last = (w.prompt_len - 1) / PREFIX_BLOCK_TOKENS * PREFIX_BLOCK_TOKENS;
+                w.points = idle_checkpoints(w.pos, last);
                 w.next_point = 0;
                 Box::new(w)
             }
             IdleToolPrefill::Running(warm) => warm,
         };
         let before = warm.pos;
-        let last = (warm.prompt_len - 1) / self.chunk * self.chunk;
+        let last = (warm.prompt_len - 1) / PREFIX_BLOCK_TOKENS * PREFIX_BLOCK_TOKENS;
         if before >= last {
             if before > warm.reused {
                 self.store_prefill(&warm, true);
@@ -762,7 +783,12 @@ impl Model {
             .get(session.next_point)
             .copied()
             .unwrap_or(prompt.len());
-        let n = self.chunk.min(prompt.len() - pos);
+        let n = prefill_rows(
+            pos,
+            prompt.len(),
+            self.chunk,
+            session.points.get(session.next_point).copied(),
+        );
         let last = pos + n == prompt.len();
         let replay = self.bounded_replay && self.chunk > 128;
         let skip_replay = replay && skip_replay_chunk(pos, n, horizon);
@@ -1104,18 +1130,12 @@ mod tests {
 
     #[test]
     fn idle_checkpoints_are_aligned_bounded_and_include_the_last_reusable_token_block() {
-        for (start, last, chunk) in [
-            (0, 524224, 64),
-            (2752, 6848, 64),
-            (0, 512, 128),
-            (64, 128, 64),
-            (128, 128, 64),
-        ] {
-            let points = idle_checkpoints(start, last, chunk);
+        for (start, last) in [(0, 524224), (2752, 6848), (0, 512), (64, 128), (128, 128)] {
+            let points = idle_checkpoints(start, last);
             assert!(points.len() <= 8);
             assert!(points
                 .iter()
-                .all(|&p| p > start && p <= last && p % chunk == 0));
+                .all(|&p| p > start && p <= last && p % PREFIX_BLOCK_TOKENS == 0));
             assert!(points.windows(2).all(|p| p[0] < p[1]));
             assert_eq!(points.last().copied(), (start < last).then_some(last));
         }
@@ -1292,12 +1312,17 @@ mod tests {
     #[test]
     fn prefix_boundaries_and_draft_observations_cover_each_live_window() {
         assert_eq!(checkpoints(1025, 64), [256, 512, 1024]);
-        assert_eq!(checkpoints(1050, 48), [384, 768, 1008]);
-        assert_eq!(checkpoints(33, 32), [32]);
+        assert_eq!(checkpoints(1050, 48), [384, 768, 1024]);
+        assert!(checkpoints(33, 32).is_empty());
         assert!(checkpoints(32, 32).is_empty());
+        assert_eq!(checkpoints(25_625, 8192), [8192, 16384, 24576, 25600]);
+        assert_eq!(checkpoints(505_082, 8192).last(), Some(&505_024));
+        assert_eq!(prefill_rows(24576, 25625, 8192, Some(25600)), 1024);
+        assert_eq!(prefill_rows(25600, 25625, 8192, Some(25600)), 25);
+        assert_eq!(prefill_rows(0, 25625, 8192, Some(8192)), 8192);
         // For each saved point and the final decode, every live row lies in
         // an observed chunk even for widths that do not divide 128.
-        for chunk in [1, 3, 48, 64, 255, 512] {
+        for chunk in [1, 3, 48, 64, 127, 255, 512, 8192] {
             let prompt: usize = 1803;
             let mut observed = vec![false; prompt];
             let mut horizons = checkpoints(prompt, chunk);

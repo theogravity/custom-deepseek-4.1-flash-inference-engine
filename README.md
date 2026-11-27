@@ -35,7 +35,7 @@ This additional one-client run uses the same 25,625-token upstream Python edit a
 |---|---:|---:|
 | Native TP2 peer-index baseline | 125.5 | 4.33 s |
 | Native TP2 peer-index + C1 decode candidate | **314.0** | 1.88 s |
-| Native recommended TP2 profile, all defaults enabled | **323.9** | 1.96 s |
+| Native recommended TP2 profile before prefix-block fix | **323.9** | 1.96 s |
 | Local vLLM reference | 265.0 | **0.20 s** |
 
 This earlier six-wave candidate test preceded the full profile benchmark. On the full run, the combined defaults measured 343.1 tok/s at C1, 312.0 at C4 and 261.2 at C6. Peer-index improved the isolated index stage; its request-level impact has not been isolated. [Earlier C1 run data](benchmarks/results/upstream/c1-code-edit-peer-index-20261127-summary.json) · [Full profile results](benchmarks/reports/default-profile-headline-20261127.md)
@@ -73,8 +73,10 @@ Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker
 
 ```sh
 hf download diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000 --revision 451f7dcb8ecb0502a963f3314e16b34c5a8ce5ae --local-dir /mnt/models/dsv41-flash-exl3
-cargo build --release --locked
-docker build -t ds4-flash-rs:tp2-peer-index-20261127 .
+git clone https://github.com/flashinfer-ai/flashinfer.git /tmp/flashinfer
+git -C /tmp/flashinfer checkout 946200de1ae94fc93fdd0926f0a13afd1fa7f0f1
+DS4_FLASHINFER_DIR=/tmp/flashinfer cargo build --release --locked --features recipe-prefill,flashinfer-prefill
+docker build -t ds4-flash-rs:tp2-peer-index-prefix64-20261127 .
 export DS4_RUN_UID="$(id -u)" DS4_RUN_GID="$(id -g)"
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
 docker compose -f compose.yml -f deploy/profiles/tp2-prefill.yml up --no-build -d --wait

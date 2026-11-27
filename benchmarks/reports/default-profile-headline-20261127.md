@@ -18,6 +18,18 @@ For the recommended defaults, median first output was 1.71 s at one client, 6.43
 
 The comparison with published vLLM is directional: the native run used 375 W per GPU and vLLM's published figures used 600 W. The six-wave native medians and single published second-pass figures also have different sample sizes. [Raw client records](../results/upstream/c1-code-edit-default-20261127.jsonl) · [four clients](../results/upstream/c4-code-edit-default-20261127.jsonl) · [six clients](../results/upstream/c6-code-edit-default-20261127.jsonl)
 
+## Regression diagnosis and fix
+
+The 8,192-token compute batch was not itself making later decode slower. The native engine also used that value as its prefix snapshot interval. Thus the repeated 25,625-token code-edit prompt could restore only 24,576 tokens, leaving 1,049 tokens for serial prefill before decoding. The earlier concurrent coding profile used 64-token batches, which accidentally provided finer prefix checkpoints as well as smaller compute batches. vLLM keeps these controls separate: an 8k scheduler prefill budget can coexist with 64-token KV blocks.
+
+The engine now separates them. Physical prompt batches remain 8,192 tokens; prefix checkpoints are 64-token aligned, using a sparse geometric schedule and a final reusable block to bound snapshot storage. For this workload the final checkpoint is at 25,600 tokens, leaving only 25 prompt tokens after restore. This preserves large cold-prefill batches while avoiding the 1,049-token warm tail. Targeted boundary/key tests passed, the full release suite passed (82 passed, 48 GPU-only tests ignored), and the replacement TP2 image is healthy on the recommended 68 GiB cache profile.
+
+We did not run a cache-repeat timing or retrieval check. The one post-deploy C4 wave encountered the pre-existing 24,576-token disk snapshot, so its 8.68–9.24 s first-output observations are not a measurement of reuse from the new 25,600-token checkpoint. We therefore make no post-fix TTFT or aggregate-rate claim yet. The earlier chunk-64 ablation showed the potential of a complete shared-prefix restore (C4 452 tok/s / ~0.3 s TTFT; C6 471 tok/s / ~0.36 s TTFT), but those results are not a validation of this new implementation. [First post-deploy C4 wave](../results/upstream/c4-code-edit-prefix64-firstwave-20261127.jsonl)
+
+Those chunk-64 runs also changed physical compute batch size, so they cannot isolate prefix reuse. Raising the MoE cache to 92 GiB alongside chunk 64 produced 533.8/541.8 tok/s at C4/C6, but left only about 1.1 GiB free on one inference GPU and is not a safe full-context default. [68 GiB C4](../results/upstream/c4-code-edit-default-prefill64-20261127.jsonl) · [68 GiB C6](../results/upstream/c6-code-edit-default-prefill64-20261127.jsonl) · [92 GiB C4](../results/upstream/c4-code-edit-default-prefill64-cache92-20261127.jsonl) · [92 GiB C6](../results/upstream/c6-code-edit-default-prefill64-cache92-20261127.jsonl)
+
+A partial 92 GiB C4 run with TP dense projection disabled was stopped when free VRAM fell to 66 MiB; its three measured waves were similar to the TP-dense run, but the arm is too short and memory-constrained to draw a reliable comparison. [Partial raw data](../results/upstream/c4-code-edit-default-prefill64-cache92-no-tpdense-20261127.jsonl)
+
 ## Cold single-client prefill
 
 Each case was a single request with a fresh prompt, zero prefix tokens reused and one output. Inputs use the upstream word counts. Results are single samples; output correctness was not graded in timing-only mode.

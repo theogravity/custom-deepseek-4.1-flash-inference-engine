@@ -1,6 +1,6 @@
 services:
   dsv41-flash-exl3:
-    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-peer-index-20261127}
+    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-peer-index-prefix64-20261127}
     environment:
       DS4_MOE_CACHE_GIB: "${DS4_MOE_CACHE_GIB:-68}"
       DS4_PREFILL_GPU_POOL_PAIRS: "${DS4_PREFILL_GPU_POOL_PAIRS:-1}"
