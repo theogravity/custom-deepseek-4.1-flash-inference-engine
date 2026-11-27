@@ -66,6 +66,11 @@ impl Drop for Cache {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static UNAVAILABLE_AFTER:std::cell::Cell<Option<usize>>=const {std::cell::Cell::new(None)};
+}
+
 pub(super) struct Scan {
     pool: Arc<Mutex<Pool>>,
     cache: Option<Cache>,
@@ -151,23 +156,45 @@ impl Scan {
         rows: usize,
         picks: *mut i32,
         mode: i32,
-    ) -> Result<()> {
-        cuda_ok(
-            unsafe {
-                ds4_index_peer_tile(
-                    self.raw(),
-                    q,
-                    w,
-                    width as i32,
-                    pos as i32,
-                    ratio as i32,
-                    rows as i32,
-                    picks,
-                    mode,
-                )
-            },
-            "scanning a prompt index tile on the peer",
-        )
+    ) -> Result<bool> {
+        #[cfg(test)]
+        if UNAVAILABLE_AFTER.with(|left| match left.get() {
+            Some(0) => {
+                left.set(None);
+                true
+            }
+            Some(n) => {
+                left.set(Some(n - 1));
+                false
+            }
+            None => false,
+        }) {
+            return Ok(false);
+        }
+        let rc = unsafe {
+            ds4_index_peer_tile(
+                self.raw(),
+                q,
+                w,
+                width as i32,
+                pos as i32,
+                ratio as i32,
+                rows as i32,
+                picks,
+                mode,
+            )
+        };
+        if rc == UNAVAILABLE {
+            return Ok(false);
+        }
+        cuda_ok(rc, "scanning a prompt index tile on the peer")?;
+        Ok(true)
+    }
+    pub(super) fn abandon(mut self) -> Result<()> {
+        let rc = unsafe { ds4_index_peer_finish(self.raw()) };
+        self.active = false;
+        self.cache.take();
+        cuda_ok(rc, "fencing peer access before owner fallback")
     }
     pub(super) fn finish(mut self) -> Result<()> {
         let rc = unsafe { ds4_index_peer_finish(self.raw()) };

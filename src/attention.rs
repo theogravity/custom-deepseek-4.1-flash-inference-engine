@@ -1626,7 +1626,7 @@ fn device_select(
     // belongs to this call until the last launch and is then recyclable by
     // the next operation on that stream.
     let mut work = rt.buffer(workspace_bytes.div_ceil(4))?;
-    let remote = if peer_id != 0 && tiles.len() >= 2 {
+    let mut remote = if peer_id != 0 && tiles.len() >= 2 {
         peer_index::Scan::begin(
             rt,
             peer_id,
@@ -1640,7 +1640,7 @@ fn device_select(
     };
     for (i, (t, rows, width, filtered, score_mode)) in tiles.into_iter().enumerate() {
         if let Some(peer) = remote.as_ref().filter(|_| i % 2 == 1) {
-            unsafe {
+            if unsafe {
                 peer.tile(
                     q.as_ptr().add(t * INDEX_HEADS * INDEX_DIM),
                     w.as_ptr().add(t * INDEX_HEADS),
@@ -1650,9 +1650,11 @@ fn device_select(
                     rows,
                     picks.data::<i32>().add(t * TOP),
                     score_mode,
-                )?;
+                )?
+            } {
+                continue;
             }
-            continue;
+            remote.take().unwrap().abandon()?;
         }
         cuda_ok(
             unsafe {
@@ -3597,7 +3599,7 @@ mod tests {
         let path = std::env::var("DS4_TEST_PACK")?;
         let mut rt = Runtime::open(std::path::Path::new(&path), [0, 1])?;
         rt.target_prefill = true;
-        const N: usize = 192;
+        const N: usize = 384;
         for owner in [0, 1] {
             rt.layer(if owner == 0 { 0 } else { 20 })?;
             let q = rt.to_device(&vec![1.; N * INDEX_HEADS * INDEX_DIM])?;
@@ -3668,6 +3670,51 @@ mod tests {
                 );
                 assert!(tiles > 0 && cache.bytes() <= 256 << 20);
             }
+            // Drop a later peer tile after one real DMA and kernel have been
+            // submitted. The owner rejoins before recomputing the failed tile.
+            peer_index::UNAVAILABLE_AFTER.with(|f| f.set(Some(1)));
+            device_select(
+                &mut rt,
+                2,
+                32896 - N,
+                N,
+                1,
+                32896,
+                keys.ptr.as_ptr(),
+                &q,
+                &w,
+                ptr::null_mut(),
+                &picks,
+                identity.peer_identity(),
+            )?;
+            let mut recovered = vec![0i32; N * TOP];
+            read(&picks, &mut recovered)?;
+            assert_eq!(recovered, previous);
+            assert!(pool.lock().unwrap().peer_index.is_none());
+            let mut identities = Vec::new();
+            for _ in 0..8 {
+                let mut history = Rows::default();
+                let id = history.peer_identity();
+                identities.push(id);
+                let scan =
+                    peer_index::Scan::begin(&mut rt, id, keys.ptr.as_ptr(), 32896, 48 << 20, N)?
+                        .unwrap();
+                scan.finish()?;
+                assert!(pool.lock().unwrap().peer_index.as_ref().unwrap().bytes() <= 256 << 20);
+            }
+            let before = pool.lock().unwrap().peer_index.as_ref().unwrap().stats().0;
+            peer_index::Scan::begin(
+                &mut rt,
+                identities[0],
+                keys.ptr.as_ptr(),
+                32896,
+                48 << 20,
+                N,
+            )?
+            .unwrap()
+            .finish()?;
+            let after = pool.lock().unwrap().peer_index.as_ref().unwrap().stats().0;
+            assert_eq!(after - before, (32896 * INDEX_BYTES) as u64);
             assert!(peer_index::Scan::begin(
                 &mut rt,
                 identity.peer_identity(),
@@ -3677,6 +3724,79 @@ mod tests {
                 N
             )?
             .is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "times real prompt index scans on both inference GPUs"]
+    fn cuda_peer_index_stage_timing() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaDeviceSynchronize() -> i32;
+        }
+        let path = std::env::var("DS4_TEST_PACK")?;
+        let mut rt = Runtime::open(std::path::Path::new(&path), [0, 1])?;
+        rt.target_prefill = true;
+        rt.layer(0)?;
+        const N: usize = 512;
+        let q = rt.to_device(&vec![1.; N * INDEX_DIM * INDEX_HEADS])?;
+        let w = rt.to_device(&vec![1.; N * INDEX_HEADS])?;
+        let picks = upload(0, &vec![-9i32; N * TOP])?;
+        for width in [32768, 131072, 252500] {
+            let mut data = vec![0u8; width * INDEX_BYTES];
+            for (i, row) in data.chunks_exact_mut(INDEX_BYTES).enumerate() {
+                row[0] = 0x38;
+                let score = ((i * 39829) % 8191) as f32;
+                row[INDEX_DIM..].copy_from_slice(&score.to_le_bytes());
+            }
+            let keys = upload(0, &data)?;
+            let id = Rows::default().peer_identity();
+            let mut expected = Vec::new();
+            for epoch in [0, id] {
+                let mut scan = || {
+                    device_select(
+                        &mut rt,
+                        2,
+                        width - N,
+                        N,
+                        1,
+                        width,
+                        keys.ptr.as_ptr(),
+                        &q,
+                        &w,
+                        ptr::null_mut(),
+                        &picks,
+                        epoch,
+                    )
+                };
+                picks.write(&vec![-9i32; N * TOP])?;
+                scan()?;
+                let mut got = vec![0i32; N * TOP];
+                read(&picks, &mut got)?;
+                if epoch == 0 {
+                    expected = got;
+                } else {
+                    assert_eq!(expected, got);
+                }
+                let mut trials = Vec::new();
+                for _ in 0..5 {
+                    let start = Instant::now();
+                    for _ in 0..3 {
+                        scan()?;
+                    }
+                    cuda_ok(
+                        unsafe { cudaDeviceSynchronize() },
+                        "timing owner after peer return",
+                    )?;
+                    trials.push(start.elapsed().as_secs_f64() * 1e3 / 3.);
+                }
+                trials.sort_by(f64::total_cmp);
+                eprintln!(
+                    "prompt index stage rows={N} width={width} peer={} median_ms={:.3}",
+                    epoch != 0,
+                    trials[2]
+                );
+            }
         }
         Ok(())
     }

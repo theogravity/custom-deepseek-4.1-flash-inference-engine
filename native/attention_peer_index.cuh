@@ -71,6 +71,8 @@ extern "C" int ds4_index_peer_new(int owner,int peer,PeerIndexCache **out) {
     int supported=0;
     TRY(cudaDeviceCanAccessPeer(&supported,peer,owner));
     if (!supported) return peer_index_unavailable;
+    TRY(cudaDeviceCanAccessPeer(&supported,owner,peer));
+    if (!supported) return peer_index_unavailable;
     auto *cache=new(std::nothrow) PeerIndexCache{owner,peer};
     if (!cache) return peer_index_unavailable;
     *out=cache;
@@ -151,7 +153,7 @@ extern "C" int ds4_index_peer_begin(PeerIndexCache *p,uint64_t id,const void *ow
         if (status!=cudaSuccess) {
             selected->valid=0;
             int finish=ds4_index_peer_finish(p);
-            return finish ? finish:int(status);
+            return finish ? finish:optional_peer_status(status);
         }
         p->uploaded+=keys-selected->valid;
         selected->valid=keys;
@@ -167,11 +169,13 @@ extern "C" int ds4_index_peer_tile(PeerIndexCache *p,const float *query,const fl
     auto *q=reinterpret_cast<float *>(p->stage+p->query_offset);
     auto *w=reinterpret_cast<float *>(p->stage+p->weights_offset);
     auto *ids=reinterpret_cast<int *>(p->stage+p->picks_offset);
-    TRY(cudaMemcpyPeerAsync(q,p->peer,query,p->owner,size_t(rows)*ih*idim*4,nullptr));
-    TRY(cudaMemcpyPeerAsync(w,p->peer,weights,p->owner,size_t(rows)*ih*4,nullptr));
+    auto status=cudaMemcpyPeerAsync(q,p->peer,query,p->owner,size_t(rows)*ih*idim*4,nullptr);
+    if (status==cudaSuccess) status=cudaMemcpyPeerAsync(w,p->peer,weights,p->owner,size_t(rows)*ih*4,nullptr);
+    if (status!=cudaSuccess) return optional_peer_status(status);
     int rc=select_index_data(p->peer,p->stage,p->current->data,q,w,nullptr,width,pos,ratio,rows,ids,nullptr,mode);
-    if (rc) return rc;
-    TRY(cudaMemcpyPeerAsync(picks,p->owner,ids,p->peer,size_t(rows)*top*4,nullptr));
+    if (rc) return optional_peer_status(static_cast<cudaError_t>(rc));
+    status=cudaMemcpyPeerAsync(picks,p->owner,ids,p->peer,size_t(rows)*top*4,nullptr);
+    if (status!=cudaSuccess) return optional_peer_status(status);
     ++p->tiles;
     return 0;
 }
