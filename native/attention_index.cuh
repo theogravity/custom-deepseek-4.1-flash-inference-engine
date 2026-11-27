@@ -272,7 +272,7 @@ inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long 
 
 struct IndexWorkspace {
     size_t ids, scores, ranks, sorted, offsets, temp, temp_bytes, bytes;
-    cudaError_t plan(int width,int rows) {
+    cudaError_t plan(int width,int rows,int score_mode,bool out_blocks) {
         Layout l;
         size_t count=size_t(width)*rows;
         ids=l.slice<int>(count);
@@ -281,7 +281,9 @@ struct IndexWorkspace {
         sorted=l.slice<unsigned long long>(count);
         offsets=l.slice<int>(rows+1);
         temp_bytes=0;
-        for (int stage = 0; stage < 2; ++stage) {
+        const bool sampled=prompt_sampled_topk(score_mode,width,rows);
+        for (int stage = 0; stage < (out_blocks ? 2 : 1); ++stage) {
+            if (stage==0 && sampled) continue;
             int stride = stage == 0 ? width : (width + index_block - 1) / index_block;
             int keep = stage == 0 ? top : candidate_limit;
             if (use_tiled_selection(stride,rows,keep)) continue;
@@ -291,7 +293,7 @@ struct IndexWorkspace {
             temp_bytes=std::max(temp_bytes,size);
         }
         // The sampled path borrows temporary storage for one threshold per row.
-        temp_bytes=std::max(temp_bytes,size_t(rows)*sizeof(unsigned long long));
+        if (sampled) temp_bytes=std::max(temp_bytes,size_t(rows)*sizeof(unsigned long long));
         temp=l.slice<uint8_t>(temp_bytes);
         bytes=l.used;
         return cudaSuccess;

@@ -514,9 +514,19 @@ extern "C" size_t ds4_attn_growth(void *handle, size_t request) {
 }
 
 extern "C" int ds4_attn_index_bytes(int width, int rows, size_t *bytes) {
-    IndexWorkspace s;
-    TRY(s.plan(width,rows));
-    *bytes=s.bytes;
+    // Fixtures can execute any scorer or request candidate blocks. Reserve the
+    // maximum without requiring each fixture to know the dispatch policy.
+    IndexWorkspace full, sampled;
+    TRY(full.plan(width,rows,0,true));
+    TRY(sampled.plan(width,rows,3,true));
+    *bytes=std::max(full.bytes,sampled.bytes);
+    return 0;
+}
+
+extern "C" int ds4_attn_scan_bytes(int width,int rows,int score_mode,int out_blocks,size_t *bytes) {
+    IndexWorkspace plan;
+    TRY(plan.plan(width,rows,score_mode,out_blocks!=0));
+    *bytes=plan.bytes;
     return 0;
 }
 
@@ -531,7 +541,7 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         int *picks, int *out_blocks, int score_mode) {
     TRY(cudaSetDevice(dev));
     IndexWorkspace s;
-    TRY(s.plan(width,rows));
+    TRY(s.plan(width,rows,score_mode,out_blocks!=nullptr));
     auto *ids=reinterpret_cast<int *>(work+s.ids);
     auto *scores=reinterpret_cast<float *>(work+s.scores);
     auto *rank=reinterpret_cast<unsigned long long *>(work+s.ranks);
