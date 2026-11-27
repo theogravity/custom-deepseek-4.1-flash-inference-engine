@@ -546,6 +546,10 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         ? reinterpret_cast<IndexFp8Query *>(rank) : nullptr;
     TRY(launch_index_scores(score_mode,packed,queries,weights,ids,width,rows,scores,q8,candidates == nullptr));
     auto select=[&](int stride, int keep)->cudaError_t {
+        if (keep==top && prompt_sampled_topk(score_mode,stride,rows)) {
+            return sampled_selection(rank,sorted,reinterpret_cast<unsigned long long *>(ids),
+                                     stride,rows,reinterpret_cast<unsigned long long *>(work+s.temp),offsets);
+        }
         if (use_tiled_selection(stride,rows,keep)) {
             // rank_positions has consumed ids; its storage now holds tile winners.
             return tiled_selection(rank,sorted,reinterpret_cast<unsigned long long *>(ids),stride,rows,keep);

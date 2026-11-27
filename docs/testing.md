@@ -64,3 +64,16 @@ DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 DS4_TEST_DEVICE=0 \
 The port follows the installed DeepGEMM `sm120_fp8_mqa_logits<32,128,false,4,128,2,3,188,128,256,float>` scheduling and MMA geometry. The reference header in vLLM image `sha256:3689a42b8a151bf85d72d03b733ec6f353dba5936ff2558b577687c4f5908aa0` has SHA-256 `6f6dbf1158c2e5571bb90835a673f74cfc64f4c28e22a0f3f77ce73c554d702c`. The native build compiles the adapter with nvcc and has no runtime dependency on DeepGEMM. [DeepGEMM license](../THIRD_PARTY_NOTICES.md)
 
 Run the `cuda_index` fixtures above. They compare every MQA score bit against single-query E4M3 on quantized random data, check BF16 fallback, masked candidates, signed cutoffs and exact ties, and print complete top-k selection timings for both implementations.
+
+### Sampled prompt top-512 selection
+
+`DS4_PREFILL_SAMPLED_TOPK=1` enables an exact top-512 selector on batches with multiple query rows, widths of at least 8,192 and either prompt MMA scorer enabled. It samples a threshold for each row, keeps every qualifying rank and sorts the compact row. Rows with fewer than 512 or more than 2,048 qualifiers use hierarchical tile selection. The ranking includes signed score order and the chronological tie break. The GPU fixture checks the two rescue branches, mixed rows, ties and masked positions against a CPU reference.
+
+```bash
+/usr/local/cuda/bin/nvcc -std=c++17 -O3 -arch=sm_120f tools/check_prompt_selection.cu -o /tmp/check_prompt_selection
+export CUDA_VISIBLE_DEVICES="$(nvidia-smi -i 1 --query-gpu=uuid --format=csv,noheader)" DS4_TEST_DEVICE=0 DS4_BATCH_TOPK=1
+/tmp/check_prompt_selection
+for enabled in 0 1; do
+  DS4_PREFILL_SAMPLED_TOPK="$enabled" cargo test --release --locked cuda_index -- --ignored --test-threads=1 --nocapture
+done
+```

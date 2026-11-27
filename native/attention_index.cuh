@@ -74,9 +74,10 @@ inline bool use_tiled_selection(int width, int rows, int keep) {
            (width <= sort_tile || (keep == top && width <= sort_tile * (sort_tile / top)));
 }
 
-template<int Items>
+template<int Items, bool Rescue = false>
 __global__ void select_tile(const unsigned long long *in, unsigned long long *out,
-        int width, int in_stride, int out_stride, int keep) {
+        int width, int in_stride, int out_stride, int keep, const int *counts = nullptr) {
+    if (Rescue && counts[blockIdx.y] >= keep && counts[blockIdx.y] <= 2048) return;
     using Sort = cub::BlockRadixSort<unsigned long long, block, Items>;
     __shared__ typename Sort::TempStorage storage;
     const int first = blockIdx.x * block * Items;
@@ -121,6 +122,99 @@ inline cudaError_t tiled_selection(const unsigned long long *input, unsigned lon
     return cudaGetLastError();
 }
 
+// Sample a threshold, compact every qualifying 64-bit rank, then sort the
+// compact row when it contains between 512 and 2048 ranks. Sampling only
+// chooses the fast path. Any shortfall or overflow uses exact tile selection.
+constexpr int sample_size = 2048;
+__global__ void sample_threshold(const unsigned long long *rank, int width,
+        unsigned long long *thresholds, int *counts) {
+    using Sort = cub::BlockRadixSort<unsigned long long, block, sample_size / block>;
+    __shared__ typename Sort::TempStorage storage;
+    unsigned long long values[sample_size / block];
+    const auto *row = rank + size_t(blockIdx.x) * width;
+    for (int i = 0; i < sample_size / block; ++i) {
+        int index = i * block + threadIdx.x;
+        values[i] = row[(size_t(index)*width + width/2) / sample_size];
+    }
+    Sort(storage).SortDescendingBlockedToStriped(values);
+    const int wanted = max(0, sample_size * (2*top) / width - 1);
+    if (threadIdx.x == wanted % block) thresholds[blockIdx.x] = values[wanted / block];
+    if (!threadIdx.x) counts[blockIdx.x] = 0;
+}
+
+__global__ void collect_above_threshold(const unsigned long long *rank, unsigned long long *out,
+        int width, const unsigned long long *thresholds, int *counts) {
+    const int row = blockIdx.y;
+    const int i = (blockIdx.x * blockDim.x + threadIdx.x)*4;
+    const auto *src = rank + size_t(row)*width;
+    auto *dst = out + size_t(row)*width;
+    const auto threshold = thresholds[row];
+    const int lane = threadIdx.x % 32;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        auto key = i+j < width ? src[i+j] : 0ull;
+        unsigned mask = __ballot_sync(0xffffffffu, i+j < width && key >= threshold);
+        if (mask) {
+            int offset = lane==0 ? atomicAdd(counts+row,__popc(mask)) : 0;
+            offset = __shfl_sync(0xffffffffu,offset,0) + __popc(mask & ((1u<<lane)-1));
+            if ((mask & (1u<<lane)) && offset < sample_size) dst[offset] = key;
+        }
+    }
+}
+
+__global__ void finish_compact_top(const int *counts, unsigned long long *ranks, int stride) {
+    int count = counts[blockIdx.x];
+    if (count < top || count > sample_size) return;
+    using Sort = cub::BlockRadixSort<unsigned long long, block, sample_size / block>;
+    __shared__ typename Sort::TempStorage storage;
+    auto *row = ranks + size_t(blockIdx.x)*stride;
+    unsigned long long values[sample_size / block];
+    for (int i=0;i<sample_size/block;++i) {
+        int at=i*block+threadIdx.x;
+        values[i] = at<count ? row[at] : 0;
+    }
+    Sort(storage).SortDescendingBlockedToStriped(values);
+    for (int i=0;i<top/block;++i) row[i*block+threadIdx.x]=values[i];
+}
+
+inline cudaError_t sampled_selection(const unsigned long long *input, unsigned long long *output,
+        unsigned long long *temp, int width, int rows, unsigned long long *thresholds, int *counts) {
+    sample_threshold<<<rows,block>>>(input,width,thresholds,counts);
+    auto rc = cudaGetLastError(); if (rc!=cudaSuccess) return rc;
+    collect_above_threshold<<<dim3((width+block*4-1)/(block*4),rows),block>>>(input,output,width,thresholds,counts);
+    rc=cudaGetLastError(); if (rc!=cudaSuccess) return rc;
+    finish_compact_top<<<rows,block>>>(counts,output,width);
+    rc=cudaGetLastError(); if (rc!=cudaSuccess) return rc;
+    // Rescue rows whose sample under- or overshot the target. A tile can
+    // contribute at most 512 positions to the global result. Each stage
+    // keeps exactly that many and preserves the original total ordering.
+    const unsigned long long *in=input;
+    unsigned long long *dst=temp;
+    int stride=width, n=width;
+    while (n>sort_tile) {
+        int tiles=(n+sort_tile-1)/sort_tile;
+        int compact=(tiles-1)*top + std::min(top,n-(tiles-1)*sort_tile);
+        // Output also contains the successful rows. Preserve their stride
+        // when borrowing it between rescue passes.
+        int dst_stride = dst==output ? width : compact;
+        select_tile<sort_tile/block,true><<<dim3(tiles,rows),block>>>(
+            in,dst,n,stride,dst_stride,top,counts);
+        rc=cudaGetLastError(); if (rc!=cudaSuccess) return rc;
+        in=dst; dst=dst==temp ? output : temp;
+        n=compact; stride=dst_stride;
+    }
+    select_tile<sort_tile/block,true><<<dim3(1,rows),block>>>(in,output,n,stride,width,top,counts);
+    return cudaGetLastError();
+}
+
+inline bool prompt_sampled_topk(int score_mode, int width, int rows) {
+    static const bool enabled = [] {
+        const char *value = std::getenv("DS4_PREFILL_SAMPLED_TOPK");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled && score_mode >= 2 && rows > 1 && width >= 8192;
+}
+
 inline cudaError_t sort_index_rows(void *work,size_t &bytes,const unsigned long long *input,
         unsigned long long *output,int stride,int rows,const int *offsets,int keep) {
     if (!wide_index_sort(stride,rows)) return cub::DeviceSegmentedRadixSort::SortKeysDescending(
@@ -163,6 +257,8 @@ struct IndexWorkspace {
             if(e!=cudaSuccess)return e;
             temp_bytes=std::max(temp_bytes,size);
         }
+        // The sampled path borrows temporary storage for one threshold per row.
+        temp_bytes=std::max(temp_bytes,size_t(rows)*sizeof(unsigned long long));
         temp=l.slice<uint8_t>(temp_bytes);
         bytes=l.used;
         return cudaSuccess;
