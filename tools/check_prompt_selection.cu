@@ -45,8 +45,9 @@ void run_case(int rows, int width, bool stress) {
             start[id] = valid ? host_rank(score,id) : 0;
         }
         if (stress && (row%5==1 || row%5==2)) {
-            for (int i=0;i<sample_size;++i) {
-                int id = (size_t(i)*width + width/2)/sample_size;
+            int sampled = sample_size * (width>=large_sample_width ? sample_parts : 1);
+            for (int i=0;i<sampled;++i) {
+                int id = (size_t(i)*width + width/2)/sampled;
                 start[id] = host_rank(row%5==1 ? INFINITY : -INFINITY,id);
             }
         }
@@ -67,10 +68,36 @@ void run_case(int rows, int width, bool stress) {
     };
     check(baseline(nullptr,bytes));
     DeviceArray<uint8_t> sort_space(std::max<size_t>(1,bytes));
+    // Mirror serving's aliasing: the IDs are input until materialization
+    // completes; the same bytes then hold intermediate rescue winners.
+    if (stress) {
+        std::vector<int> ids(size);
+        std::vector<float> scores(size);
+        for (size_t at=0;at<size;++at) {
+            Rank rank=ranks[at];
+            ids[at]=rank ? int(~unsigned(rank)) : -1;
+            unsigned bits=unsigned(rank>>32);
+            bits ^= bits>>31 ? 0x80000000u : 0xffffffffu;
+            std::memcpy(&scores[at],&bits,sizeof(bits));
+        }
+        DeviceArray<int> device_ids(size);
+        DeviceArray<float> device_scores(size);
+        DeviceArray<Rank> materialized(size);
+        check(cudaMemcpy(device_ids.data,ids.data(),size*sizeof(int),cudaMemcpyHostToDevice));
+        check(cudaMemcpy(device_scores.data,scores.data(),size*sizeof(float),cudaMemcpyHostToDevice));
+        check(sampled_selection(PositionRanks{device_scores.data,device_ids.data},
+                                materialized.data,output.data,reinterpret_cast<Rank*>(device_ids.data),
+                                width,rows,thresholds.data,counters.data));
+        chronological_ids<top><<<rows,block>>>(output.data,width,picks.data);
+        check(cudaGetLastError());
+        std::vector<int> got(expected.size());
+        check(cudaMemcpy(got.data(),picks.data,got.size()*sizeof(int),cudaMemcpyDeviceToHost));
+        if (got!=expected) throw std::runtime_error("fused scores or aliased ID scratch broke rescue");
+    }
     for (bool sampled : {false,true}) {
         auto run = [&] {
             if (sampled) {
-                check(sampled_selection(input.data,output.data,scratch.data,width,rows,thresholds.data,counters.data));
+                check(sampled_selection(MaterializedRanks{input.data},input.data,output.data,scratch.data,width,rows,thresholds.data,counters.data));
             } else if (use_tiled_selection(width,rows,top)) {
                 check(tiled_selection(input.data,output.data,scratch.data,width,rows,top));
             } else {

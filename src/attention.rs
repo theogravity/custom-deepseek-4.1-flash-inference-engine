@@ -73,6 +73,14 @@ unsafe extern "C" {
         kdst: *mut u8,
         n: i32,
     ) -> i32;
+    fn ds4_attn_scan_bytes(
+        width: i32,
+        rows: i32,
+        score_mode: i32,
+        out_blocks: i32,
+        bytes: *mut usize,
+    ) -> i32;
+    #[cfg(test)]
     fn ds4_attn_index_bytes(width: i32, rows: i32, bytes: *mut usize) -> i32;
     fn ds4_attn_index_ids(
         dev: i32,
@@ -1546,6 +1554,11 @@ fn device_select(
     // Layers after 20 use its candidate blocks only when the individual row
     // exceeds the block budget. A tile may straddle that boundary in prefill.
     let start_filtered = ((block_span + 1) * ratio - 1).saturating_sub(pos).min(n);
+    if n == 0 {
+        return Ok(());
+    }
+    let mut tiles = Vec::new();
+    let mut workspace_bytes = 0;
     let mut t = 0;
     while t < n {
         let filtered = layer > CANDIDATE_LAYER && t >= start_filtered;
@@ -1561,16 +1574,33 @@ fn device_select(
         } else {
             (pos + t + rows) / ratio
         };
+        let score_mode = index_score_mode(rt.target_prefill, width, rows, filtered);
         let mut bytes = 0;
         cuda_ok(
-            unsafe { ds4_attn_index_bytes(width as i32, rows as i32, &mut bytes) },
+            unsafe {
+                ds4_attn_scan_bytes(
+                    width as i32,
+                    rows as i32,
+                    score_mode,
+                    (layer == CANDIDATE_LAYER && !blocks.is_null()).into(),
+                    &mut bytes,
+                )
+            },
             "sizing index sort scratch",
         )?;
-        let mut work = rt.buffer(bytes.div_ceil(4))?;
+        workspace_bytes = workspace_bytes.max(bytes);
         require_state!(
             !filtered || !blocks.is_null(),
             "missing GPU candidate blocks"
         );
+        tiles.push((t, rows, width, filtered, score_mode));
+        t += rows;
+    }
+    // Every tile is submitted to this device's default stream. The workspace
+    // belongs to this call until the last launch and is then recyclable by
+    // the next operation on that stream.
+    let mut work = rt.buffer(workspace_bytes.div_ceil(4))?;
+    for (t, rows, width, filtered, score_mode) in tiles {
         cuda_ok(
             unsafe {
                 let b = if blocks.is_null() || !(filtered || layer == CANDIDATE_LAYER) {
@@ -1595,12 +1625,11 @@ fn device_select(
                     } else {
                         ptr::null_mut()
                     },
-                    index_score_mode(rt.target_prefill, width, rows, filtered),
+                    score_mode,
                 )
             },
             "ranking index keys on GPU",
         )?;
-        t += rows;
     }
     Ok(())
 }
@@ -3603,6 +3632,68 @@ mod tests {
                 Ok((selected, candidates))
             };
             let (expected, expected_blocks) = reference()?;
+            if width == 16391 {
+                for out_blocks in [false, true] {
+                    let mut needed = 0;
+                    cuda_ok(
+                        unsafe {
+                            ds4_attn_scan_bytes(
+                                width as i32,
+                                n as i32,
+                                3,
+                                out_blocks.into(),
+                                &mut needed,
+                            )
+                        },
+                        "sizing prompt selection",
+                    )?;
+                    assert!(needed <= bytes);
+                    let guarded = upload(dev, &vec![0xa5u8; needed + 512])?;
+                    picks.write(&vec![-9i32; n * TOP])?;
+                    cuda_ok(
+                        unsafe {
+                            ds4_attn_index_select(
+                                dev,
+                                guarded.data::<u8>().add(256),
+                                keys.ptr.as_ptr(),
+                                q.data(),
+                                w.data(),
+                                ptr::null(),
+                                width as i32,
+                                pos as i32,
+                                1,
+                                n as i32,
+                                picks.data(),
+                                if out_blocks {
+                                    blocks.data()
+                                } else {
+                                    ptr::null_mut()
+                                },
+                                3,
+                            )
+                        },
+                        "using the serving allocation size",
+                    )?;
+                    let mut got = vec![0; n * TOP];
+                    read(&picks, &mut got)?;
+                    assert_eq!(got, expected);
+                    for offset in [0, 256 + needed] {
+                        let mut guard = [0u8; 256];
+                        cuda_ok(
+                            unsafe {
+                                ds4_attn_read(
+                                    dev,
+                                    guarded.data::<u8>().add(offset).cast(),
+                                    guard.as_mut_ptr().cast(),
+                                    guard.len(),
+                                )
+                            },
+                            "reading attention scratch guard",
+                        )?;
+                        assert_eq!(guard, [0xa5; 256]);
+                    }
+                }
+            }
             for mode in [1, 2, 3, 4] {
                 // Poison both outputs so an omitted write by the second
                 // scorer cannot inherit a passing result from the first.

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdint>
 #include <new>
+#include <type_traits>
 
 namespace {
 constexpr int dim = 512, heads = 64, win = 128, top = 512;
@@ -513,9 +514,19 @@ extern "C" size_t ds4_attn_growth(void *handle, size_t request) {
 }
 
 extern "C" int ds4_attn_index_bytes(int width, int rows, size_t *bytes) {
-    IndexWorkspace s;
-    TRY(s.plan(width,rows));
-    *bytes=s.bytes;
+    // Fixtures can execute any scorer or request candidate blocks. Reserve the
+    // maximum without requiring each fixture to know the dispatch policy.
+    IndexWorkspace full, sampled;
+    TRY(full.plan(width,rows,0,true));
+    TRY(sampled.plan(width,rows,3,true));
+    *bytes=std::max(full.bytes,sampled.bytes);
+    return 0;
+}
+
+extern "C" int ds4_attn_scan_bytes(int width,int rows,int score_mode,int out_blocks,size_t *bytes) {
+    IndexWorkspace plan;
+    TRY(plan.plan(width,rows,score_mode,out_blocks!=0));
+    *bytes=plan.bytes;
     return 0;
 }
 
@@ -530,7 +541,7 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         int *picks, int *out_blocks, int score_mode) {
     TRY(cudaSetDevice(dev));
     IndexWorkspace s;
-    TRY(s.plan(width,rows));
+    TRY(s.plan(width,rows,score_mode,out_blocks!=nullptr));
     auto *ids=reinterpret_cast<int *>(work+s.ids);
     auto *scores=reinterpret_cast<float *>(work+s.scores);
     auto *rank=reinterpret_cast<unsigned long long *>(work+s.ranks);
@@ -546,10 +557,6 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         ? reinterpret_cast<IndexFp8Query *>(rank) : nullptr;
     TRY(launch_index_scores(score_mode,packed,queries,weights,ids,width,rows,scores,q8,candidates == nullptr));
     auto select=[&](int stride, int keep)->cudaError_t {
-        if (keep==top && prompt_sampled_topk(score_mode,stride,rows)) {
-            return sampled_selection(rank,sorted,reinterpret_cast<unsigned long long *>(ids),
-                                     stride,rows,reinterpret_cast<unsigned long long *>(work+s.temp),offsets);
-        }
         if (use_tiled_selection(stride,rows,keep)) {
             // rank_positions has consumed ids; its storage now holds tile winners.
             return tiled_selection(rank,sorted,reinterpret_cast<unsigned long long *>(ids),stride,rows,keep);
@@ -562,9 +569,17 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
         size_t available=s.temp_bytes;
         return sort_index_rows(work+s.temp,available,rank,sorted,stride,rows,offsets,keep);
     };
-    rank_positions<<<grid,block>>>(scores,ids,rank,width);
-    TRY(cudaGetLastError());
-    TRY(select(width,top));
+    if (prompt_sampled_topk(score_mode,width,rows)) {
+        // Only rescue rows need to write the full 64-bit rank matrix. After
+        // materialization the original IDs can serve as temporary storage.
+        TRY(sampled_selection(PositionRanks{scores,ids},rank,sorted,
+                              reinterpret_cast<unsigned long long *>(ids),width,rows,
+                              reinterpret_cast<unsigned long long *>(work+s.temp),offsets));
+    } else {
+        rank_positions<<<grid,block>>>(scores,ids,rank,width);
+        TRY(cudaGetLastError());
+        TRY(select(width,top));
+    }
     chronological_ids<top><<<rows,block>>>(sorted,width,picks);
     TRY(cudaGetLastError());
     if(out_blocks) {
