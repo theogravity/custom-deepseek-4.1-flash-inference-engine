@@ -1,4 +1,5 @@
 #include <cstring>
+#include <cstdlib>
 // Rust owns descriptors and model ordering. This unit implements dense
 // projections with cuBLAS.
 #include "head.cuh"
@@ -51,7 +52,10 @@ struct Buffer {
     return 0;
   }
 };
+#include "prefill_dense.cuh"
 struct Context {
+  prefill_dense::Executor lt;
+  bool wide_mx = false;
   int device;
   cublasHandle_t blas = nullptr;
   Buffer input, short_input, output, partial;
@@ -75,6 +79,8 @@ extern "C" int ds_dense_create(int device, void **out) {
   if (!c)
     return -1;
   c->device = device;
+  const char *wide = std::getenv("DS4_PREFILL_LT");
+  c->wide_mx = wide && std::strcmp(wide, "1") == 0;
   auto e = cublasCreate(&c->blas);
   if (e != CUBLAS_STATUS_SUCCESS) {
     delete c;
@@ -227,8 +233,13 @@ extern "C" size_t ds_dense_growth(Context *c, int rows, int cols, int batch,
   int splits = stable ? (cols + 1023) / 1024
                       : (packed ? mx_splits(full_rows, cols) : 0);
   size_t parts = size_t(batch) * rows * splits * sizeof(float);
-  return (input > c->short_input.cap ? input - c->short_input.cap : 0) +
-         (parts > c->partial.cap ? parts - c->partial.cap : 0);
+  size_t lt_growth = 0;
+  if (c->wide_mx && mode==4 && batch>128) {
+    prefill_dense::Workspace work(rows / groups,cols,batch);
+    lt_growth = work.bytes > c->lt.scratch.cap ? work.bytes - c->lt.scratch.cap : 0;
+  }
+  return std::max(lt_growth,(input > c->short_input.cap ? input - c->short_input.cap : 0) +
+         (parts > c->partial.cap ? parts - c->partial.cap : 0));
 }
 
 extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
@@ -236,6 +247,8 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
                           int round_output, int prefill, int mx_tiles, int full_rows) {
   CUDA(cudaSetDevice(c->device));
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
+  if (c->wide_mx && mode==4 && prefill && batch>128)
+    return c->lt.multiply(w,x,y,rows,cols,batch,groups,round_output);
   if (mode == 3) {
     auto weights = static_cast<const __nv_fp8_e4m3 *>(w);
     auto scales = static_cast<const unsigned char *>(w) + size_t(rows) * cols;

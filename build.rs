@@ -99,7 +99,7 @@ fn main() {
     }
     println!("cargo:rustc-link-search=native={}/lib64", cuda.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}/lib64", cuda.display());
-    for lib in ["cudart", "cublas", "stdc++"] {
+    for lib in ["cudart", "cublas", "cublasLt", "stdc++"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 }
