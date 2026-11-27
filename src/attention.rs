@@ -2325,10 +2325,10 @@ mod tests {
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn cuda_pool_pairs_matches_cpu_weighted_values_and_packed_bytes() -> Result<()> {
         let dev: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
-        let kv: Vec<_> = (0..37 * DIM)
+        let mut kv: Vec<_> = (0..37 * DIM)
             .map(|j| ((j * 1117 % 4991) as f32 - 2451.) / 117.)
             .collect();
-        let gates: Vec<_> = (0..kv.len())
+        let mut gates: Vec<_> = (0..kv.len())
             .map(|j| match j % 6 {
                 0 => 0.,
                 1 => -170.,
@@ -2336,6 +2336,13 @@ mod tests {
                 _ => ((j * 313 % 619) as f32 - 311.) / 43.,
             })
             .collect();
+        // Exact cancellation across the first odd chunk boundary. An FMA
+        // combining 3*exp(-1) with the other product would leave a residual.
+        gates[0] = 0.;
+        gates[DIM] = -1.;
+        kv[DIM] = 3.;
+        kv[0] = -(3. * (-1f32).exp());
+        assert_ne!(kv[DIM].mul_add((-1f32).exp(), kv[0]), 0.);
         let kd = upload(dev, &kv)?;
         let gd = upload(dev, &gates)?;
         let mut src = Source::default();
@@ -2393,6 +2400,7 @@ mod tests {
                 assert!(src.pending_kv.is_empty() && src.pending_gate.is_empty());
             }
         }
+        assert_eq!(actual_all[0].to_bits(), 0f32.to_bits());
         let (mut bytes, mut expected) = (vec![], vec![]);
         pack_values(&actual_all, &mut bytes);
         pack_values(&expected_all, &mut expected);
