@@ -536,7 +536,7 @@ extern "C" int ds4_attn_index_ids(int dev, int *out, int width, int pos, int rat
     return cudaGetLastError();
 }
 
-extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, const float *queries,
+static int select_index_data(int dev, uint8_t *work, const uint8_t *packed, const float *queries,
         const float *weights, const int *candidates, int width, int pos, int ratio, int rows,
         int *picks, int *out_blocks, int score_mode) {
     TRY(cudaSetDevice(dev));
@@ -547,7 +547,6 @@ extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, 
     auto *rank=reinterpret_cast<unsigned long long *>(work+s.ranks);
     auto *sorted=reinterpret_cast<unsigned long long *>(work+s.sorted);
     auto *offsets=reinterpret_cast<int *>(work+s.offsets);
-    auto *packed=static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
     dim3 grid((width+block-1)/block,rows);
     index_ids<<<grid,block>>>(candidates,ids,width,pos,ratio);
     TRY(cudaGetLastError());
@@ -599,6 +598,17 @@ extern "C" int ds4_attn_pool_pairs(int dev, const float *kv, const float *gates,
     pool_pair_rows<<<pairs,256>>>(kv,gates,carry,out);
     return cudaGetLastError();
 }
+extern "C" int ds4_attn_index_select(int dev, uint8_t *work, const void *cache, const float *queries,
+        const float *weights, const int *candidates, int width, int pos, int ratio, int rows,
+        int *picks, int *out_blocks, int score_mode) {
+    auto *packed=static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
+    return select_index_data(dev,work,packed,queries,weights,candidates,width,pos,ratio,rows,picks,out_blocks,score_mode);
+}
+
+#ifndef DS4_SELECTION_FIXTURE
+#include "attention_peer_index.cuh"
+#endif
+
 extern "C" int ds4_attn_normalize_raw(int dev, float *x, const float *g, int n) {
     TRY(cudaSetDevice(dev));
     normalize_rows<false><<<n,block,dim*sizeof(float)>>>(x,g,dim);
