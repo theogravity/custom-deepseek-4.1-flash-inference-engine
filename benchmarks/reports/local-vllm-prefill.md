@@ -129,6 +129,18 @@ The native process splits wide dense projections and expert feed-forward project
 
 Each cell is one cold-prefix request after a separate process warm-up. The FP8 arms share the same engine binary and settings apart from step size. Compared with the BF16 arm, they also use indexed LFU eviction. The visible completion text hashes agree across native arms at matching lengths. The 505k run reached 66 MiB of free VRAM per card at the sampled minimum. A single-client completion does not establish the six-session capacity of the experimental profile. [Raw times, image identities, flags, memory and counters](../results/upstream/tp2-wide-prefill.json)
 
+A second pair of fresh processes used the same FP8 image and warm-up. They processed the two shorter cold requests and then the mixed coding workload. Timing varied substantially between process launches. The first client generated 1,500 tokens and the incoming client generated 64. Each mixed trial admitted exactly two requests with zero prefix reuse or rotation.
+
+| Repeat and agent workload | 8,192 step | 16,384 step |
+|---|---:|---:|
+| Cold TTFT at 15,864 tokens | 3.70 s | 9.64 s |
+| Cold TTFT at 60,013 tokens | 11.85 s | 21.38 s |
+| TTFT for the arriving 68,049-token code review | 45.23 s | 41.50 s |
+| Longest interval between existing-agent events intersecting the arriving review’s wait | 12.84 s | 14.89 s |
+| Existing agent’s stream events strictly within that wait | 41 | 25 |
+
+To repeat the mixed arm, run the 11k warm-up, 16k and 60k cases from the command below, followed immediately by `python3 tools/prefill_overlap.py --out mixed.json`. Use a fresh output filename for each arm.
+
 At 98,304 processed tokens in a separate 170,582-token prompt, a 4.64-second device trace on the BF16 build recorded 688 ms in segmented radix sort and 194 ms scoring attention candidates. Peer copies moved 45.03 GB in total. Moving the 1.25 GiB layer-boundary residual through host RAM took 302 ms for the device-to-host transfer alone. These are sums from a partial prefill step and can overlap.
 
 To reproduce the FP8-index arms, build commit `16c9201468076127006ca7ad66e982216b54e2c6` with both CUDA features. Use the current checkout’s Compose profiles and timing driver. Set `DS4_FLASHINFER_DIR` as described in the [build instructions](../../docs/testing.md#flashinfer-sm120-prompt-attention). For each step, start a fresh service with an empty prefix directory and run the requests in order.
