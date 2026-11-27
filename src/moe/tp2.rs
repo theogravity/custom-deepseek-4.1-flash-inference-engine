@@ -1,6 +1,6 @@
 //! Intra-layer S8B prefill. Both devices run every routed expert using their
 //! own 1,152 channels. Only token activations and reduced token outputs cross
-//! the host bridge. Each GPU launches kernels on its legacy default stream.
+//! between GPUs. Each GPU launches kernels on its legacy default stream.
 use super::*;
 
 const GROUP_ROWS: usize = 2048;
@@ -31,6 +31,15 @@ unsafe extern "C" {
         start: usize,
         count: usize,
     ) -> i32;
+    fn ds_recipe_enable_peer_dma(owner: i32, peer: i32, available: *mut i32) -> i32;
+    fn ds_recipe_collect_dma(
+        routed: *mut f32,
+        shared: *mut f32,
+        owner: i32,
+        reduced: *const f32,
+        peer: i32,
+        count: usize,
+    ) -> i32;
     fn ds_recipe_broadcast(
         src: *const f32,
         owner: i32,
@@ -41,6 +50,7 @@ unsafe extern "C" {
         receive: *mut c_void,
         count: usize,
         packed: i32,
+        direct: i32,
     ) -> i32;
     fn ds_recipe_transfer(
         dst: *mut f32,
@@ -79,6 +89,8 @@ pub(super) struct Workspace {
     // receive tile. Their lifetimes extend across calls and error returns.
     bounce: usize,
     receive: usize,
+    // Runtime has one fixed partner per device. Probe both directions once.
+    peer_available: Option<bool>,
 }
 
 impl Workspace {
@@ -104,6 +116,19 @@ impl Workspace {
             self.io_bytes = bytes;
         }
         Ok(())
+    }
+
+    fn direct_dma(&mut self, enabled: bool, owner: i32, peer: i32) -> Result<bool> {
+        if !enabled {
+            return Ok(false);
+        }
+        if let Some(available) = self.peer_available {
+            return Ok(available);
+        }
+        let mut available = 0;
+        cuda(unsafe { ds_recipe_enable_peer_dma(owner, peer, &mut available) })?;
+        self.peer_available = Some(available != 0);
+        Ok(available != 0)
     }
 
     fn prepare_transfer(&mut self, device: i32) -> Result<()> {
@@ -240,12 +265,18 @@ pub(super) fn dispatch(
             .device(peer)?
             .rank_workspace
             .grow_io(peer, io_bytes)?;
-        if rt.moe_cache.device(owner)?.rank_workspace.receive == 0 {
+        let cache = rt.moe_cache.device(owner)?;
+        let direct = cache
+            .rank_workspace
+            .direct_dma(cache.tp2_peer_dma, owner, peer)?;
+        if !direct && cache.rank_workspace.receive == 0 {
             rt.moe_cache
                 .reserve(owner, COPY_FLOATS * size_of::<f32>())?;
         }
         let owner_workspace = &mut rt.moe_cache.device(owner)?.rank_workspace;
-        owner_workspace.prepare_transfer(owner)?;
+        if !direct {
+            owner_workspace.prepare_transfer(owner)?;
+        }
         let bounce = owner_workspace.bounce as *mut f32;
         let receive = owner_workspace.receive as *mut f32;
         let [Some(local_cache), Some(peer_cache)] =
@@ -262,10 +293,15 @@ pub(super) fn dispatch(
                 replica,
                 peer,
                 bounce,
-                receive.cast(),
+                if direct {
+                    weighted.as_mut_ptr().cast()
+                } else {
+                    receive.cast()
+                },
                 partials.cast(),
                 len,
                 local_cache.tp2_packed_input.into(),
+                direct.into(),
             )
         })?;
 
@@ -299,20 +335,33 @@ pub(super) fn dispatch(
                 )
             },
         )?;
-        for start in (0..len).step_by(COPY_FLOATS) {
-            let count = COPY_FLOATS.min(len - start);
+        if direct {
             cuda(unsafe {
-                ds_recipe_transfer(receive, owner, replica.add(start), peer, bounce, count)
-            })?;
-            cuda(unsafe {
-                ds_recipe_finish_ranks(
-                    weighted.as_ptr(),
-                    receive,
+                ds_recipe_collect_dma(
+                    weighted.as_mut_ptr(),
                     shared.as_mut_ptr(),
-                    start,
-                    count,
+                    owner,
+                    replica,
+                    peer,
+                    len,
                 )
             })?;
+        } else {
+            for start in (0..len).step_by(COPY_FLOATS) {
+                let count = COPY_FLOATS.min(len - start);
+                cuda(unsafe {
+                    ds_recipe_transfer(receive, owner, replica.add(start), peer, bounce, count)
+                })?;
+                cuda(unsafe {
+                    ds_recipe_finish_ranks(
+                        weighted.as_ptr(),
+                        receive,
+                        shared.as_mut_ptr(),
+                        start,
+                        count,
+                    )
+                })?;
+            }
         }
         let owner_cache = rt.moe_cache.device(owner)?;
         if owner_cache.metrics {
@@ -327,7 +376,7 @@ pub(super) fn dispatch(
             metrics.uploads += uploads;
             metrics.capacity_queries += 2;
             if layer == 39 {
-                eprintln!("moe pass=target-tp2 rows={} routes={} unique_layer_experts={} rank_uploads={} expert_h2d_bytes={} capacity_queries={}",
+                eprintln!("moe pass=target-tp2 peer_dma={direct} rows={} routes={} unique_layer_experts={} rank_uploads={} expert_h2d_bytes={} capacity_queries={}",
                           len/HIDDEN, metrics.routes, metrics.unique, metrics.uploads, metrics.uploads*RANK_SLOT_BYTES, metrics.capacity_queries);
             }
         }
@@ -542,8 +591,10 @@ mod tests {
                 c.limit = 2; // three rank slots; more than six selected experts.
             }
             assert!(input.iter().any(|&v| half::f16::from_f32(v).to_f32() != v));
-            for packed in [false, true] {
-                rt.moe_cache.device(rt.device)?.tp2_packed_input = packed;
+            for (direct, packed) in [(false, false), (false, true), (true, false), (true, true)] {
+                let c = rt.moe_cache.device(rt.device)?;
+                c.tp2_packed_input = packed;
+                c.tp2_peer_dma = direct;
                 let out = forward_dev(&mut rt, layer, &x, batch)?;
                 let actual = rt.to_host(&out)?;
                 let mismatch = actual
@@ -552,7 +603,19 @@ mod tests {
                     .position(|(a, b)| a.to_bits() != b.to_bits());
                 ensure!(
                     mismatch.is_none(),
-                    "TP2 layer {layer} packed={packed} first unequal result at {mismatch:?}"
+                    "TP2 layer {layer} direct={direct} packed={packed} first unequal result at {mismatch:?}"
+                );
+            }
+            let available = rt
+                .moe_cache
+                .device(rt.device)?
+                .rank_workspace
+                .peer_available;
+            ensure!(available.is_some(), "requested peer DMA was not probed");
+            if std::env::var_os("DS4_TEST_REQUIRE_PEER_DMA").is_some_and(|v| v == "1") {
+                ensure!(
+                    available == Some(true),
+                    "test requires a bidirectional peer-DMA pair"
                 );
             }
             for (d, rank) in [(rt.device, 0), (rt.peer_device(), 1)] {

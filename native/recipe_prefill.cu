@@ -237,6 +237,24 @@ int transfer_tile(void *dst, int dst_device, const void *src, int src_device, vo
     return 0;
 }
 
+// Source production must finish before copying; destination-stream ordering
+// protects pending destination uses. Drain all submitted tiles, including on
+// an enqueue failure, before either caller-owned allocation can be reused.
+int peer_copy(void *dst, int dst_device, const void *src, int src_device, size_t bytes) {
+    CHECK(cudaSetDevice(src_device));
+    CHECK(cudaStreamSynchronize(nullptr));
+    CHECK(cudaSetDevice(dst_device));
+    cudaError_t status = cudaSuccess;
+    for (size_t offset = 0; offset < bytes; offset += bridge_bytes) {
+        status = cudaMemcpyPeerAsync(static_cast<char *>(dst) + offset, dst_device,
+                                     static_cast<const char *>(src) + offset, src_device,
+                                     std::min(bridge_bytes, bytes - offset), nullptr);
+        if (status != cudaSuccess) break;
+    }
+    auto done = cudaStreamSynchronize(nullptr);
+    return int(status == cudaSuccess ? done : status);
+}
+
 __global__ void pack_input(const float *src, half *dst, size_t count) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < count) dst[i] = __float2half_rn(src[i]);
@@ -247,6 +265,30 @@ __global__ void expand_input(const half *src, float *dst, size_t count) {
     if (i < count) dst[i] = __half2float(src[i]);
 }
 } // namespace
+
+// Peer access belongs to the device contexts and can also be in use by dense
+// projections or decode. Leave any enabled direction available to them.
+extern "C" int ds_recipe_enable_peer_dma(int owner, int peer, int *available) {
+    *available = 0;
+    for (int device : {owner, peer}) {
+        int can_access = 0;
+        CHECK(cudaDeviceCanAccessPeer(&can_access, device, device == owner ? peer : owner));
+        if (!can_access) return 0;
+    }
+    for (int device : {owner, peer}) {
+        CHECK(cudaSetDevice(device));
+        auto rc = cudaDeviceEnablePeerAccess(device == owner ? peer : owner, 0);
+        if (rc == cudaErrorPeerAccessAlreadyEnabled || rc == cudaErrorTooManyPeers ||
+            rc == cudaErrorPeerAccessUnsupported) {
+            if (cudaPeekAtLastError() == rc) cudaGetLastError();
+            if (rc != cudaErrorPeerAccessAlreadyEnabled) return 0;
+        } else if (rc != cudaSuccess) {
+            return int(rc);
+        }
+    }
+    *available = 1;
+    return 0;
+}
 
 extern "C" int ds_recipe_transfer(float *dst, int dst_device, const float *src, int src_device,
                                   float *host, size_t count) {
@@ -259,9 +301,21 @@ extern "C" int ds_recipe_transfer(float *dst, int dst_device, const float *src, 
 // The two tiles borrow the owner's receive buffer and the peer's still-empty
 // routed-output buffer. Each new H2D follows the previous expand on stream 0.
 extern "C" int ds_recipe_broadcast(const float *src, int owner, float *dst, int peer,
-                                   float *host, half *send, half *receive, size_t count, int packed) {
-    if (!count || !src || !dst || !host || (packed && (!send || !receive)))
+                                   float *host, half *send, half *receive, size_t count, int packed, int direct) {
+    if (!count || !src || !dst || (!direct && !host) || (packed && (!send || !receive)))
         return int(cudaErrorInvalidValue);
+    if (direct) {
+        if (!packed) return peer_copy(dst, peer, src, owner, count * sizeof(float));
+        // Each rank lends its full (still empty) routed tensor, six float
+        // lanes per input. This permits one conversion launch per direction.
+        CHECK(cudaSetDevice(owner));
+        pack_input<<<(count+255)/256,256>>>(src, send, count);
+        CHECK(cudaGetLastError());
+        int status = peer_copy(receive, peer, send, owner, count * sizeof(half));
+        if (status) return status;
+        expand_input<<<(count+255)/256,256>>>(receive, dst, count);
+        return int(cudaGetLastError());
+    }
     const size_t tile = bridge_bytes / (packed ? sizeof(half) : sizeof(float));
     for (size_t start = 0; start < count; start += tile) {
         size_t n = std::min(count - start, tile);
@@ -304,6 +358,26 @@ __global__ void finish_ranks(const float *routed, const float *peer, float *shar
         shared[i] = __bfloat162float(__float2bfloat16_rn(__fadd_rn(sum, shared[i])));
     }
 }
+// Before returning the peer total into shared[], preserve the two owner
+// operands in lanes of the routed row that this same thread just finished.
+__global__ void save_owner(float *routed, const float *shared, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) {
+        size_t base = (i / H) * 6 * H + i % H;
+        float sum = sum_routes(routed, i);
+        routed[base] = sum;
+        routed[base+H] = shared[i];
+    }
+}
+
+__global__ void finish_dma(const float *owner, float *received, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) {
+        size_t base = (i / H) * 6 * H + i % H;
+        float sum = __fadd_rn(owner[base], received[i]);
+        received[i] = __bfloat162float(__float2bfloat16_rn(__fadd_rn(sum, owner[base+H])));
+    }
+}
 } // namespace
 
 extern "C" int ds_recipe_sum_rank(const float *routed, float *tokens, size_t count) {
@@ -314,6 +388,17 @@ extern "C" int ds_recipe_sum_rank(const float *routed, float *tokens, size_t cou
 extern "C" int ds_recipe_finish_ranks(const float *routed, const float *peer, float *shared,
                                       size_t start, size_t count) {
     finish_ranks<<<(count + 255)/256,256>>>(routed, peer, shared, start, count);
+    return int(cudaGetLastError());
+}
+
+extern "C" int ds_recipe_collect_dma(float *routed, float *shared, int owner, const float *reduced,
+                                     int peer, size_t count) {
+    CHECK(cudaSetDevice(owner));
+    save_owner<<<(count+255)/256,256>>>(routed, shared, count);
+    CHECK(cudaGetLastError());
+    int status = peer_copy(shared, owner, reduced, peer, count * sizeof(float));
+    if (status) return status;
+    finish_dma<<<(count+255)/256,256>>>(routed, shared, count);
     return int(cudaGetLastError());
 }
 #endif
