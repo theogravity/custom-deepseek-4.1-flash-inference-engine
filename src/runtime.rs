@@ -59,6 +59,7 @@ extern "C" {
         groups: i32,
         mode: i32,
         full_rows: i32,
+        prefill: i32,
     ) -> usize;
     fn ds_project(
         ctx: *mut c_void,
@@ -708,6 +709,7 @@ impl Runtime {
                 groups.try_into()?,
                 w.mode,
                 w.rows.try_into()?,
+                (!self.verification).into(),
             )
         };
         if extra > 0 {
@@ -773,7 +775,7 @@ mod tests {
         let mut ctx = ptr::null_mut();
         checked(unsafe { ds_dense_create(dev, &mut ctx) })?;
         let growth = |rows, cols, n, groups, mode| unsafe {
-            ds_dense_growth(ctx, rows, cols, n, groups, mode, rows)
+            ds_dense_growth(ctx, rows, cols, n, groups, mode, rows, 0)
         };
         let head = growth(129280, 5120, 512, 1, 7);
         let grouped = growth(1024, 512, 32, 8, 2);
@@ -784,6 +786,125 @@ mod tests {
         assert_eq!(grouped, 32 * 8 * 512 * 2);
         assert_eq!(stable, 17 * 20 * 24 * 4);
         assert_eq!(fp32, 0);
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires DS4_PREFILL_LT=1 and DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn wide_mxfp8_checks_groups_scales_and_workspace_reuse() -> Result<()> {
+        ensure!(
+            std::env::var("DS4_PREFILL_LT")? == "1",
+            "enable the wide backend"
+        );
+        let device = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        struct ContextGuard(*mut c_void);
+        impl Drop for ContextGuard {
+            fn drop(&mut self) {
+                unsafe { ds_dense_destroy(self.0) }
+            }
+        }
+        let mut ctx = ptr::null_mut();
+        checked(unsafe { ds_dense_create(device, &mut ctx) })?;
+        let ctx = ContextGuard(ctx);
+        for (tokens, groups, group_rows, cols) in
+            [(129, 2, 128, 160), (257, 1, 512, 256), (129, 2, 128, 160)]
+        {
+            let rows = groups * group_rows;
+            let mut weight = vec![0u8; rows * cols];
+            let mut scales = vec![0u8; rows / 32 * (cols / 32)];
+            for r in 0..rows {
+                let k = (37 * r + 3) % cols;
+                weight[r * cols + k] = if r % 2 == 0 { 0x38 } else { 0xb8 };
+                for slab in 0..cols / 32 {
+                    scales[(r / 32) * (cols / 32) + slab] = 125 + ((r / 32 + slab) % 6) as u8;
+                }
+            }
+            let mut data = ptr::null_mut();
+            checked(unsafe {
+                ds_upload(
+                    device,
+                    &mut data,
+                    weight.as_ptr().cast(),
+                    scales.as_ptr().cast(),
+                    rows as i32,
+                    cols as i32,
+                    4,
+                )
+            })?;
+            let weight = Matrix {
+                peer: None,
+                device,
+                ptr: data,
+                rows,
+                cols,
+                mode: 4,
+                round_output: false,
+            };
+            let x: Vec<f32> = (0..tokens * groups * cols)
+                .map(|i| {
+                    let k = i % cols;
+                    (1 + (i / cols + k % 7) % 8) as f32 * 2f32.powi((k / 32 % 4) as i32 - 2)
+                })
+                .collect();
+            let mut y = vec![0.; tokens * rows];
+            let buffer = |n| -> Result<Matrix> {
+                let mut p = ptr::null_mut();
+                checked(unsafe { ds_alloc_f32(device, &mut p, n) })?;
+                Ok(Matrix {
+                    peer: None,
+                    device,
+                    ptr: p.cast(),
+                    rows: n,
+                    cols: 1,
+                    mode: 0,
+                    round_output: false,
+                })
+            };
+            let dx = buffer(x.len())?;
+            let dy = buffer(y.len())?;
+            checked(unsafe { ds_copy_f32(device, dx.ptr.cast(), x.as_ptr(), x.len(), 0) })?;
+            checked(unsafe {
+                ds_project(
+                    ctx.0,
+                    weight.ptr,
+                    dx.ptr.cast(),
+                    dy.ptr.cast(),
+                    rows as i32,
+                    cols as i32,
+                    tokens as i32,
+                    groups as i32,
+                    4,
+                    1,
+                    1,
+                    4,
+                    rows as i32,
+                )
+            })?;
+            checked(unsafe { ds_copy_f32(device, y.as_mut_ptr(), dy.ptr.cast(), y.len(), 1) })?;
+            for (idx, actual) in y.iter().enumerate() {
+                let (t, r) = (idx / rows, idx % rows);
+                let k = (37 * r + 3) % cols;
+                let scale = 2f32.powi(i32::from(scales[(r / 32) * (cols / 32) + k / 32]) - 127);
+                let expected = x[(t * groups + r / group_rows) * cols + k]
+                    * scale
+                    * if r % 2 == 0 { 1. } else { -1. };
+                assert_eq!(*actual, expected, "token {t}, row {r}");
+            }
+            assert_eq!(
+                unsafe {
+                    ds_dense_growth(
+                        ctx.0,
+                        rows as i32,
+                        cols as i32,
+                        tokens as i32,
+                        groups as i32,
+                        4,
+                        rows as i32,
+                        1,
+                    )
+                },
+                0
+            );
+        }
         Ok(())
     }
     #[test]

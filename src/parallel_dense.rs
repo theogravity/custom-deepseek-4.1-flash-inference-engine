@@ -223,7 +223,9 @@ impl ParallelDense {
             link.peer_input.grow(n_input, cache)?;
             link.peer_parts.grow(n_output / 2, cache)?;
             for (ctx, dev) in [(home_ctx, w.device), (peer_ctx, peer.device)] {
-                let extra = unsafe { ds_dense_growth(ctx, rows / 2, cols, batch, 1, w.mode, rows) };
+                let extra = unsafe {
+                    ds_dense_growth(ctx, rows / 2, cols, batch, 1, w.mode, rows, prefill.into())
+                };
                 if extra > 0 {
                     checked(unsafe { ds_set_device(dev) })?;
                     cache.reserve(dev, extra)?;

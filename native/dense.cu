@@ -47,7 +47,10 @@ struct Buffer {
       ptr = nullptr;
       cap = 0;
     }
-    CUDA(cudaMalloc(&ptr, bytes));
+    auto allocated = cudaMalloc(&ptr, bytes);
+    if (allocated == cudaErrorMemoryAllocation && cudaPeekAtLastError() == allocated)
+      cudaGetLastError();
+    CUDA(allocated);
     cap = bytes;
     return 0;
   }
@@ -224,7 +227,7 @@ static int mx_splits(int rows, int cols) {
 // Scratch buffers release their old allocation before growing. Reserve the
 // net increase on this device while packed expert slots can still be evicted.
 extern "C" size_t ds_dense_growth(Context *c, int rows, int cols, int batch,
-                                  int groups, int mode, int full_rows) {
+                                  int groups, int mode, int full_rows, int prefill) {
   const bool stable = mode == 5 || mode == 6;
   const bool packed = mode == 4 || mode == 7;
   size_t input = mode != 0 && mode != 3 && !stable
@@ -233,13 +236,12 @@ extern "C" size_t ds_dense_growth(Context *c, int rows, int cols, int batch,
   int splits = stable ? (cols + 1023) / 1024
                       : (packed ? mx_splits(full_rows, cols) : 0);
   size_t parts = size_t(batch) * rows * splits * sizeof(float);
-  size_t lt_growth = 0;
-  if (c->wide_mx && mode==4 && batch>128) {
+  if (c->wide_mx && mode == 4 && prefill && batch > 128) {
     prefill_dense::Workspace work(rows / groups,cols,batch);
-    lt_growth = work.bytes > c->lt.scratch.cap ? work.bytes - c->lt.scratch.cap : 0;
+    return work.bytes > c->lt.scratch.cap ? work.bytes - c->lt.scratch.cap : 0;
   }
-  return std::max(lt_growth,(input > c->short_input.cap ? input - c->short_input.cap : 0) +
-         (parts > c->partial.cap ? parts - c->partial.cap : 0));
+  return (input > c->short_input.cap ? input - c->short_input.cap : 0) +
+         (parts > c->partial.cap ? parts - c->partial.cap : 0);
 }
 
 extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
