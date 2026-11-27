@@ -22,6 +22,8 @@ unsafe extern "C" {
         home_parts: *mut f32,
         peer_input: *mut f32,
         peer_parts: *mut f32,
+        home_wire: *mut f32,
+        peer_wire: *mut f32,
         rows: i32,
         cols: i32,
         batch: i32,
@@ -166,6 +168,9 @@ struct Link {
     home_parts: Staging,
     peer_input: Staging,
     peer_parts: Staging,
+    home_wire: Staging,
+    peer_wire: Staging,
+    packed_wire: bool,
 }
 impl Link {
     fn new(home: i32, peer: i32) -> Result<Self> {
@@ -176,6 +181,9 @@ impl Link {
             home_parts: Staging::new(home),
             peer_input: Staging::new(peer),
             peer_parts: Staging::new(peer),
+            home_wire: Staging::new(home),
+            peer_wire: Staging::new(peer),
+            packed_wire: std::env::var_os("DS4_TP_DENSE_BF16_WIRE").is_some_and(|v| v == "1"),
         })
     }
 }
@@ -222,6 +230,16 @@ impl ParallelDense {
             link.home_parts.grow(n_output, cache)?;
             link.peer_input.grow(n_input, cache)?;
             link.peer_parts.grow(n_output / 2, cache)?;
+            let packed = link.packed_wire && w.mode == 4 && batch > 128 && prefill;
+            let (home_wire, peer_wire) = if packed {
+                link.home_wire.grow(n_input.div_ceil(2), cache)?;
+                let returned = if w.round_output { n_output / 2 } else { 0 };
+                link.peer_wire
+                    .grow(n_input.max(returned).div_ceil(2), cache)?;
+                (link.home_wire.ptr, link.peer_wire.ptr)
+            } else {
+                (ptr::null_mut(), ptr::null_mut())
+            };
             for (ctx, dev) in [(home_ctx, w.device), (peer_ctx, peer.device)] {
                 let extra = unsafe {
                     ds_dense_growth(ctx, rows / 2, cols, batch, 1, w.mode, rows, prefill.into())
@@ -243,6 +261,8 @@ impl ParallelDense {
                     link.home_parts.ptr,
                     link.peer_input.ptr,
                     link.peer_parts.ptr,
+                    home_wire,
+                    peer_wire,
                     rows,
                     cols,
                     batch,
