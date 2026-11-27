@@ -112,3 +112,5 @@ On an idle benchmark host, with the API key exported, this Bash block recreates 
 ```
 
 The configured context limit is 524,288 in both arms. Restore the original serving image and prefix directory using the same Compose files and environment that were active before the experiment.
+
+The overlap driver records a peer stream that stalls for the entire arriving request’s wait with zero interior events. It measures the complete interval between the peer’s surrounding events.

@@ -63,12 +63,16 @@ class OverlapTests(unittest.TestCase):
     def test_no_interleave_or_late_request_rejected(self):
         for events in ([1, 2, 3, 4, 5, 6, 7, 11, 16, 25],  # review started before eight peer events
                        list(range(1, 10)),                 # peer completed before HTTP worker started
-                       list(range(1, 9)) + [16, 21],       # peer completed during the review's wait
-                       list(range(1, 9)) + [10, 22, 25]):  # events at boundaries only
+                       list(range(1, 9)) + [16, 21]):      # peer completed during the review's wait
             with self.subTest(events=events):
                 self.first.events = events
                 with self.assertRaises(RuntimeError):
                     self.measure()
+
+    def test_complete_stall_counts_the_bracketing_peer_interval(self):
+        self.first.events = list(range(1, 9)) + [25]
+        row = self.measure()
+        self.assertEqual((row["peer_events_during_second_ttft"], row["max_peer_interevent_s"]), (0, 17))
 
     def test_incomplete_stream_is_rejected_even_with_usage_and_finish(self):
         with patch.object(overlap, "urlopen", return_value=response(self.first.usage, done=False)):

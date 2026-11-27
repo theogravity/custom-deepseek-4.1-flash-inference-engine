@@ -81,8 +81,6 @@ def summarize(first, second, before, after):
     if not (len(peer) >= 8 and peer[7] <= start < end < peer[-1]):
         raise RuntimeError("the first stream must span the arriving request through its first output")
     inside = sum(start < event < end for event in peer)
-    if not inside:
-        raise RuntimeError("no peer event during the arriving request's wait for first output")
     gaps = [(left, right) for left, right in zip(peer, peer[1:]) if left < end and right > start]
     left, right = max(gaps, key=lambda pair: pair[1] - pair[0])
     return dict(first_client=first.usage, second_client=second.usage,
