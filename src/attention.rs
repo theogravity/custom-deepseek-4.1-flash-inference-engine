@@ -3649,6 +3649,8 @@ mod tests {
                     )?;
                     assert!(needed <= bytes);
                     let guarded = upload(dev, &vec![0xa5u8; needed + 512])?;
+                    let untouched = vec![-9i32; n * TOP_BLOCKS];
+                    blocks.write(&untouched)?;
                     picks.write(&vec![-9i32; n * TOP])?;
                     cuda_ok(
                         unsafe {
@@ -3677,6 +3679,17 @@ mod tests {
                     let mut got = vec![0; n * TOP];
                     read(&picks, &mut got)?;
                     assert_eq!(got, expected);
+                    let mut got_blocks = vec![0i32; n * TOP_BLOCKS];
+                    read(&blocks, &mut got_blocks)?;
+                    assert_eq!(
+                        got_blocks,
+                        if out_blocks {
+                            &expected_blocks
+                        } else {
+                            &untouched
+                        }
+                        .as_slice()
+                    );
                     for offset in [0, 256 + needed] {
                         let mut guard = [0u8; 256];
                         cuda_ok(
