@@ -125,10 +125,7 @@ fn main() -> Result<()> {
         args.max_context,
         args.chunk_size,
     )?;
-    eprintln!(
-        "Opened checkpoint in {:.2}s; weights upload on demand",
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("Opened checkpoint in {:.2}s", t.elapsed().as_secs_f64());
     match args.command {
         Action::Serve { bind } => api::serve(model, tok, &bind, key),
         Action::Infer { prompt, max_tokens } => {
