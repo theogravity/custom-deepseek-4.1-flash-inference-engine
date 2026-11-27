@@ -1574,7 +1574,7 @@ fn device_select(
         } else {
             (pos + t + rows) / ratio
         };
-        let score_mode = index_score_mode(rt.target_prefill,width,rows,filtered);
+        let score_mode = index_score_mode(rt.target_prefill, width, rows, filtered);
         let mut bytes = 0;
         cuda_ok(
             unsafe {
@@ -1593,14 +1593,14 @@ fn device_select(
             !filtered || !blocks.is_null(),
             "missing GPU candidate blocks"
         );
-        tiles.push((t, rows, width, filtered));
+        tiles.push((t, rows, width, filtered, score_mode));
         t += rows;
     }
     // Every tile is submitted to this device's default stream. The workspace
     // belongs to this call until the last launch and is then recyclable by
     // the next operation on that stream.
     let mut work = rt.buffer(workspace_bytes.div_ceil(4))?;
-    for (t, rows, width, filtered) in tiles {
+    for (t, rows, width, filtered, score_mode) in tiles {
         cuda_ok(
             unsafe {
                 let b = if blocks.is_null() || !(filtered || layer == CANDIDATE_LAYER) {
