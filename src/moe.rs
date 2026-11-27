@@ -253,6 +253,7 @@ struct DeviceCache {
     uploads: usize,
     overlap_router: bool,
     parallel_prefill_router: bool,
+    bounded_prefill_router: bool,
     cached_capacity: bool,
     packed_upload: bool,
     inline_metadata: bool,
@@ -289,6 +290,7 @@ impl DeviceCache {
             router: RouterRead::default(),
             uploads: 0,
             parallel_prefill_router: switch("DS4_PARALLEL_PREFILL_ROUTER", false)?,
+            bounded_prefill_router: switch("DS4_BOUNDED_PREFILL_ROUTER", false)?,
             overlap_router: switch("DS4_MOE_OVERLAP_ROUTER", true)?,
             cached_capacity: switch("DS4_MOE_CACHED_CAPACITY", true)?,
             packed_upload: switch("DS4_MOE_PACKED_UPLOAD", true)?,
@@ -476,6 +478,7 @@ fn routes<const E: usize, const K: usize>(
     bias: &[f32],
     batch: usize,
     parallel: bool,
+    bounded: bool,
 ) -> Result<Vec<Route>> {
     ensure!(
         logits.len() == batch * E && bias.len() == E,
@@ -485,6 +488,11 @@ fn routes<const E: usize, const K: usize>(
     let assign = |(token, (scores, dest)): (usize, (&[f32; E], &mut [Route; K]))| {
         let mut top = [(f32::NEG_INFINITY, 0.0, 0); K];
         for (expert, &logit) in scores.iter().enumerate() {
+            // ln(1 + exp(-abs(logit))) is at most ln(2). A score that
+            // cannot beat the last selected expert leaves ties in input order.
+            if bounded && (logit.max(0.0) + 1.0).sqrt() + bias[expert] <= top[K - 1].0 {
+                continue;
+            }
             let score = (logit.max(0.0) + (-logit.abs()).exp().ln_1p()).sqrt();
             let corrected = score + bias[expert];
             if corrected > top[K - 1].0 {
@@ -745,18 +753,31 @@ fn forward<const E: usize, const K: usize>(
     // Only router logits visit the CPU, which computes the checkpoint's top-k
     // and chooses mmap-backed expert weights for the GPU slot cache.
     let cache = rt.moe_cache.device(rt.device)?;
-    let parallel_router =
-        cache.parallel_prefill_router && rt.target_prefill && matches!(layer, Layer::Backbone(_));
+    let target_prefill = rt.target_prefill && matches!(layer, Layer::Backbone(_));
+    let parallel_router = cache.parallel_prefill_router && target_prefill;
+    let bounded_router = cache.bounded_prefill_router && target_prefill;
     let (routes, mut shared_out) = if cache.overlap_router {
         cache.router.start(&logits)?;
         let shared_out = shared(rt, &base, x, batch)?;
         let read = &rt.moe_cache.device(rt.device)?.router;
         (
-            routes::<E, K>(read.scores(logits.len())?, &bias, batch, parallel_router)?,
+            routes::<E, K>(
+                read.scores(logits.len())?,
+                &bias,
+                batch,
+                parallel_router,
+                bounded_router,
+            )?,
             shared_out,
         )
     } else {
-        let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch, parallel_router)?;
+        let routes = routes::<E, K>(
+            &rt.to_host(&logits)?,
+            &bias,
+            batch,
+            parallel_router,
+            bounded_router,
+        )?;
         (routes, shared(rt, &base, x, batch)?)
     };
     ensure!(
@@ -1199,7 +1220,8 @@ mod tests {
             }
         }
         let routes =
-            routes::<DRAFT_EXPERTS, DRAFT_TOP_K>(&logits, &[0.; DRAFT_EXPERTS], 2, false).unwrap();
+            routes::<DRAFT_EXPERTS, DRAFT_TOP_K>(&logits, &[0.; DRAFT_EXPERTS], 2, false, false)
+                .unwrap();
         let rows: Vec<_> = routes.iter().map(|r| (r.expert, r.token, r.rank)).collect();
         assert_eq!(
             rows,
@@ -1221,11 +1243,49 @@ mod tests {
             .map(|i| ((i * 29 + i / EXPERTS) % 37) as f32 / 5. - 3.)
             .collect();
         let bias: Vec<f32> = (0..EXPERTS).map(|i| (i % 7) as f32 * 0.01).collect();
-        let serial = routes::<EXPERTS, TOP_K>(&logits, &bias, rows, false).unwrap();
+        let serial = routes::<EXPERTS, TOP_K>(&logits, &bias, rows, false, false).unwrap();
         assert_eq!(
             serial,
-            routes::<EXPERTS, TOP_K>(&logits, &bias, rows, true).unwrap()
+            routes::<EXPERTS, TOP_K>(&logits, &bias, rows, true, false).unwrap()
         );
+    }
+
+    #[test]
+    fn bounded_prefill_router_matches_exact_weights_and_ties() {
+        let rows = 96;
+        let mut bits = 7u32;
+        let mut sample = || {
+            bits = bits.wrapping_mul(1664525).wrapping_add(1013904223);
+            (bits as i32 as f32) / (i32::MAX as f32)
+        };
+        let mut logits: Vec<_> = (0..rows * EXPERTS).map(|_| sample() * 30.).collect();
+        let mut bias: Vec<_> = (0..EXPERTS).map(|_| sample() * 2.).collect();
+        for i in 0..EXPERTS {
+            logits[i] = [
+                0.0,
+                -0.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NAN,
+                f32::MAX,
+                f32::MIN_POSITIVE,
+                1.0,
+            ][i % 8];
+            logits[EXPERTS + i] = 1.0;
+            if i % 2 == 0 {
+                bias[i] = 0.;
+            }
+        }
+        let reference = routes::<EXPERTS, TOP_K>(&logits, &bias, rows, false, false).unwrap();
+        for parallel in [false, true] {
+            let actual = routes::<EXPERTS, TOP_K>(&logits, &bias, rows, parallel, true).unwrap();
+            for (a, b) in reference.iter().zip(actual) {
+                assert_eq!(
+                    (a.expert, a.token, a.rank, a.weight.to_bits()),
+                    (b.expert, b.token, b.rank, b.weight.to_bits())
+                );
+            }
+        }
     }
 
     #[test]
@@ -1234,7 +1294,7 @@ mod tests {
         bias[300] = 2.0;
         let mut logits = vec![0.0; EXPERTS];
         logits[42] = 2.0;
-        let selected = routes::<EXPERTS, TOP_K>(&logits, &bias, 1, false).unwrap();
+        let selected = routes::<EXPERTS, TOP_K>(&logits, &bias, 1, false, false).unwrap();
         assert_eq!(
             selected.iter().map(|r| r.expert).collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 42, 300]
