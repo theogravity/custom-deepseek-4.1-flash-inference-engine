@@ -17,6 +17,25 @@ Decode spans the first through last output. The Python edit follows the upstream
 
 On six different follow-ups to a warm 404k-token conversation, median time to first output was **0.48 s** with tokenized-text caching enabled. The engine supports six independent 524,288-token windows and can rotate additional sessions through RAM and disk. [Methodology](benchmarks/reports/agent-followups.md) · [Raw measurements](benchmarks/agent-followups/measurements/) · [All benchmarks](benchmarks/)
 
+### Same workloads as the vLLM reference
+
+| Concurrent clients | Published vLLM tok/s | Native tok/s | Native vs. vLLM |
+|---:|---:|---:|---:|
+| 1 | 282 | 382.5 | +35.6% |
+| 4 | 518 | 457.5 | -11.7% |
+| 6 | 557 | 502.5 | -9.8% |
+
+Rates are aggregate across the listed clients on the upstream 25.6k-token code edit. Native rates are medians of six warm second passes at 375 W per GPU. The published vLLM rates are a warm second pass on its 600 W profile.
+
+| Published input tokens | Native input tokens | vLLM cold TTFT | Native cold TTFT | Native / vLLM time |
+|---:|---:|---:|---:|---:|
+| 15,826 | 15,858 | 1.4 s | 23.14 s | 16.5× |
+| 60,046 | 60,017 | 5 s | 60.9 s | 12.2× |
+| 195,600 | 195,702 | 15.7 s | 204.77 s | 13.0× |
+| 505,214 | 505,143 | 41.6 s | 601.78 s | 14.5× |
+
+Cold time to first output (TTFT) ends at the first reasoning or visible text. The GPU power limit for the published cold-prefill runs was unrecorded. Each native row used one fresh prompt and restored zero prefix tokens. The six-client ~404k run was stopped during cold prefill. Its completion time and retrieval result are unmeasured, and the cache repeat was skipped. [Methodology and raw results](benchmarks/reports/headline-reference.md)
+
 ## Build and serve from a fresh clone
 
 Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.

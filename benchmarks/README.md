@@ -2,6 +2,7 @@
 
 | What do you want to measure? | Reports |
 |---|---|
+| Same workloads as the published vLLM reference | [1/4/6-client code edits, cold prefill and six 404k sessions](reports/headline-reference.md) |
 | Coding-agent latency and task completion | [Changing 404k conversations](reports/agent-followups.md) · [Pi coding task](reports/pi-coding.md) · [Time after tool calls](reports/tool-return.md) |
 | Context, concurrency and KV | [Long-context decode](reports/long-context.md) · [Concurrent code edits](reports/concurrent-edits.md) · [Shared prefixes](reports/shared-prefix.md) |
 | Throughput ceilings and comparisons | [Hardware roofline](reports/roofline.md) · [vLLM comparison](reports/vllm-comparison.md) · [Single-client context sweep](reports/single-client-context.md) |

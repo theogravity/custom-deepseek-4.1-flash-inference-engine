@@ -1,0 +1,65 @@
+[decode-1]
+warm-up: prompt 25625 tokens, ttft 0.3s
+rep0 1 streams: per-stream [230] tok/s, aggregate 230 tok/s (1500 tokens)
+rep0 4 streams: per-stream [87, 85, 86, 85] tok/s, aggregate 340 tok/s (6000 tokens)
+rep0 6 streams: per-stream [76, 74, 74, 73, 73, 73] tok/s, aggregate 435 tok/s (9000 tokens)
+rep1 1 streams: per-stream [377] tok/s, aggregate 377 tok/s (1500 tokens)
+rep1 4 streams: per-stream [116, 114, 113, 111] tok/s, aggregate 444 tok/s (6000 tokens)
+rep1 6 streams: per-stream [86, 84, 84, 81, 82, 82] tok/s, aggregate 488 tok/s (9000 tokens)
+
+[decode-2]
+warm-up: prompt 25625 tokens, ttft 0.1s
+rep0 1 streams: per-stream [378] tok/s, aggregate 378 tok/s (1500 tokens)
+rep0 4 streams: per-stream [117, 114, 115, 114] tok/s, aggregate 457 tok/s (6000 tokens)
+rep0 6 streams: per-stream [87, 84, 85, 83, 83, 83] tok/s, aggregate 498 tok/s (9000 tokens)
+rep1 1 streams: per-stream [382] tok/s, aggregate 382 tok/s (1500 tokens)
+rep1 4 streams: per-stream [118, 117, 116, 115] tok/s, aggregate 461 tok/s (6000 tokens)
+rep1 6 streams: per-stream [87, 86, 85, 83, 84, 83] tok/s, aggregate 496 tok/s (9000 tokens)
+
+[decode-3]
+warm-up: prompt 25625 tokens, ttft 0.1s
+rep0 1 streams: per-stream [381] tok/s, aggregate 381 tok/s (1500 tokens)
+rep0 4 streams: per-stream [118, 115, 116, 115] tok/s, aggregate 460 tok/s (6000 tokens)
+rep0 6 streams: per-stream [87, 85, 85, 84, 84, 83] tok/s, aggregate 500 tok/s (9000 tokens)
+rep1 1 streams: per-stream [382] tok/s, aggregate 382 tok/s (1500 tokens)
+rep1 4 streams: per-stream [118, 115, 115, 115] tok/s, aggregate 459 tok/s (6000 tokens)
+rep1 6 streams: per-stream [88, 85, 85, 84, 84, 84] tok/s, aggregate 502 tok/s (9000 tokens)
+
+[decode-4]
+warm-up: prompt 25625 tokens, ttft 0.1s
+rep0 1 streams: per-stream [383] tok/s, aggregate 383 tok/s (1500 tokens)
+rep0 4 streams: per-stream [118, 115, 116, 115] tok/s, aggregate 460 tok/s (6000 tokens)
+rep0 6 streams: per-stream [88, 85, 85, 84, 84, 84] tok/s, aggregate 502 tok/s (9000 tokens)
+rep1 1 streams: per-stream [384] tok/s, aggregate 384 tok/s (1500 tokens)
+rep1 4 streams: per-stream [118, 117, 116, 114] tok/s, aggregate 456 tok/s (6000 tokens)
+rep1 6 streams: per-stream [88, 85, 85, 84, 84, 84] tok/s, aggregate 503 tok/s (9000 tokens)
+
+[decode-5]
+warm-up: prompt 25625 tokens, ttft 0.1s
+rep0 1 streams: per-stream [385] tok/s, aggregate 385 tok/s (1500 tokens)
+rep0 4 streams: per-stream [118, 115, 116, 115] tok/s, aggregate 460 tok/s (6000 tokens)
+rep0 6 streams: per-stream [88, 86, 85, 83, 84, 84] tok/s, aggregate 499 tok/s (9000 tokens)
+rep1 1 streams: per-stream [383] tok/s, aggregate 383 tok/s (1500 tokens)
+rep1 4 streams: per-stream [118, 117, 116, 114] tok/s, aggregate 456 tok/s (6000 tokens)
+rep1 6 streams: per-stream [88, 86, 86, 84, 84, 84] tok/s, aggregate 504 tok/s (9000 tokens)
+
+[decode-6]
+warm-up: prompt 25625 tokens, ttft 0.1s
+rep0 1 streams: per-stream [385] tok/s, aggregate 385 tok/s (1500 tokens)
+rep0 4 streams: per-stream [119, 116, 116, 115] tok/s, aggregate 462 tok/s (6000 tokens)
+rep0 6 streams: per-stream [88, 85, 85, 84, 84, 84] tok/s, aggregate 503 tok/s (9000 tokens)
+rep1 1 streams: per-stream [385] tok/s, aggregate 385 tok/s (1500 tokens)
+rep1 4 streams: per-stream [118, 116, 116, 115] tok/s, aggregate 461 tok/s (6000 tokens)
+rep1 6 streams: per-stream [88, 86, 86, 84, 84, 84] tok/s, aggregate 505 tok/s (9000 tokens)
+
+[prefill-5000]
+resend after eviction: ttft 23.14s total 23.5s prompt=15858 answer='beta37037' (needle ok)
+
+[prefill-19000]
+resend after eviction: ttft 60.90s total 61.1s prompt=60017 answer='omega21633' (needle ok)
+
+[prefill-62000]
+resend after eviction: ttft 204.77s total 205.0s prompt=195702 answer='kappa89524' (needle ok)
+
+[prefill-160000]
+resend after eviction: ttft 601.78s total 602.0s prompt=505143 answer='delta31349' (needle ok)
