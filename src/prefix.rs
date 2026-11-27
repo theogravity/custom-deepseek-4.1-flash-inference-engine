@@ -1,5 +1,5 @@
-//! Content-addressed snapshots at exact prefill boundaries. A file contains
-//! target KV only. The decoder always evaluates the remaining prompt and output.
+//! Content-addressed KV snapshots. Canonical prefill checkpoints can be
+//! persisted. A tool handoff keeps its target and drafter together in RAM.
 use crate::{
     attention::AttentionState,
     restore_timing::{timed, Host, Tier},
@@ -78,6 +78,22 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
         }
     }
     Ok(h)
+}
+
+#[derive(Default)]
+pub struct RestoredPrefix {
+    pub pos: usize,
+    pub state: AttentionState,
+    pub timing: Option<Host>,
+    // Some(empty) represents a tool checkpoint without a ready drafter.
+    pub tool_draft: Option<Bytes>,
+}
+
+fn tool_key(base: Key) -> Key {
+    let mut hash = Sha256::new();
+    hash.update(b"DS4 RAM tool handoff v1");
+    hash.update(base);
+    hash.finalize().into()
 }
 
 pub struct PrefixCache {
@@ -368,7 +384,8 @@ impl PrefixCache {
         tokens: &[u32],
         max_pos: usize,
         span: usize,
-    ) -> Result<Option<(usize, AttentionState, Option<Host>)>> {
+        tools: bool,
+    ) -> Result<Option<RestoredPrefix>> {
         if self.ram_limit == 0 && self.dir.is_none() {
             return Ok(None);
         }
@@ -379,12 +396,14 @@ impl PrefixCache {
                 let state = Self::decode_target(&entry.1, pos, Tier::Ram, &mut timing)?;
                 self.ram.push_back(entry);
                 eprintln!("prefix tier=ram tokens={pos}");
-                return Ok(Some((pos, state, timing)));
+                return Ok(Some(RestoredPrefix {
+                    pos,
+                    state,
+                    timing,
+                    tool_draft: None,
+                }));
             }
-            if let Some(path) = self.file(&key) {
-                if !path.exists() {
-                    continue;
-                }
+            if let Some(path) = self.file(&key).filter(|p| p.exists()) {
                 let read = self
                     .read_blob(&path, &key, 6 * MIB + 2048 * pos)
                     .and_then(|data| {
@@ -396,7 +415,12 @@ impl PrefixCache {
                     Ok((state, data)) => {
                         self.remember(key, data);
                         eprintln!("prefix tier=disk tokens={pos}");
-                        return Ok(Some((pos, state, timing)));
+                        return Ok(Some(RestoredPrefix {
+                            pos,
+                            state,
+                            timing,
+                            tool_draft: None,
+                        }));
                     }
                     Err(e) => {
                         eprintln!("discarding unreadable prefix at {pos} tokens: {e:#}");
@@ -406,9 +430,60 @@ impl PrefixCache {
                     }
                 }
             }
+            if tools && self.ram_limit > 0 {
+                let key = tool_key(key);
+                if let Some(i) = self.ram.iter().position(|entry| entry.0 == key) {
+                    let entry = self.ram.remove(i).unwrap();
+                    let split = AttentionState::snapshot_bytes(pos)?;
+                    let target = entry.1.slice(..split);
+                    let draft = entry.1.slice(split..);
+                    let state = Self::decode_target(&target, pos, Tier::Ram, &mut timing)?;
+                    self.ram.push_back(entry);
+                    eprintln!("prefix tier=tool_ram tokens={pos}");
+                    return Ok(Some(RestoredPrefix {
+                        pos,
+                        state,
+                        timing,
+                        tool_draft: Some(draft),
+                    }));
+                }
+            }
         }
         Ok(None)
     }
+    pub fn store_tool(
+        &mut self,
+        tokens: &[u32],
+        pos: usize,
+        span: usize,
+        state: &AttentionState,
+        draft: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        if self.ram_limit == 0 || AttentionState::snapshot_bytes(pos)? > self.ram_limit {
+            return Ok(());
+        }
+        ensure!(
+            pos > 0 && pos.is_multiple_of(self.chunk),
+            "invalid tool checkpoint boundary"
+        );
+        let key = tool_key(
+            self.keys(tokens, pos, span)?
+                .last()
+                .context("empty tool prefix")?
+                .1,
+        );
+        if self.ram.iter().any(|entry| entry.0 == key) {
+            return Ok(());
+        }
+        let sidecar = draft()?;
+        if AttentionState::snapshot_bytes(pos)? + sidecar.len() <= self.ram_limit {
+            let mut image = state.encode_snapshot_with_tail(pos, sidecar.len())?;
+            image.extend_from_slice(&sidecar);
+            self.remember(key, Bytes::from(image));
+        }
+        Ok(())
+    }
+
     pub fn store(
         &mut self,
         tokens: &[u32],
@@ -515,20 +590,22 @@ mod tests {
         cache.store(&[23, 88], 1, 128, &state)?;
         let mut restarted = make();
         restarted.ram_limit = 2 * data.len();
-        let (pos, held, _) = restarted.restore(&[22, 99], 2, 128)?.unwrap();
+        let RestoredPrefix {
+            pos, state: held, ..
+        } = restarted.restore(&[22, 99], 2, 128, false)?.unwrap();
         assert_eq!(pos, 1);
-        assert_eq!(restarted.restore(&[23, 11], 2, 128)?.unwrap().0, 1);
-        assert!(restarted.restore(&[22], 1, 64)?.is_none());
+        assert_eq!(restarted.restore(&[23, 11], 2, 128, false)?.unwrap().pos, 1);
+        assert!(restarted.restore(&[22], 1, 64, false)?.is_none());
         let key = cache.keys(&[22], 1, 128)?[0].1;
         fs::write(cache.file(&key).unwrap(), b"damaged")?;
-        assert!(cache.restore(&[22], 1, 128)?.is_none());
-        assert!(restarted.restore(&[22], 1, 128)?.is_some());
+        assert!(cache.restore(&[22], 1, 128, false)?.is_none());
+        assert!(restarted.restore(&[22], 1, 128, false)?.is_some());
         // A partially upgraded writer could produce a checksummed but incompatible snapshot.
         cache.save(key, vec![0; 24]);
-        assert!(cache.restore(&[22], 1, 128)?.is_none());
+        assert!(cache.restore(&[22], 1, 128, false)?.is_none());
         assert!(!cache.file(&key).unwrap().exists());
         cache.store(&[22], 1, 128, &state)?;
-        assert!(cache.restore(&[22], 1, 128)?.is_some());
+        assert!(cache.restore(&[22], 1, 128, false)?.is_some());
         restarted.ram_limit = data.len();
         restarted.store(&[24], 1, 128, &state)?;
         assert_eq!(restarted.ram_bytes, data.len());
@@ -539,6 +616,45 @@ mod tests {
         assert!(fs::read_dir(d.path())?.all(|entry| entry.unwrap().file_name() == ".cache.lock"));
         Ok(())
     }
+    #[test]
+    fn tool_target_and_draft_share_one_ram_entry_and_never_replace_canonical_state() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let size = AttentionState::snapshot_bytes(1)?;
+        let mut cache = PrefixCache {
+            identity: Sha256::new(),
+            draft_identity: [0; 32],
+            chunk: 1,
+            capacity: 8,
+            ram_limit: size + 3,
+            disk_limit: 10 * MIB,
+            dir: Some(dir.path().into()),
+            ram: VecDeque::new(),
+            ram_bytes: 0,
+        };
+        let mut bytes = vec![0; size];
+        bytes[..8].copy_from_slice(b"DS4ATT01");
+        bytes[8] = 1;
+        let first = AttentionState::decode_snapshot(&bytes, 1)?;
+        bytes[16] = 17;
+        let second = AttentionState::decode_snapshot(&bytes, 1)?;
+        cache.store_tool(&[13], 1, 128, &first, || Ok(vec![1, 2, 3]))?;
+        cache.store_tool(&[13], 1, 128, &second, || panic!("duplicate handoff"))?;
+        let hit = cache.restore(&[13, 99], 1, 128, true)?.unwrap();
+        assert_eq!(hit.state.encode_snapshot(1)?[16], 0);
+        assert_eq!(&hit.tool_draft.unwrap()[..], &[1, 2, 3]);
+        assert!(cache.restore(&[13], 1, 128, false)?.is_none());
+        assert!(cache.restore(&[12], 1, 128, true)?.is_none());
+        assert!(cache.restore(&[13], 1, 64, true)?.is_none());
+        assert_eq!(dir.path().read_dir()?.count(), 0);
+        cache.store(&[13], 1, 128, &second)?;
+        cache.store_tool(&[13], 1, 128, &first, || Ok(vec![9]))?;
+        let hit = cache.restore(&[13], 1, 128, true)?.unwrap();
+        assert!(hit.tool_draft.is_none());
+        assert_eq!(hit.state.encode_snapshot(1)?[16], 17);
+        assert!(cache.ram_bytes <= cache.ram_limit);
+        Ok(())
+    }
+
     #[test]
     fn concurrent_writers_and_lru_keep_the_disk_budget() -> Result<()> {
         let dir = tempfile::tempdir()?;

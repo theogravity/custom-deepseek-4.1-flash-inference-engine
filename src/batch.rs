@@ -335,7 +335,7 @@ mod tests {
 
         let mut sessions = inputs
             .into_iter()
-            .map(|ids| model.start_request(ids, 2, 0.))
+            .map(|ids| model.start_request(ids, 2, 0., false))
             .collect::<Result<Vec<_>>>()?;
         let mut delivered = vec![Vec::new(); sessions.len()];
         for (ids, step) in delivered

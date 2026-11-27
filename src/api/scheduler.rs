@@ -39,7 +39,13 @@ impl Limits {
 
 pub(super) trait BatchEngine {
     type Session;
-    fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Self::Session>;
+    fn start(
+        &mut self,
+        ids: Vec<u32>,
+        limit: usize,
+        temperature: f32,
+        tools: bool,
+    ) -> Result<Self::Session>;
     fn prefill(session: &Self::Session) -> bool;
     fn processed(session: &Self::Session) -> usize;
     fn step(&mut self, sessions: &mut [&mut Self::Session]) -> Vec<Result<Step>>;
@@ -52,8 +58,14 @@ pub(super) struct ServingModel {
 }
 impl BatchEngine for ServingModel {
     type Session = Session;
-    fn start(&mut self, ids: Vec<u32>, limit: usize, temperature: f32) -> Result<Session> {
-        self.model.start_request(ids, limit, temperature)
+    fn start(
+        &mut self,
+        ids: Vec<u32>,
+        limit: usize,
+        temperature: f32,
+        tools: bool,
+    ) -> Result<Session> {
+        self.model.start_request(ids, limit, temperature, tools)
     }
     fn prefill(session: &Session) -> bool {
         session.is_prefill()
@@ -84,7 +96,7 @@ fn admit<'t, E: BatchEngine>(
     let output = Output::new(wire, &input);
     let session = output
         .start(reply.stream())
-        .and_then(|_| engine.start(input.ids, input.max_tokens, input.temperature));
+        .and_then(|_| engine.start(input.ids, input.max_tokens, input.temperature, input.tools));
     match session {
         Ok(session) => Some(Box::new(Active {
             session,

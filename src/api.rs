@@ -897,7 +897,7 @@ mod tests {
     }
     impl BatchEngine for TestEngine {
         type Session = TestSession;
-        fn start(&mut self, ids: Vec<u32>, limit: usize, _: f32) -> Result<TestSession> {
+        fn start(&mut self, ids: Vec<u32>, limit: usize, _: f32, _: bool) -> Result<TestSession> {
             Ok(TestSession {
                 id: ids[0],
                 rounds: 0,

@@ -170,6 +170,8 @@ pub(crate) struct Session {
     stats: DraftStats,
     points: Vec<usize>,
     next_point: usize,
+    next_tool_checkpoint: Option<usize>,
+    tool_origin: bool,
     reused: usize,
     started: std::time::Instant,
     emitted: usize,
@@ -254,6 +256,7 @@ struct DecodeWork<'a> {
 }
 
 pub struct Model {
+    tool_prefix: bool,
     prefix: PrefixCache,
     spec_k: usize,
     lookup: prompt_lookup::Config,
@@ -285,7 +288,13 @@ impl Model {
                 && cfg["eos_token_id"] == 1,
             "unexpected model configuration"
         );
+        let tool_prefix = match std::env::var("DS4_TOOL_PREFIX").as_deref() {
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            Ok("1") => true,
+            _ => bail!("DS4_TOOL_PREFIX must be 0 or 1"),
+        };
         Ok(Self {
+            tool_prefix,
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
             lookup: prompt_lookup::configured(tok)?,
@@ -345,7 +354,7 @@ impl Model {
         cancelled: impl Fn() -> bool,
         mut emit: impl FnMut(u32) -> bool,
     ) -> Result<usize> {
-        let mut session = self.start_request(input.to_vec(), limit, temperature)?;
+        let mut session = self.start_request(input.to_vec(), limit, temperature, false)?;
         let mut delivered = 0;
         while !session.finished {
             ensure!(!cancelled(), "request cancelled");
@@ -370,6 +379,7 @@ impl Model {
         ids: Vec<u32>,
         limit: usize,
         temperature: f32,
+        tools: bool,
     ) -> Result<Session> {
         let prompt_len = ids.len();
         ensure!(
@@ -387,14 +397,31 @@ impl Model {
             vec![]
         };
         let span = prompt_len.min(128);
-        let (pos, mut cache, mut timing) = points
+        let crate::prefix::RestoredPrefix {
+            pos,
+            state: mut cache,
+            mut timing,
+            tool_draft,
+        } = points
             .last()
-            .and_then(|&last| cached(self.prefix.restore(&ids, last, span), "restore").flatten())
+            .and_then(|&last| {
+                cached(
+                    self.prefix
+                        .restore(&ids, last, span, self.tool_prefix && tools),
+                    "restore",
+                )
+                .flatten()
+            })
             .unwrap_or_default();
+        let tool_origin = tool_draft.is_some();
         let mut draft = (self.spec_k > 0 && limit > 2).then(DraftState::new);
         if pos > 0 && draft.is_some() {
             let (sidecar, read_time) =
-                timed(timing.is_some(), || self.prefix.read_draft(&ids, pos, span));
+                timed(timing.is_some(), || match tool_draft {
+                    Some(bytes) => Ok((!bytes.is_empty())
+                        .then(|| (crate::restore_timing::Tier::Ram, bytes.to_vec()))),
+                    None => self.prefix.read_draft(&ids, pos, span),
+                });
             if let Some(profile) = &mut timing {
                 profile.draft_read(read_time);
             }
@@ -431,6 +458,12 @@ impl Model {
             stats: DraftStats::default(),
             points,
             next_point,
+            tool_origin,
+            next_tool_checkpoint: (tools
+                && self.tool_prefix
+                && self.prefix.enabled()
+                && limit > 1024)
+                .then_some(prompt_len + 1024),
             reused: pos,
             started: std::time::Instant::now(),
             emitted: 0,
@@ -615,26 +648,43 @@ impl Model {
         results.into_iter().map(Option::unwrap).collect()
     }
 
+    fn store_prefix(&mut self, session: &Session, tool: bool) {
+        let pos = session.pos;
+        let span = session.prompt_len.min(128);
+        if tool {
+            let result = self
+                .prefix
+                .store_tool(&session.ids, pos, span, &session.cache, || {
+                    match session.draft.as_ref().filter(|d| d.ready(pos)) {
+                        Some(d) => d.snapshot(&mut self.rt, pos),
+                        None => Ok(Vec::new()),
+                    }
+                });
+            cached(result, "tool store");
+            return;
+        }
+        if cached(
+            self.prefix.store(&session.ids, pos, span, &session.cache),
+            "store",
+        )
+        .is_some()
+        {
+            if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
+                let saved = draft
+                    .snapshot(&mut self.rt, pos)
+                    .and_then(|data| self.prefix.write_draft(&session.ids, pos, span, &data));
+                cached(saved, "DSpark store");
+            }
+        }
+    }
+
     fn prefill_step(&mut self, session: &mut Session) -> Result<Step> {
         let pos = session.pos;
-        let prompt = &session.ids[..session.prompt_len];
-        let span = prompt.len().min(128);
         if session.points.get(session.next_point) == Some(&pos) {
-            if cached(
-                self.prefix.store(prompt, pos, span, &session.cache),
-                "store",
-            )
-            .is_some()
-            {
-                if let Some(draft) = session.draft.as_ref().filter(|d| d.ready(pos)) {
-                    let saved = draft
-                        .snapshot(&mut self.rt, pos)
-                        .and_then(|data| self.prefix.write_draft(prompt, pos, span, &data));
-                    cached(saved, "DSpark store");
-                }
-            }
+            self.store_prefix(session, session.tool_origin);
             session.next_point += 1;
         }
+        let prompt = &session.ids[..session.prompt_len];
         let n = self.chunk.min(prompt.len() - pos);
         let last = pos + n == prompt.len();
         let horizon = session
@@ -789,6 +839,19 @@ impl Model {
         let tokens = proposed[..accepted].to_vec();
         session.pos += committed;
         session.ids.truncate(session.pos);
+        // Wait for a naturally aligned, committed verification round. Changing
+        // its width to reach the boundary would also change the producer.
+        if session
+            .next_tool_checkpoint
+            .is_some_and(|at| session.pos >= at)
+            && session.pos.is_multiple_of(self.chunk)
+        {
+            self.store_prefix(session, true);
+            // Larger contexts produce larger snapshots. Space their writes
+            // further apart while retaining intermediate branches for tools.
+            let spacing = (session.pos / 32).clamp(1024, 8192);
+            session.next_tool_checkpoint = Some(session.pos + spacing);
+        }
         Ok(session.emit(tokens, next))
     }
 }
@@ -842,8 +905,8 @@ mod tests {
         let ids = chat.encode(&tok, &plain)?;
         let mut model = Model::open(&pack, &tok, [0, 1], 256, 8)?;
         model.spec_k = 4; // The base pack also ships its three learned MTP stages.
-        let mut reference = model.start_request(ids.clone(), 16, 0.5)?;
-        let mut rotated = model.start_request(ids, 16, 0.5)?;
+        let mut reference = model.start_request(ids.clone(), 16, 0.5, false)?;
+        let mut rotated = model.start_request(ids, 16, 0.5, false)?;
         reference.rng = Some(StdRng::seed_from_u64(194));
         rotated.rng = reference.rng.clone();
         let dir = tempfile::tempdir()?;
@@ -939,6 +1002,8 @@ mod tests {
                 stats: DraftStats::default(),
                 points: vec![],
                 next_point: 0,
+                next_tool_checkpoint: None,
+                tool_origin: false,
                 reused: 0,
                 started: std::time::Instant::now(),
                 emitted: 0,
