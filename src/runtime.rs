@@ -218,6 +218,10 @@ impl Runtime {
             devices[0] != devices[1],
             "two distinct CUDA devices required"
         );
+        ensure!(
+            !crate::attention::flash_prefill() || cfg!(feature = "flashinfer-prefill"),
+            "DS4_FLASHINFER_PREFILL requires the flashinfer-prefill build feature"
+        );
         crate::moe::recipe_prefill_enabled()?;
         crate::moe::tp2_prefill_enabled()?;
         let mut weights = Weights::open(path)?;

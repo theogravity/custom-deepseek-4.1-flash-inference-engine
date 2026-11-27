@@ -34,6 +34,24 @@ const INDEX_BYTES: usize = INDEX_DIM + 4;
 
 unsafe extern "C" {
     fn ds4_attn_zero(dev: i32, dst: *mut f32, len: usize) -> i32;
+    #[cfg(feature = "flashinfer-prefill")]
+    fn ds4_attn_flash_bytes(pos: i32, batch: i32, compressed_rows: i32, width: i32) -> usize;
+    #[cfg(feature = "flashinfer-prefill")]
+    fn ds4_attn_flash(
+        dev: i32,
+        scratch: *mut c_void,
+        q: *const f32,
+        prior: *const u16,
+        current: *const u16,
+        pos: i32,
+        batch: i32,
+        cache: *const c_void,
+        compressed_rows: i32,
+        ids: *const i32,
+        width: i32,
+        sink: *const f32,
+        out: *mut f32,
+    ) -> i32;
     fn ds4_attn_sparse_bytes(fast: i32, span: i32, width: i32, batch: i32) -> usize;
     fn ds4_attn_capacity(buf: *mut c_void) -> usize;
     fn ds4_attn_growth(buf: *mut c_void, bytes: usize) -> usize;
@@ -1471,6 +1489,11 @@ fn device_select(
     Ok(())
 }
 
+pub(crate) fn flash_prefill() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("DS4_FLASHINFER_PREFILL").is_some_and(|v| v == "1"))
+}
+
 pub(crate) fn fast_attention() -> bool {
     static FAST: OnceLock<bool> = OnceLock::new();
     *FAST.get_or_init(|| std::env::var_os("DS4_FAST_ATTN").is_some_and(|v| v == "1"))
@@ -1860,7 +1883,54 @@ fn apply_span(
 
     // Bound temporary expanded compressed values to 16 MiB per call.
     let fast = fast_attention();
-    let mut t = 0;
+    #[cfg(feature = "flashinfer-prefill")]
+    let used_flash = rt.target_prefill && flash_prefill();
+    #[cfg(not(feature = "flashinfer-prefill"))]
+    let used_flash = false;
+    #[cfg(feature = "flashinfer-prefill")]
+    if used_flash {
+        // A replay may have materialized more source rows than this causal
+        // span sees. Only pack the visible prefix, once for all query tiles.
+        let compressed = group
+            .filter(|_| width != 0)
+            .map_or(0, |(_, ratio)| (pos + batch) / ratio);
+        if let Some((owner, _)) = group.filter(|_| width != 0) {
+            require_state!(
+                state.sources[&owner].values.len() >= compressed * KV_BYTES,
+                "short compressed MLA source"
+            );
+        }
+        let needed = unsafe {
+            ds4_attn_flash_bytes(
+                window_pos as i32,
+                batch as i32,
+                compressed as i32,
+                width as i32,
+            )
+        };
+        let work = scratch(rt, needed)?;
+        cuda_ok(
+            unsafe {
+                ds4_attn_flash(
+                    rt.device,
+                    work,
+                    q_ptr,
+                    ring.data(),
+                    current.as_ptr().cast(),
+                    window_pos as i32,
+                    batch as i32,
+                    values,
+                    compressed as i32,
+                    ids,
+                    width as i32,
+                    sink,
+                    out_ptr,
+                )
+            },
+            "FlashInfer sparse MLA prompt attention",
+        )?;
+    }
+    let mut t = if used_flash { batch } else { 0 };
     while t < batch {
         // Short contexts fit the original single CTA per head. Choose by
         // absolute position so a verification block uses the same kernel as
@@ -1951,6 +2021,8 @@ fn apply_span(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "flashinfer-prefill")]
+    include!("attention_flash_tests.rs");
     use super::*;
 
     #[test]

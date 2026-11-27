@@ -18,3 +18,13 @@ export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noh
 DS4_DRAFTER=code DS4_PREFIX_RAM_MIB=1024 DS4_PREFIX_DISK_MIB=0 DS4_PREFIX_DIR= DS4_PROMPT_LOOKUP=1 DS4_OUTPUT_LOOKUP=repeated DS4_ADAPTIVE_LOOKUP=1 DS4_LOOKUP_K=128 DS4_C1_OUTPUT_CONSENSUS=1 DS4_AGENT_TEXT_CACHE=1 DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=32768 DS4_BATCH_TOPK=1 DS4_EXTEND_REPETITION=1 DS4_HEAD_ROW_TILES=1 DS4_EXPERT_EVICTION=lfu DS4_TEST_DEVICE=0 DS4_TEST_CUDA_DEVICE=0 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
 docker compose -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml -f deploy/profiles/concurrent-coding.yml up --no-build -d --wait
 ```
+
+### FlashInfer SM120 prompt attention
+
+The optional `flashinfer-prefill` feature compiles the DSV4 single- and dual-cache kernels from FlashInfer commit `946200de1ae94fc93fdd0926f0a13afd1fa7f0f1`. Set `DS4_FLASHINFER_DIR` to the checkout root or installed FlashInfer package's `data` directory containing `csrc/` and `include/`. The build verifies the source hashes. On the serving process set `DS4_FLASHINFER_PREFILL=1` to use the kernels during target prompt evaluation. Its prefix snapshots have a separate namespace.
+
+```bash
+cargo test --release --features flashinfer-prefill flash_prefill_workspace
+CUDA_VISIBLE_DEVICES=<inference-gpu-uuid> DS4_TEST_DEVICE=0 \
+  cargo test --release --features flashinfer-prefill cuda_flash_mla -- --ignored --nocapture
+```

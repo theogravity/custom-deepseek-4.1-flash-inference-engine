@@ -287,6 +287,9 @@ __global__ void score_keys(const uint8_t *keys, const float *queries, const floa
 }
 #include "attention_score.cuh"
 #include "attention_index.cuh"
+#ifdef DS4_FLASHINFER_PREFILL
+#include "attention_flash.cuh"
+#endif
 } // namespace
 
 extern "C" void *ds4_attn_buffer_new() { return new(std::nothrow) Buffer; }
@@ -414,6 +417,48 @@ extern "C" int ds4_attn_sparse_fast(int dev, void *scratch, const float *queries
     fast_pv<<<dim3(dim/64,heads/16,batch),block>>>(keys,probs,scales,norm,cols,out);
     return (int)cudaGetLastError();
 }
+
+#ifdef DS4_FLASHINFER_PREFILL
+extern "C" cudaError_t ds4_flash_launch(const __nv_bfloat16 *, const uint8_t *,
+        const int *, const int *, const uint8_t *, const int *, const int *, int, int,
+        const float *, __nv_bfloat16 *, float *);
+
+extern "C" size_t ds4_attn_flash_bytes(int pos, int batch, int compressed_rows, int width) {
+    return FlashWorkspace(pos,batch,compressed_rows,width).layout.used;
+}
+extern "C" int ds4_attn_flash(int dev, void *scratch, const float *queries, const uint16_t *prior,
+        const uint16_t *current, int pos, int batch, const void *cache, int compressed_rows,
+        const int *picks, int width, const float *sink, float *out) {
+    TRY(cudaSetDevice(dev));
+    auto *buf = static_cast<Buffer *>(scratch);
+    FlashWorkspace w(pos,batch,compressed_rows,width);
+    TRY(buf->grow(w.layout.used));
+    auto swa = at<uint8_t>(buf,w.swa), compressed = at<uint8_t>(buf,w.compressed);
+    flash_window_pages<<<w.history + batch + 1,256>>>(reinterpret_cast<const __nv_bfloat16 *>(prior),
+        reinterpret_cast<const __nv_bfloat16 *>(current),pos,w.history,swa);
+    TRY(cudaGetLastError());
+    if (width) {
+        auto records = static_cast<const uint8_t *>(static_cast<const Buffer *>(cache)->ptr);
+        flash_compressed_pages<<<compressed_rows+1,128>>>(records,compressed);
+        TRY(cudaGetLastError());
+    }
+    auto q = at<__nv_bfloat16>(buf,w.q), result = at<__nv_bfloat16>(buf,w.result);
+    auto si = at<int>(buf,w.swa_ids), ei = at<int>(buf,w.extra_ids);
+    auto sl = at<int>(buf,w.swa_len), el = at<int>(buf,w.extra_len);
+    for (int t = 0; t < batch; t += flash_tile) {
+        int rows = std::min(flash_tile, batch-t), count = rows * heads * dim;
+        size_t off = size_t(t) * heads * dim;
+        flash_cast<<<(count+255)/256,256>>>(queries+off,q,count);
+        TRY(cudaGetLastError());
+        flash_indices<<<rows,32>>>(w.history,t,width,w.extra_width,compressed_rows,picks,si,ei,sl,el);
+        TRY(cudaGetLastError());
+        TRY(ds4_flash_launch(q,swa,si,sl,compressed,ei,el,w.extra_width,rows,sink,result,at<float>(buf,w.lse)));
+        flash_cast<<<(count+255)/256,256>>>(result,out+off,count);
+        TRY(cudaGetLastError());
+    }
+    return 0;
+}
+#endif
 
 extern "C" int ds4_attn_scores(int dev, void *scratch, const void *cache, const float *queries,
         const float *weights, const int *ids, int width, int batch, float *out, int score_mode) {

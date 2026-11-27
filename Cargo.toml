@@ -6,6 +6,7 @@ license = "MIT"
 
 [features]
 recipe-prefill = []
+flashinfer-prefill = []
 
 [dependencies]
 anyhow = "1"
