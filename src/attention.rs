@@ -69,7 +69,7 @@ unsafe extern "C" {
         rows: i32,
         picks: *mut i32,
         out_blocks: *mut i32,
-        packed_scores: i32,
+        score_mode: i32,
     ) -> i32;
     fn ds4_attn_buffer_new() -> *mut c_void;
     fn ds4_attn_buffer_free(device: i32, buf: *mut c_void);
@@ -152,7 +152,7 @@ unsafe extern "C" {
         width: i32,
         batch: i32,
         out: *mut f32,
-        packed_scores: i32,
+        score_mode: i32,
     ) -> i32;
 }
 
@@ -1343,7 +1343,7 @@ fn select(
                     width as i32,
                     rows as i32,
                     scores.as_mut_ptr(),
-                    i32::from(packed_index()),
+                    index_score_mode(rt.target_prefill),
                 )
             },
             "scoring compressed index keys",
@@ -1371,9 +1371,20 @@ fn select(
     Ok(())
 }
 
-fn packed_index() -> bool {
+pub(crate) fn prefill_index_mma() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("DS4_PACKED_INDEX").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("DS4_PREFILL_INDEX_MMA").is_some_and(|v| v == "1"))
+}
+
+fn index_score_mode(target_prefill: bool) -> i32 {
+    static PACKED: OnceLock<bool> = OnceLock::new();
+    if target_prefill && prefill_index_mma() {
+        2
+    } else {
+        i32::from(
+            *PACKED.get_or_init(|| std::env::var_os("DS4_PACKED_INDEX").is_none_or(|v| v != "0")),
+        )
+    }
 }
 
 fn gpu_index() -> bool {
@@ -1448,7 +1459,7 @@ fn device_select(
                     } else {
                         ptr::null_mut()
                     },
-                    i32::from(packed_index()),
+                    index_score_mode(rt.target_prefill),
                 )
             },
             "ranking index keys on GPU",
@@ -2365,6 +2376,84 @@ mod tests {
 
     #[test]
     #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
+    fn cuda_index_mma_matches_quantized_scores() -> Result<()> {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
+        let mut rng = StdRng::seed_from_u64(0x8e39);
+        let rows = 9;
+        let count = 16407;
+        let mut packed = Vec::new();
+        for i in 0..count {
+            let gain = 2f32.powi((i % 5) - 2);
+            let row: [f32; INDEX_DIM] = std::array::from_fn(|_| rng.gen_range(-gain..gain));
+            pack_index_keys(&row, &mut packed);
+        }
+        // Masked lanes and partially filled warps must tolerate stale NaN
+        // data in the cache row used to pad the MMA.
+        packed[..INDEX_DIM].fill(0x7f);
+        let keys = upload(device, &packed)?;
+        let mut q: Vec<f32> = (0..rows * INDEX_HEADS * INDEX_DIM)
+            .map(|_| rng.gen_range(-2.0..2.0))
+            .collect();
+        fp8_qdq(&mut q, INDEX_DIM);
+        let q = upload(device, &q)?;
+        let w: Vec<f32> = (0..rows * INDEX_HEADS)
+            .map(|_| rng.gen_range(-3.0..3.0))
+            .collect();
+        let w = upload(device, &w)?;
+        for width in [1usize, 15, 16, 17, 255, 256, 257, 613, 16_391] {
+            let ids: Vec<i32> = (0..rows * width)
+                .map(|i| {
+                    let (r, c) = (i / width, i % width);
+                    if r == 1 || c % 7 == r % 7 || c >= width.saturating_sub(r) {
+                        -1
+                    } else {
+                        ((c / 2 * 157 + r * 13) % count as usize) as i32
+                    }
+                })
+                .collect();
+            for filtered in [false, true] {
+                let score = |mode| -> Result<Vec<f32>> {
+                    let scratch = upload(device, &vec![0xffu8; rows * width * 8 + 512])?;
+                    let mut out = vec![f32::NAN; rows * width];
+                    cuda_ok(
+                        unsafe {
+                            ds4_attn_scores(
+                                device,
+                                scratch.ptr.as_ptr(),
+                                keys.ptr.as_ptr(),
+                                q.data(),
+                                w.data(),
+                                if filtered { ids.as_ptr() } else { ptr::null() },
+                                width as i32,
+                                rows as i32,
+                                out.as_mut_ptr(),
+                                mode,
+                            )
+                        },
+                        "checking prompt index scores",
+                    )?;
+                    Ok(out)
+                };
+                let reference = score(0)?;
+                let actual = score(2)?;
+                for (i, (&a, &b)) in actual.iter().zip(&reference).enumerate() {
+                    if filtered && ids[i] < 0 {
+                        assert_eq!(a, f32::NEG_INFINITY);
+                    } else {
+                        assert!(
+                            (a - b).abs() <= 1e-5 + 3e-6 * b.abs(),
+                            "width={width} filtered={filtered} slot={i} expected={b} actual={a}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_DEVICE on an RTX PRO 6000"]
     fn cuda_index_matches_cpu_ranking_across_causal_thresholds() -> Result<()> {
         let device: i32 = std::env::var("DS4_TEST_DEVICE")?.parse()?;
         let short = upload(device, &[-9i32; 6])?;
@@ -2375,6 +2464,11 @@ mod tests {
         let mut host = [0i32; 6];
         read(&short, &mut host)?;
         assert_eq!(host, [0, -1, 0, -1, 0, 1]);
+        check_index_ranking(device, 1)?;
+        check_index_ranking(device, 2)
+    }
+
+    fn check_index_ranking(device: i32, score_mode: i32) -> Result<()> {
         for (pos, ratio, n, zero) in [
             (1020, 2, 129, false),
             (1530, 1, 7, false),
@@ -2441,7 +2535,7 @@ mod tests {
                         } else {
                             ptr::null_mut()
                         },
-                        1,
+                        score_mode,
                     )
                 },
                 "index fixture",
@@ -2474,7 +2568,7 @@ mod tests {
                             n as i32,
                             picks.data(),
                             ptr::null_mut(),
-                            1,
+                            score_mode,
                         )
                     },
                     "batched filtered index fixture",
@@ -2522,7 +2616,7 @@ mod tests {
                             1,
                             picks.data(),
                             ptr::null_mut(),
-                            1,
+                            score_mode,
                         )
                     },
                     "filtered index fixture",
@@ -2751,7 +2845,7 @@ mod tests {
             let scratch = GpuBuffer::new(dev)?;
             let has_blocks = width > TOP_BLOCKS * BLOCK;
             let pos = width - n;
-            let run = |packed_scores| {
+            let run = |score_mode| {
                 cuda_ok(
                     unsafe {
                         ds4_attn_index_select(
@@ -2771,7 +2865,7 @@ mod tests {
                             } else {
                                 ptr::null_mut()
                             },
-                            packed_scores,
+                            score_mode,
                         )
                     },
                     "index benchmark selection",
@@ -2831,13 +2925,14 @@ mod tests {
             };
             let scalar_us = time_gpu(0)?;
             let packed_us = time_gpu(1)?;
+            let mma_us = time_gpu(2)?;
             let start = std::time::Instant::now();
             for _ in 0..3 {
                 std::hint::black_box(reference()?);
             }
             let host_us = start.elapsed().as_secs_f64() * 1e6 / 3.;
             eprintln!(
-                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us CPU-rank={host_us:.1}us",
+                "index rows={n} positions={width} workspace={} bytes scalar={scalar_us:.1}us packed={packed_us:.1}us mma={mma_us:.1}us CPU-rank={host_us:.1}us",
                 bytes
             );
         }

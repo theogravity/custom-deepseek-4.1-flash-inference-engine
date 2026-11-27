@@ -51,6 +51,9 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
     if std::env::var_os("DS4_PREFILL_LT").is_some_and(|v| v == "1") {
         h.update(b"prefill cuBLASLt MXFP8 v1");
     }
+    if crate::attention::prefill_index_mma() {
+        h.update(b"SM120 prompt index BF16 MMA v1");
+    }
     if std::env::var_os("DS4_RECIPE_PREFILL").is_some_and(|v| v == "1") {
         h.update(b"Diffbot S8B hot expert prefill v1");
     }
