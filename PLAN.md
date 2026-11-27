@@ -89,3 +89,7 @@ Longer repetition proposals and vocabulary-head row tiling reached 386.7 tok/s o
 ## Returning from Pi tools at 375 W, 2026-11-26
 
 Preparing canonical history on idle GPUs reduced the wait after a simulated two-second tool from 4.17–4.22 s to 2.67 s. With six seconds available it fell to 0.097 s. Immediate replies took 4.18 s. All 54 captured-response replays matched. [Experiment, full-window checks and deployment](TOOL-RETURN.md)
+
+## Coding-agent optimization round, 2026-11-26
+
+Caching ordinary text tokens cut the median wait for first output on changing 404k histories from 0.85–0.93 s to 0.48 s. Six warm 404k coding streams delivered 299.7 aggregate tok/s over the whole request wave. Two-score interleaving in the DSpark head and bulk prefix-key hashing remain experimental. [Results and three checkpoints](AGENT-ROUND3.md)

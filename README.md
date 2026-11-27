@@ -4,19 +4,19 @@ A standalone Rust and CUDA inference engine for the Diffbot 3-bit EXL3 pack of D
 
 The native benchmarks cover code generation at 404k context and six independent full windows at 375 W. The published edit benchmark has also been replayed at both power limits. [Long-context measurements](LONG-CONTEXT-BENCHMARK.md) · [Published comparison](UPSTREAM-COMPARISON.md)
 
-For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md) · [Tool-return latency](TOOL-RETURN.md)
+For agentic coding, the Pi benchmark follows a Go bug from the first source read through edits, test runs and the final response. It records time to passing tests and whether the agent finished. [Agentic coding benchmark](AGENTIC-CODING.md) · [Tool-return latency](TOOL-RETURN.md) · [Long-history coding requests](AGENT-ROUND3.md)
 
 ## Run on this workstation
 
-The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. [Performance and checkpoints](DECODE-ROUND2.md)
+The measured decode profile is installed locally on this workstation. It uses longer verified output repetition for single-client drafting and reuses vocabulary-head weights across verification rows. It retains tiled attention ranking, shared prefix restoration and LFU expert eviction. After a coding tool call, idle GPUs prepare up to 32,768 tokens of history for the next request. The HTTP server reuses tokenized text when an agent sends the same file or tool result in a later turn. [Performance and checkpoints](DECODE-ROUND2.md)
 
 ```sh
 cd ~/llm/ds4-flash-rs
 install -d -m 700 "${DS4_HOST_PREFIX_DIR:-$HOME/.cache/ds4-flash-rs/prefix}"
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.agentic.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
 ```
 
-For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](TOOL-RETURN.md#capacity-and-deployment)
+For a fresh installation, build the named image first using Rust, a C++ host compiler and CUDA 13 with sm_120 support. CUDA 13.5 and Rust 1.100 were used here. The Docker image packages the host-built executable and mounts the host toolkit read-only. [Build and rollback instructions](AGENT-ROUND3.md#build-and-rollback)
 
 This selects the Rust engine for the existing DeepSeek service on port 8001 and uses its existing secret for authentication. It replaces the DeepSeek container in the `models` Compose project. The Rust server drains accepted requests on shutdown. Compose allows up to four minutes before forcing a stop. Finish active requests before switching. If another rotation model holds the GPUs, stop that model with `model-cli stop` first. The Compose file selects host GPUs 1 and 2. LiteLLM continues to serve clients on port 4000. The prior LFU and base LRU images have separate launch commands. [Checkpoint profiles](EXPERT-CACHE-EXPERIMENT.md#running-the-candidate-on-this-workstation)
 
@@ -69,7 +69,7 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 For example, select the released drafter with the following command. Omit the environment overrides to return to the deployed profile.
 
 ```sh
-DS4_DRAFTER=released docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml up --no-build -d --wait
+DS4_DRAFTER=released docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
 ```
 
 For a target-only control, set both `DS4_DRAFTER=none` and `DS4_PROMPT_LOOKUP=0`. Standalone commands also accept `--drafter code|released|none` and `--spec-k N`. Compose sets the numerical and hardware switches used in the benchmarks. [Deployment configuration](compose.yml)
@@ -127,10 +127,10 @@ python3 tools/kv_rotation.py --agents 8 --input 12000 --output 512 --expect-tier
 To run the full Rust test suite, drain the server and select the two inference GPU UUIDs. The suite includes checkpoint tokenizer, real EXL3, attention, peer-copy, speculative rollback and sampling fixtures.
 
 ```sh
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml stop
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml stop
 export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noheader | awk -F', ' '/RTX PRO 6000/{print $2}' | paste -sd,)"
-DS4_PROMPT_LOOKUP=1 DS4_OUTPUT_LOOKUP=single DS4_ADAPTIVE_LOOKUP=1 DS4_LOOKUP_K=128 DS4_C1_OUTPUT_CONSENSUS=1 DS4_BATCH_TOPK=1 DS4_EXTEND_REPETITION=1 DS4_HEAD_ROW_TILES=1 DS4_EXPERT_EVICTION=lfu DS4_TEST_DEVICE=0 DS4_TEST_CUDA_DEVICE=0 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml up --no-build -d --wait
+DS4_PROMPT_LOOKUP=1 DS4_OUTPUT_LOOKUP=single DS4_ADAPTIVE_LOOKUP=1 DS4_LOOKUP_K=128 DS4_C1_OUTPUT_CONSENSUS=1 DS4_AGENT_TEXT_CACHE=1 DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=32768 DS4_BATCH_TOPK=1 DS4_EXTEND_REPETITION=1 DS4_HEAD_ROW_TILES=1 DS4_EXPERT_EVICTION=lfu DS4_TEST_DEVICE=0 DS4_TEST_CUDA_DEVICE=0 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 cargo test --release --locked -- --include-ignored --test-threads=1
+docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
 ```
 
 ## Measurements on this workstation

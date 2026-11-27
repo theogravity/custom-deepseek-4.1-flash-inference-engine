@@ -1,0 +1,540 @@
+{
+  "date": "2026-11-26",
+  "power_caps_w": {
+    "gpu1": 375,
+    "gpu2": 375,
+    "cpu": 225
+  },
+  "build": {
+    "commit": "e5486e8e197dd9f2dbdfd11e186f2021a32d6d58",
+    "image": "sha256:983107c9a28b26a9c486431b4a6a9d25ef9fee386e1fa13f790eaac326ca0522",
+    "binary_sha256": "c44f8b14f90f79d6538baca12e23f75168657e5b43309d0790640ebba0e06997",
+    "test_binary_sha256": "c5a264f06c34ec6798cf7183b8d72aec761842450532e5c31cf97ad1b1d5ac16"
+  },
+  "variant_identity": {
+    "text": {
+      "image": "sha256:34190883f05d4f291fca5c083d5cb4df4dfe1614eca886651dfd5e8b4372958d",
+      "elf_sha256": "126659c6077992ce919016b5822b8246a9c6bf7a7f3f516e3bcedfba9813e3fa",
+      "text_markov_hash_flags_present": [
+        true,
+        false,
+        false
+      ]
+    },
+    "markov": {
+      "image": "sha256:07cc7a523a801126372917b57c749c204ab9e6a5051b9f51dc540bc8fadc6d05",
+      "elf_sha256": "e0afdc3408c0930c6f4b9390081179aa7b2911f18ea347d45c133312b7e2aeb8",
+      "text_markov_hash_flags_present": [
+        true,
+        true,
+        false
+      ]
+    },
+    "hash": {
+      "image": "sha256:1ee8adaea239742f885e73b7b88cae948fda7ad86e088f4cc02a557d5a8c44ae",
+      "elf_sha256": "879b0860948e8a7ab016bf39f730fa5a111ad9d868780cb003158869169da0a2",
+      "text_markov_hash_flags_present": [
+        true,
+        false,
+        true
+      ]
+    }
+  },
+  "checkpoints": {
+    "checkpoint-2026-11-26-agent3-01-text": "e5486e8e197dd9f2dbdfd11e186f2021a32d6d58",
+    "checkpoint-2026-11-26-agent3-02-markov": "b682ef9caeda10be9749153c4f292cb322cc88b6",
+    "checkpoint-2026-11-26-agent3-03-prefix": "696c8e94aa5a682eb2989975a232a77efb225199"
+  },
+  "tested_images": {
+    "text": [
+      "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274",
+      "sha256:34190883f05d4f291fca5c083d5cb4df4dfe1614eca886651dfd5e8b4372958d",
+      "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274"
+    ],
+    "markov": [
+      "sha256:07cc7a523a801126372917b57c749c204ab9e6a5051b9f51dc540bc8fadc6d05",
+      "sha256:07cc7a523a801126372917b57c749c204ab9e6a5051b9f51dc540bc8fadc6d05",
+      "sha256:07cc7a523a801126372917b57c749c204ab9e6a5051b9f51dc540bc8fadc6d05"
+    ],
+    "hash": [
+      "sha256:1ee8adaea239742f885e73b7b88cae948fda7ad86e088f4cc02a557d5a8c44ae",
+      "sha256:1ee8adaea239742f885e73b7b88cae948fda7ad86e088f4cc02a557d5a8c44ae",
+      "sha256:1ee8adaea239742f885e73b7b88cae948fda7ad86e088f4cc02a557d5a8c44ae"
+    ],
+    "release": [
+      "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274",
+      "sha256:983107c9a28b26a9c486431b4a6a9d25ef9fee386e1fa13f790eaac326ca0522",
+      "sha256:13b9afbc1cd0259eaba91e4beea64f3b3775fb19efe0220ab12e45dd9a64d274"
+    ]
+  },
+  "release": {
+    "image": "ds4-flash-rs:agent-coding-20261126",
+    "worktree": "clean-src",
+    "flags": {
+      "DS4_AGENT_TEXT_CACHE": "1"
+    },
+    "commit": "e5486e8e197dd9f2dbdfd11e186f2021a32d6d58"
+  },
+  "same_host_medians": {
+    "text": {
+      "pi_median": {
+        "aba": [
+          178.0292903796184,
+          178.4510088805,
+          178.7334532589753
+        ],
+        "gain_vs_controls_pct": [
+          0.236881526619781,
+          -0.15802546939326367
+        ]
+      },
+      "pi_ttft": {
+        "aba": [
+          0.04528232199663762,
+          0.04328930750489235,
+          0.04456660350115271
+        ],
+        "gain_vs_controls_pct": [
+          4.401308068727705,
+          2.8660384591061017
+        ]
+      },
+      "long_decode": {
+        "aba": [
+          253.5472359590047,
+          257.0193953394804,
+          256.7443308638396
+        ],
+        "gain_vs_controls_pct": [
+          1.3694329450458342,
+          0.10713555961112675
+        ]
+      },
+      "long_ttft": {
+        "aba": [
+          0.5971880504948786,
+          0.13651572150411084,
+          0.5836412729986478
+        ],
+        "gain_vs_controls_pct": [
+          77.14024562430832,
+          76.6096525691686
+        ]
+      },
+      "long_wall": {
+        "aba": [
+          195.98165989347206,
+          240.87109482355902,
+          198.78432817227215
+        ],
+        "gain_vs_controls_pct": [
+          22.904916181691238,
+          21.172074799987882
+        ]
+      }
+    },
+    "markov": {
+      "pi_median": {
+        "aba": [
+          178.00473829907781,
+          178.41010363807737,
+          178.43743566813185
+        ],
+        "gain_vs_controls_pct": [
+          0.2277272744944936,
+          -0.015317430421557532
+        ]
+      },
+      "pi_ttft": {
+        "aba": [
+          0.0432385175008676,
+          0.04339481300121406,
+          0.04323574700538302
+        ],
+        "gain_vs_controls_pct": [
+          -0.36147284731333773,
+          -0.3679038916830413
+        ]
+      },
+      "long_decode": {
+        "aba": [
+          256.03733816012243,
+          256.8192437911754,
+          256.19306523445397
+        ],
+        "gain_vs_controls_pct": [
+          0.3053873457175005,
+          0.24441666918204596
+        ]
+      },
+      "long_ttft": {
+        "aba": [
+          0.13536245049908757,
+          0.13738005999766756,
+          0.1363700500005507
+        ],
+        "gain_vs_controls_pct": [
+          -1.4905237686972717,
+          -0.7406391631540776
+        ]
+      },
+      "long_wall": {
+        "aba": [
+          240.1513725983916,
+          240.37345158355936,
+          240.09827700292692
+        ],
+        "gain_vs_controls_pct": [
+          0.09247458499399563,
+          0.11460914425016622
+        ]
+      }
+    },
+    "hash": {
+      "pi_median": {
+        "aba": [
+          178.4313638466054,
+          179.2189977595487,
+          178.55853828299732
+        ],
+        "gain_vs_controls_pct": [
+          0.44142122548613827,
+          0.3698840071733933
+        ]
+      },
+      "pi_ttft": {
+        "aba": [
+          0.04317295200598892,
+          0.042667574001825415,
+          0.04286676550691482
+        ],
+        "gain_vs_controls_pct": [
+          1.1705894099930836,
+          0.46467584557381425
+        ]
+      },
+      "long_decode": {
+        "aba": [
+          256.5600430119829,
+          256.9520093951402,
+          256.16152649749375
+        ],
+        "gain_vs_controls_pct": [
+          0.15277764166066188,
+          0.30858767452501823
+        ]
+      },
+      "long_ttft": {
+        "aba": [
+          0.13657411149324616,
+          0.1349914335005451,
+          0.13964625150401844
+        ],
+        "gain_vs_controls_pct": [
+          1.1588418737612183,
+          3.3332924824977406
+        ]
+      },
+      "long_wall": {
+        "aba": [
+          240.51335564170284,
+          241.17733217429378,
+          240.1005835472851
+        ],
+        "gain_vs_controls_pct": [
+          0.2760663875897462,
+          0.44845731363940544
+        ]
+      }
+    },
+    "release": {
+      "pi_median": {
+        "aba": [
+          178.46103191547027,
+          178.7617295097508,
+          178.3900323933724
+        ],
+        "gain_vs_controls_pct": [
+          0.16849481987919468,
+          0.20836204321033058
+        ]
+      },
+      "pi_ttft": {
+        "aba": [
+          0.04536008650029544,
+          0.04273632250260562,
+          0.045248616494063754
+        ],
+        "gain_vs_controls_pct": [
+          5.784301133713077,
+          5.552200677312924
+        ]
+      },
+      "long_decode": {
+        "aba": [
+          256.4057960809389,
+          256.59134022236276,
+          253.9660513830674
+        ],
+        "gain_vs_controls_pct": [
+          0.07236347393850817,
+          1.0337164455636483
+        ]
+      },
+      "long_ttft": {
+        "aba": [
+          0.6273097244993551,
+          0.13684598799591186,
+          0.6221768175018951
+        ],
+        "gain_vs_controls_pct": [
+          78.18525958526688,
+          78.00528979119427
+        ]
+      },
+      "long_wall": {
+        "aba": [
+          195.23932575876356,
+          240.42978080150294,
+          193.47029818197478
+        ],
+        "gain_vs_controls_pct": [
+          23.146184748955957,
+          24.272192197356766
+        ]
+      },
+      "six_decode": {
+        "aba": [
+          299.5170950744615,
+          304.4996025272094,
+          304.720297662643
+        ],
+        "gain_vs_controls_pct": [
+          1.663513547201445,
+          -0.07242547907916341
+        ]
+      },
+      "six_wall": {
+        "aba": [
+          282.90665481544784,
+          299.6795743859513,
+          286.4368216934638
+        ],
+        "gain_vs_controls_pct": [
+          5.928782262631871,
+          4.623271761707892
+        ]
+      }
+    }
+  },
+  "mixed_workload_control_candidate_control": {
+    "short-edit": [
+      383.06742868341894,
+      385.62078729015354,
+      383.70899364529936
+    ],
+    "long-c1": [
+      241.84947028453928,
+      241.20727725988488,
+      241.44159939295224
+    ]
+  },
+  "changing_history": {
+    "exact_responses": 21,
+    "count_s": [
+      0.4451424120052252,
+      0.0019342895029694773,
+      0.46624855799746
+    ],
+    "ttft_s": [
+      0.8473358675037161,
+      0.4815582945011556,
+      0.9299464174982859
+    ],
+    "reference": [
+      {
+        "wire": "2a8f8adbc51b03b3a9fc7109659455d37061540b3c708e7aeb4e67c20c97fae8",
+        "tokens": 404137,
+        "ids": "3a7fa7003a1ef1c1a19efe6b1589e5749b31a24f8d1dc82c6708d0eee3285df0"
+      },
+      {
+        "wire": "f5a6e5ce8a32b9fbfbb76ac7342081df44063abd237ee8a8ddbcbb43d4c16071",
+        "tokens": 404141,
+        "ids": "a8adf40e387ac25285c4fba783af71dc6bba887b40bf1b21bece4cfca8a11306"
+      },
+      {
+        "wire": "2ae0e015bc088e3bc4697cec1649f66106237e22423a2ecceb694f492afdfabb",
+        "tokens": 404143,
+        "ids": "4389547e40b69ce8a19cdcb01f61c886050f223ce0c1bcc19500a772bff32413"
+      },
+      {
+        "wire": "d1a6c40c7b9be9845aaa415cbe9af81d3ceeb24105c617b884dbcae237f0df98",
+        "tokens": 404146,
+        "ids": "65fb4246180e11dcc15d47aa45d9a152f04d60d2ddf7d0af5c85033e3c47ede8"
+      },
+      {
+        "wire": "52a4beef41e2c3089cca8180258398eaa5bda4b28c87d511cfa18400ce8dbd4d",
+        "tokens": 404151,
+        "ids": "7472085af4117bb0c6c2ab3d438fa78c165121aca0fa46be2fb42521746bb4de"
+      },
+      {
+        "wire": "f2f87a1eb7fba79349cd4c4310e0528b18684f79557846c3fec7973f42e31d3a",
+        "tokens": 404162,
+        "ids": "1deaa74e39f1c5664d9c201ec6fe74a2218ad942f46ea33b7882f02e49c32c4a"
+      },
+      {
+        "wire": "aae8d86cdd502c77f5556458c06d87b4de2e35f9ef26f55f4e0427b2c02cfdcf",
+        "tokens": 404172,
+        "ids": "39bbd9c72aa22ed5fd8c9814b723f48cd4277d783262e108c7c6800666da3651"
+      }
+    ]
+  },
+  "hash_lookup_median_ms": {
+    "target_lookup_read_ms": [
+      1.529373,
+      0.807249,
+      1.546233
+    ],
+    "draft_lookup_read_ms": [
+      1.5521875,
+      0.807044,
+      1.5551724999999998
+    ]
+  },
+  "full_validation": {
+    "image": "sha256:983107c9a28b26a9c486431b4a6a9d25ef9fee386e1fa13f790eaac326ca0522",
+    "pi-tool-exchange": [
+      {
+        "wire_sha": "70ae5ffe20832f3163708eebc2cb250c6ca149ca57281534883d6d302073a293",
+        "ordered_output_sha": "dd3f5ac04a647ea44663408fe61c60b80de889bbd4fe98fcf56733a77d2df26e",
+        "prompt": 2780,
+        "tokens": 4103,
+        "finish": "tool_calls"
+      },
+      {
+        "wire_sha": "3ae42ddc73773e3d8784eb4003f960b83328115e813189fbf978346e81eaf047",
+        "ordered_output_sha": "01d994a7a221529098d4085030e3a7dde35f23b0c0eff74669355083690447b7",
+        "prompt": 6908,
+        "tokens": 62,
+        "finish": "tool_calls"
+      },
+      {
+        "wire_sha": "446b8e1441caf84964125c1497286df6f7998b8c4ee9097f796f33b1643604d3",
+        "ordered_output_sha": "a959a2660aeba410fcdac04b01d81d422c206f3d7d218d874247fc0ffc6268fd",
+        "prompt": 6993,
+        "tokens": 542,
+        "finish": "tool_calls"
+      }
+    ],
+    "needles": [
+      266174,
+      520362
+    ],
+    "short-edit": {
+      "samples": [
+        376.0766032356998,
+        383.1616728640213,
+        383.3076426289136,
+        383.70044657151686,
+        385.83775909994966,
+        385.847779355354
+      ],
+      "median": 383.50404460021525
+    },
+    "long-c1": {
+      "samples": [
+        225.2830005378963,
+        233.8495290452887,
+        239.98312468728727,
+        242.97356573000962,
+        245.64808329257616,
+        246.92068225174557
+      ],
+      "median": 241.47834520864845
+    },
+    "six-full-waves": 3,
+    "eight-ram": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "passed": true,
+      "concurrent": 8,
+      "total_including_controls": 16,
+      "io": {
+        "ram_reads": 8,
+        "ram_writes": 8,
+        "disk_reads": 0,
+        "disk_writes": 0,
+        "read_failures": 0,
+        "write_failures": 0
+      }
+    },
+    "eight-disk": {
+      "peak_resident": 6,
+      "peak_swapped": 2,
+      "passed": true,
+      "concurrent": 8,
+      "total_including_controls": 16,
+      "io": {
+        "ram_reads": 0,
+        "ram_writes": 0,
+        "disk_reads": 8,
+        "disk_writes": 8,
+        "read_failures": 0,
+        "write_failures": 0
+      }
+    },
+    "gpu-tests": 95,
+    "memory": {
+      "context-needles": {
+        "min_free_mib": [
+          524,
+          514,
+          238475
+        ],
+        "peak_sampled_cgroup_anon_mib": 2043.36328125
+      },
+      "short-edit": {
+        "min_free_mib": [
+          516,
+          512,
+          238106
+        ],
+        "peak_sampled_cgroup_anon_mib": 2119.80078125
+      },
+      "long-c1": {
+        "min_free_mib": [
+          380,
+          512,
+          237024
+        ],
+        "peak_sampled_cgroup_anon_mib": 2857.5859375
+      },
+      "six-full": {
+        "min_free_mib": [
+          318,
+          514,
+          232770
+        ],
+        "peak_sampled_cgroup_anon_mib": 7546.74609375
+      },
+      "eight-ram": {
+        "min_free_mib": [
+          27724,
+          24550,
+          233264
+        ],
+        "peak_sampled_cgroup_anon_mib": 6232.8671875
+      },
+      "eight-disk": {
+        "min_free_mib": [
+          26792,
+          23922,
+          234467
+        ],
+        "peak_sampled_cgroup_anon_mib": 4609.55859375
+      }
+    }
+  },
+  "excluded_release_reason": "Earlier release results came from an unintended shared-target binary and were excluded.",
+  "raw_archive": "~/.cache/ds4-flash-rs/profiles/agent-round3-20261126/"
+}
