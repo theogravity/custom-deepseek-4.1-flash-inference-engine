@@ -59,6 +59,7 @@ struct Buffer {
 struct Context {
   prefill_dense::Executor lt;
   bool wide_mx = false;
+  bool wide_blas = false;
   int device;
   cublasHandle_t blas = nullptr;
   Buffer input, short_input, output, partial;
@@ -84,6 +85,8 @@ extern "C" int ds_dense_create(int device, void **out) {
   c->device = device;
   const char *wide = std::getenv("DS4_PREFILL_LT");
   c->wide_mx = wide && std::strcmp(wide, "1") == 0;
+  const char *wide_blas = std::getenv("DS4_PREFILL_BLAS");
+  c->wide_blas = wide_blas && std::strcmp(wide_blas, "1") == 0;
   auto e = cublasCreate(&c->blas);
   if (e != CUBLAS_STATUS_SUCCESS) {
     delete c;
@@ -224,10 +227,17 @@ __global__ void round_bf16(float *data, size_t n) {
 static int mx_splits(int rows, int cols) {
   return std::max(1, std::min(cols / 32, (512 * 64 + rows - 1) / rows));
 }
+// Stable verification kernels and dense cuBLAS use the same weight storage.
+static int projection_mode(Context *c, int mode, int batch, int prefill) {
+  if (c->wide_blas && prefill && batch > 128 && (mode == 5 || mode == 6))
+    return mode == 5 ? 0 : 1;
+  return mode;
+}
 // Scratch buffers release their old allocation before growing. Reserve the
 // net increase on this device while packed expert slots can still be evicted.
 extern "C" size_t ds_dense_growth(Context *c, int rows, int cols, int batch,
                                   int groups, int mode, int full_rows, int prefill) {
+  mode = projection_mode(c, mode, batch, prefill);
   const bool stable = mode == 5 || mode == 6;
   const bool packed = mode == 4 || mode == 7;
   size_t input = mode != 0 && mode != 3 && !stable
@@ -248,6 +258,7 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
                           int rows, int cols, int batch, int groups, int mode,
                           int round_output, int prefill, int mx_tiles, int full_rows) {
   CUDA(cudaSetDevice(c->device));
+  mode = projection_mode(c, mode, batch, prefill);
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
   if (c->wide_mx && mode==4 && prefill && batch>128)
     return c->lt.multiply(w,x,y,rows,cols,batch,groups,round_output);
@@ -333,6 +344,7 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
 extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
                        int rows, int cols, int batch, int groups, int mode) {
   CUDA(cudaSetDevice(c->device));
+  mode = projection_mode(c, mode, batch, prefill);
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
   if (c->input.resize(nx * 4) || c->output.resize(ny * 4))
     return -1;

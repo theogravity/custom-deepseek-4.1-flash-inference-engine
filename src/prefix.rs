@@ -51,6 +51,9 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
     if std::env::var_os("DS4_PREFILL_LT").is_some_and(|v| v == "1") {
         h.update(b"prefill cuBLASLt MXFP8 v1");
     }
+    if std::env::var_os("DS4_PREFILL_BLAS").is_some_and(|v| v == "1") {
+        h.update(b"wide cuBLAS FP32/BF16 prefill v1");
+    }
     if crate::model::bounded_replay()? {
         h.update(b"bounded decoder tail with full source KV v2");
     }
