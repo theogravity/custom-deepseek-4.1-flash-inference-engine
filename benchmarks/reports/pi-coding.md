@@ -1,6 +1,6 @@
 # Pi coding a Go fix on the native engine
 
-The selected Rust/CUDA engine brought the final parser to passing public tests in **119.6–120.4 seconds** on its one clean `xhigh` completion. Pi finished that session at **155.0 seconds** after eight model calls, nine tools and 25,750 generated tokens. The other two attempts ended at the token limit and the wall-time limit. The 386.7 tok/s recorded on a fixed, repetitive edit measures a different workload. [Structured-edit benchmark](DECODE-ROUND2.md)
+The selected Rust/CUDA engine brought the final parser to passing public tests in **119.6–120.4 seconds** on its one clean `xhigh` completion. Pi finished that session at **155.0 seconds** after eight model calls, nine tools and 25,750 generated tokens. The other two attempts ended at the token limit and the wall-time limit. The 386.7 tok/s recorded on a fixed, repetitive edit measures a different workload. [Structured-edit benchmark](decode-round-2.md)
 
 ## Workload
 
@@ -24,7 +24,7 @@ For completed streams, the public-test timing bounds use the first passing test 
 
 In the first control's third launch, the final parser passed the public tests at 85.4–86.7 seconds. Pi then issued two more model calls before its final request. That last request generated the full 64,000 tokens in 104.2 seconds. The final tree passed the held-out tests, and Pi reported the output limit.
 
-On the deployed engine's clean run, one turn generated 11,421 tokens before the next tool result came back. That next model call took 12.0 seconds to deliver its first event. Across eight calls the engine reused 80,128 of 104,164 input tokens. That profile stored prefix checkpoints during input processing. A follow-up captured another complete Pi tool exchange and measured the effect of preparing its generated history while the tool was running. [Tool-return latency](TOOL-RETURN.md)
+On the deployed engine's clean run, one turn generated 11,421 tokens before the next tool result came back. That next model call took 12.0 seconds to deliver its first event. Across eight calls the engine reused 80,128 of 104,164 input tokens. That profile stored prefix checkpoints during input processing. A follow-up captured another complete Pi tool exchange and measured the effect of preparing its generated history while the tool was running. [Tool-return latency](tool-return.md)
 
 ## Pi reasoning effort
 
@@ -46,6 +46,6 @@ Streaming decode divides 255 token intervals by the time from the first to last 
 
 ## Scope
 
-This is one extracted historical bug, repeated with three session identifiers per profile. Tool output and later model requests can differ between launches. Full-task wall times describe observed behavior on this fixture. Earlier 25.6k edit streams, 404k code continuations and six-client waves measure other parts of the serving workload. [Decode and concurrency measurements](DECODE-ROUND2.md)
+This is one extracted historical bug, repeated with three session identifiers per profile. Tool output and later model requests can differ between launches. Full-task wall times describe observed behavior on this fixture. Earlier 25.6k edit streams, 404k code continuations and six-client waves measure other parts of the serving workload. [Decode and concurrency measurements](decode-round-2.md)
 
-The fixture, held-out tests, Pi driver, captured benchmark-only request and per-turn raw results are archived on this workstation in `~/.cache/ds4-flash-rs/profiles/agentic-coding-pi-20261126/`. The repository receipt includes request hashes, test observations, timing bounds and every capped replay. [Machine-readable measurements](results/agentic-coding-pi.json)
+The fixture, held-out tests, Pi driver, captured benchmark-only request and per-turn raw results are archived on this workstation in `~/.cache/ds4-flash-rs/profiles/agentic-coding-pi-20261126/`. The repository receipt includes request hashes, test observations, timing bounds and every capped replay. [Machine-readable measurements](../results/agents/agentic-coding-pi.json)

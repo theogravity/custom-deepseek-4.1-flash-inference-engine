@@ -15,9 +15,9 @@ The isolated 8-row GPU benchmark measured the selector alone, using fixed synthe
 
 Select tiled ranking for the optimized serving profile. Its enabled median exceeded both controls on both workloads, and the six individual enabled 404k waves each exceeded 332 aggregate tok/s.
 
-The option for this experiment is `DS4_BATCH_TOPK=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](results/attention-topk.json).
+The option for this experiment is `DS4_BATCH_TOPK=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](../results/decode/attention-topk.json).
 
-Rebuild from `checkpoint-2026-11-26-decode-01-attention-topk` in an engine checkout beside the stack’s `models/` directory. This override selects both the rebuilt binary and the enabled environment inside the container.
+Rebuild from `checkpoint-2026-11-26-decode-01-attention-topk` in an engine checkout beside the stack’s `models/` directory. Run the commands below in that tagged checkout, which has its Compose overlays at the root. This override selects both the rebuilt binary and the enabled environment inside the container.
 
 ```sh
 cargo build --release --locked && docker build -t ds4-flash-rs:attention-topk-checkpoint .

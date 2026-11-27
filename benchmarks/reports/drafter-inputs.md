@@ -13,9 +13,9 @@ Both RTX PRO 6000 GPUs were capped at 375 W. The CPU socket reported a 225 W cap
 
 Keep copied drafter inputs in the selected serving profile. Eliminating the copies did not establish a repeatable throughput gain across these coding workloads. The hardware fixture with one-, three- and two-row clients verified exact proposal IDs and confidence scores for nonoverlapping row ranges. The experimental path is available at the checkpoint.
 
-The option for this experiment is `DS4_DRAFT_VIEWS=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](results/draft-views.json).
+The option for this experiment is `DS4_DRAFT_VIEWS=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](../results/decode/draft-views.json).
 
-Rebuild from `checkpoint-2026-11-26-decode-02-draft-views` in an engine checkout beside the stack’s `models/` directory. This override selects both the rebuilt binary and the enabled environment inside the container.
+Rebuild from `checkpoint-2026-11-26-decode-02-draft-views` in an engine checkout beside the stack’s `models/` directory. Run the commands below in that tagged checkout, which has its Compose overlays at the root. This override selects both the rebuilt binary and the enabled environment inside the container.
 
 ```sh
 cargo build --release --locked && docker build -t ds4-flash-rs:draft-views-checkpoint .

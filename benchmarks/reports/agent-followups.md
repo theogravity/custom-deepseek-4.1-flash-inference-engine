@@ -1,6 +1,6 @@
 # Coding-agent latency and decode on two RTX PRO 6000s
 
-The native server reuses token IDs for ordinary text that appears unchanged in a later message. On the six timed follow-ups to a 404k-token conversation, the median wait for the first output fell to **0.482 s**. The two controls measured **0.847 s** and **0.930 s**. Each of the seven prompts, including warm-up, had a different final instruction. All 21 generated replies matched across runs. [Machine-readable results](results/agent-round3.json)
+The native server reuses token IDs for ordinary text that appears unchanged in a later message. On the six timed follow-ups to a 404k-token conversation, the median wait for the first output fell to **0.482 s**. The two controls measured **0.847 s** and **0.930 s**. Each of the seven prompts, including warm-up, had a different final instruction. All 21 generated replies matched across runs. [Machine-readable results](../results/agents/agent-round3.json)
 
 ## Three experiments
 
@@ -30,11 +30,11 @@ Six concurrent 404k coding histories measured 299.5 / 304.5 / 304.7 aggregate de
 
 A separate mixed sequence replayed the full Pi edit, two long retrievals and the structured edit before switching to 404k coding. The initial qualification measured 241.5 tok/s on that transition. Repeating the sequence on fresh processes gave 241.8 / 241.2 / 241.4 tok/s on 404k coding and 383.1 / 385.6 / 383.7 tok/s on the structured edit. The earlier throughput table uses the shorter Pi turn immediately before the 404k workload.
 
-All throughput figures are medians of six warm native requests or waves per fresh engine. The captured Pi request has 2,786 input tokens and a 256-token reasoning continuation. The long request generates 512 tokens. Decode measures first-to-last generated output. Counting the entire single-client 404k request, throughput was 195.2 / 240.4 / 193.5 output tok/s. The 404k decode rate uses 511 intervals. The Pi rate uses 255. The cards ran at 375 W each and the CPU socket at 225 W. The existing 154 tok/s sequential weight-read ceiling applies to one target token per pass. The speculative rates above depend on accepted proposals. [Ceiling and assumptions](THEORY.md)
+All throughput figures are medians of six warm native requests or waves per fresh engine. The captured Pi request has 2,786 input tokens and a 256-token reasoning continuation. The long request generates 512 tokens. Decode measures first-to-last generated output. Counting the entire single-client 404k request, throughput was 195.2 / 240.4 / 193.5 output tok/s. The 404k decode rate uses 511 intervals. The Pi rate uses 255. The cards ran at 375 W each and the CPU socket at 225 W. The existing 154 tok/s sequential weight-read ceiling applies to one target token per pass. The speculative rates above depend on accepted proposals. [Ceiling and assumptions](roofline.md)
 
-An earlier release run was discarded when its test list exposed a stale executable in a shared Cargo build directory. The reported release was rebuilt from the tagged source in an empty target directory. Its server and test executable hashes were checked before qualification. The clean release build reproduced the complete 4,103-token Pi edit, its 62-token tool-return reply and the 542-token following reply. It passed 95 tests with the model and both GPUs. It recovered the exact receipts at 266,174 and 520,362 tokens. It served three waves of six independent full windows, then eight agents with six resident and two swapped on each of the RAM and forced-disk tiers. Both tiers returned the reference replies with zero read or write failures. The 25,625-token edit measured 383.5 tok/s. Previous tool-return idle prefill remains enabled. [Prior tool-return measurements](TOOL-RETURN.md)
+An earlier release run was discarded when its test list exposed a stale executable in a shared Cargo build directory. The reported release was rebuilt from the tagged source in an empty target directory. Its server and test executable hashes were checked before qualification. The clean release build reproduced the complete 4,103-token Pi edit, its 62-token tool-return reply and the 542-token following reply. It passed 95 tests with the model and both GPUs. It recovered the exact receipts at 266,174 and 520,362 tokens. It served three waves of six independent full windows, then eight agents with six resident and two swapped on each of the RAM and forced-disk tiers. Both tiers returned the reference replies with zero read or write failures. The 25,625-token edit measured 383.5 tok/s. Previous tool-return idle prefill remains enabled. [Prior tool-return measurements](tool-return.md)
 
-The three source checkpoints are `checkpoint-2026-11-26-agent3-01-text`, `checkpoint-2026-11-26-agent3-02-markov`, and `checkpoint-2026-11-26-agent3-03-prefix`. The public archive includes the per-arm timings and a replay driver. [Measurement files](benchmarks/agent-followups/measurements/) · [Replay instructions](benchmarks/README.md)
+The three source checkpoints are `checkpoint-2026-11-26-agent3-01-text`, `checkpoint-2026-11-26-agent3-02-markov`, and `checkpoint-2026-11-26-agent3-03-prefix`. The public archive includes the per-arm timings and a replay driver. [Measurement files](../agent-followups/measurements/) · [Replay instructions](../README.md)
 
 The full workstation archive is under `~/.cache/ds4-flash-rs/profiles/agent-round3-20261126/`.
 
@@ -45,7 +45,7 @@ From the engine checkout, build the release in a separate worktree and start it 
 ```sh
 git worktree add --detach ../ds4-agent-round3-build checkpoint-2026-11-26-agent3-release
 (cd ../ds4-agent-round3-build && CARGO_TARGET_DIR=target cargo build --release --locked && docker build -t ds4-flash-rs:agent-coding-20261126 .)
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-round2.yml -f compose.coding.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml up --no-build -d --wait
 ```
 
-To restore the preceding release, replace `compose.coding.yml` with `compose.agentic.yml` in the launch command.
+To restore the preceding release, replace `deploy/profiles/coding.yml` with `deploy/profiles/agentic.yml` in the launch command.

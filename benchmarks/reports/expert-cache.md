@@ -20,14 +20,14 @@ Each leg began with two six-client 404k coding waves. The same service then hand
 | First wave after the switch | 84.2 | 103.8 | 109.8 |
 | Median of the next six waves | 208.5 | 208.1 | 213.7 |
 
-All six requests used the full 524,288-token window and matched the checkpoint responses. In a separate LFU overflow run, eight clients each used 523,776 input tokens and 512 output tokens. Peak residency was 6 on GPU and 2 offloaded. There were 8 RAM writes and 8 RAM reads. All eight outputs matched their serial replays and the saved checkpoint. This run exercised RAM offload. The earlier forced-overflow run covers the disk tier. [Disk overflow evidence](results/eight-full-600w.jsonl)
+All six requests used the full 524,288-token window and matched the checkpoint responses. In a separate LFU overflow run, eight clients each used 523,776 input tokens and 512 output tokens. Peak residency was 6 on GPU and 2 offloaded. There were 8 RAM writes and 8 RAM reads. All eight outputs matched their serial replays and the saved checkpoint. This run exercised RAM offload. The earlier forced-overflow run covers the disk tier. [Disk overflow evidence](../results/context/eight-full-600w.jsonl)
 
 ## Running the candidate on this workstation
 
 The normal service uses the checkpoint image and LRU. The opt-in profile selects the locally tested image and enables LFU. From this repository, launch it with the command below.
 
 ```sh
-docker compose --env-file ../models/.env -f compose.yml -f compose.expert-cache-lfu.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/expert-cache-lfu.yml up --no-build -d --wait
 ```
 
 To return to the checkpoint service, run the base Compose definition.
@@ -71,4 +71,4 @@ for card in 0 1; do
 done
 ```
 
-The native throughput comparisons used the same Rust/CUDA executable in both configurations, two RTX PRO 6000 Blackwell cards capped at 375 W each and a measured 225 W CPU socket limit. Each leg started a fresh service and ran one warm-up followed by six measured waves. All measured coding waves had overlapping streams, the expected prefix reuse and no KV rotations. For the same workload, use the frozen histories and `tools/long_decode.py` commands from the long-context benchmark. [Workload](LONG-CONTEXT-BENCHMARK.md#reproduce-the-coding-workload) · [Measurements and trace digests](results/expert-cache-policy-375w.json)
+The native throughput comparisons used the same Rust/CUDA executable in both configurations, two RTX PRO 6000 Blackwell cards capped at 375 W each and a measured 225 W CPU socket limit. Each leg started a fresh service and ran one warm-up followed by six measured waves. All measured coding waves had overlapping streams, the expected prefix reuse and no KV rotations. For the same workload, use the frozen histories and `tools/long_decode.py` commands from the long-context benchmark. [Workload](long-context.md#reproduce-the-coding-workload) · [Measurements and trace digests](../results/decode/expert-cache-policy-375w.json)

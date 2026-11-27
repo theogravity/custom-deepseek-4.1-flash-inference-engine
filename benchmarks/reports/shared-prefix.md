@@ -1,6 +1,6 @@
 # Shared packed KV rows during prefix restoration
 
-A warm reusable target image contains about 695 MiB at 404k tokens. The Rust decoder now gives the four compressor layers immutable views of the eight KV and index byte ranges in that image. GPU installation reads each range directly. CPU appends detach only the range being modified. The last range releases its image reference when GPU ownership transfers or the request ends. Both builds used LFU for expert eviction. [Implementation](src/attention_snapshot.rs) · [Per-wave results, restore events and output hashes](results/shared-prefix-375w.json)
+A warm reusable target image contains about 695 MiB at 404k tokens. The Rust decoder now gives the four compressor layers immutable views of the eight KV and index byte ranges in that image. GPU installation reads each range directly. CPU appends detach only the range being modified. The last range releases its image reference when GPU ownership transfers or the request ends. Both builds used LFU for expert eviction. [Implementation](../../src/attention_snapshot.rs) · [Per-wave results, restore events and output hashes](../results/context/shared-prefix-375w.json)
 
 ## Warm throughput
 
@@ -11,7 +11,7 @@ A warm reusable target image contains about 695 MiB at 404k tokens. The Rust dec
 | 6 × 404k, 768 output | 300.1 | 313.2 | 302.7 | 285.3 / 301.7 / 288.4 |
 | 6 × 524,160, 128 output | 202.7 | 287.7 | 204.4 | 159.9 / 222.0 / 160.3 |
 
-Each build served one warm-up and six measured waves per workload at 375 W per inference GPU. The CPU socket cap read 225 W. Each row reports medians. The coding histories had 404,151–404,170 tokens apiece. The full-window receipt requests consumed exactly 524,288 positions each. Every coding and receipt response, including warm-ups, matched its previously qualified response digest. Every measured six-client coding wave reused 2,424,704 prefix tokens, reached six-way verification and completed with zero live swaps. The first 512-token control began during candidate build preparation. The trailing control ran with the build finished. [Frozen workloads and benchmark commands](LONG-CONTEXT-BENCHMARK.md#reproduce-the-coding-workload)
+Each build served one warm-up and six measured waves per workload at 375 W per inference GPU. The CPU socket cap read 225 W. Each row reports medians. The coding histories had 404,151–404,170 tokens apiece. The full-window receipt requests consumed exactly 524,288 positions each. Every coding and receipt response, including warm-ups, matched its previously qualified response digest. Every measured six-client coding wave reused 2,424,704 prefix tokens, reached six-way verification and completed with zero live swaps. The first 512-token control began during candidate build preparation. The trailing control ran with the build finished. [Frozen workloads and benchmark commands](long-context.md#reproduce-the-coding-workload)
 
 Delivered tok/s counts the tokens after each stream’s first visible token, from the first client’s first text to the last client’s last text. Whole-wave tok/s counts every generated token and includes admission. For example, the initial 512-token control’s 278.2 aggregate tok/s gives 46.4 tok/s per client over the common interval. Over each client’s own streaming interval, the six medians ranged from 53.1 to 71.8 tok/s. The shared build exceeded 300 delivered tok/s in 0/6 waves at 512 output and 6/6 at 768.
 
@@ -19,7 +19,7 @@ Delivered tok/s counts the tokens after each stream’s first visible token, fro
 
 For the 512-token coding waves, first-text spread fell from 1.40 and 1.43 seconds in the controls to 0.68 seconds. The median committed rate over the interval when all six clients were decoding was 340.1 / 340.3 / 341.3 tok/s in run order. The gain came from getting all six clients through restoration sooner. At one client, whole-request throughput improved while the client’s streaming rate stayed near 234 tok/s.
 
-A separate instrumented run started each server fresh, restored six coding requests, and repeated the wave. The six RAM events per build gave the following per-request medians. GPU installation measures host time spent in allocation and upload calls. Wall-to-ready can include other scheduler work. [Restore timing instrumentation](src/restore_timing.rs)
+A separate instrumented run started each server fresh, restored six coding requests, and repeated the wave. The six RAM events per build gave the following per-request medians. GPU installation measures host time spent in allocation and upload calls. Wall-to-ready can include other scheduler work. [Restore timing instrumentation](../../src/restore_timing.rs)
 
 | Per warm target restore | LFU control | Shared rows |
 |---|---:|---:|
@@ -44,15 +44,15 @@ The deployed profile allows six residents, 32 logical sessions, 48 GiB RAM and 1
 
 The measured executable’s SHA-256 begins with `ac4518d5`. After the GPU test was extended, a rebuild of the committed source matched all 33 allocatable ELF sections apart from the build ID. Per-wave logs are archived under `~/.cache/ds4-flash-rs/profiles/shared-prefix-3d8c541/` on this host.
 
-The installed image is tagged `ds4-flash-rs:shared-prefix-3d8c541`. This report and its Compose overlay ship in the same checkout as the tested engine source from `3d8c541`. On a fresh installation, run both commands below from the directory containing this report and the Dockerfile.
+Build the historical image from the public revision corresponding to workstation commit `3d8c541`. Run these commands from the root of the main checkout. The subshell builds the image inside a separate worktree. [Revision mapping](../source-revisions.tsv)
 
 ```sh
-cargo build --release --locked
-docker build -t ds4-flash-rs:shared-prefix-3d8c541 .
+git worktree add --detach ../ds4-shared-prefix-build 6e5cbe4be80f4901651bbddc8ec4f03783ea9873
+(cd ../ds4-shared-prefix-build && CARGO_TARGET_DIR=target cargo build --release --locked && docker build -t ds4-flash-rs:shared-prefix-3d8c541 .)
 ```
 
-Launch the tested configuration from the same checkout. The LFU-only profile remains available for replaying the control.
+Launch the tested configuration from the main checkout. The LFU-only profile remains available for replaying the control.
 
 ```sh
-docker compose --env-file ../models/.env -f compose.yml -f compose.shared-prefix-lfu.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/shared-prefix-lfu.yml up --no-build -d --wait
 ```

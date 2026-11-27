@@ -16,9 +16,9 @@ A second 404k comparison reversed the run order, with a fresh process, one warm-
 
 Keep the existing packed index scorer in the selected profile. Register reuse reduced time for the isolated long scans, and its first 404k serving median was 0.5% above the control midpoint. In the reverse-order run, one enabled leg beat the control and the other fell below it. The change stays available on its experiment branch. The measurements support a kernel speedup, while the six-client application gain is too small to distinguish reliably here.
 
-The option for this experiment is `DS4_PAIRED_INDEX=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](results/paired-index.json).
+The option for this experiment is `DS4_PAIRED_INDEX=1`. Per-wave throughput, whole-wave throughput, image identity and raw capture hashes are in the [measurement record](../results/decode/paired-index.json).
 
-Rebuild from `checkpoint-2026-11-26-decode-03-paired-index` in an engine checkout beside the stack’s `models/` directory. This override selects both the rebuilt binary and the enabled environment inside the container.
+Rebuild from `checkpoint-2026-11-26-decode-03-paired-index` in an engine checkout beside the stack’s `models/` directory. Run the commands below in that tagged checkout, which has its Compose overlays at the root. This override selects both the rebuilt binary and the enabled environment inside the container.
 
 ```sh
 cargo build --release --locked && docker build -t ds4-flash-rs:paired-index-checkpoint .

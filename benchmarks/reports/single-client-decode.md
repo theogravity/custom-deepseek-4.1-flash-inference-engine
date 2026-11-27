@@ -14,9 +14,9 @@ Rates are control / enabled / control in tok/s. Percentages compare the enabled 
 | Warp-shared expert weights | 293.9 / **293.8** / 293.4 (+0.1%) | 235.9 / **237.1** / 236.5 (+0.4%) |
 | Verified output repetition | 293.5 / **366.5** / 293.9 (+24.8%) | 236.0 / **256.9** / 237.1 (+8.6%) |
 
-1. **Wide attention ranking.** Recursively select the strongest 512 candidates in each 4,096-entry tile. With eight rows of width 202,112 the isolated selection fell from about 111 to 82 µs, but at five rows of width 404,224 it rose from about 82 to 91 µs. The server showed no material gain. [Checkpoint evidence](results/c1-wide.json)
-2. **Warp-shared expert weights.** Routed projections occupied 40.8% of summed GPU kernel time in a fresh one-client edit trace. The new CUDA kernel loads a packed word and gets the previous word from a neighboring lane. All tested partial outputs matched bit for bit. The initial build changed instruction scheduling outside its target range. The final revision preserved the original GPU instruction sequence in all 12 unaffected specializations. A separate long-only repeat measured 239.64 / 239.65 / 239.31 tok/s. The deployed expert kernel remains selected. [Checkpoint evidence](results/c1-expert-r2.json)
-3. **Verified output repetition.** When one client is decoding and a prompt lookup misses, the Rust drafter looks for repeated blocks in committed output. It can copy fields that agree and extrapolate a single decimal token when three earlier values establish the same increment. It defers weak, unconfirmed output matches to the learned DSpark drafter. Each proposed token passes through the usual target verification. [Checkpoint evidence](results/c1-lookup.json)
+1. **Wide attention ranking.** Recursively select the strongest 512 candidates in each 4,096-entry tile. With eight rows of width 202,112 the isolated selection fell from about 111 to 82 µs, but at five rows of width 404,224 it rose from about 82 to 91 µs. The server showed no material gain. [Checkpoint evidence](../results/decode/c1-wide.json)
+2. **Warp-shared expert weights.** Routed projections occupied 40.8% of summed GPU kernel time in a fresh one-client edit trace. The new CUDA kernel loads a packed word and gets the previous word from a neighboring lane. All tested partial outputs matched bit for bit. The initial build changed instruction scheduling outside its target range. The final revision preserved the original GPU instruction sequence in all 12 unaffected specializations. A separate long-only repeat measured 239.64 / 239.65 / 239.31 tok/s. The deployed expert kernel remains selected. [Checkpoint evidence](../results/decode/c1-expert-r2.json)
+3. **Verified output repetition.** When one client is decoding and a prompt lookup misses, the Rust drafter looks for repeated blocks in committed output. It can copy fields that agree and extrapolate a single decimal token when three earlier values establish the same increment. It defers weak, unconfirmed output matches to the learned DSpark drafter. Each proposed token passes through the usual target verification. [Checkpoint evidence](../results/decode/c1-lookup.json)
 
 ## Confirmation and other clients
 
@@ -41,16 +41,16 @@ Exactly three receipts were recovered at each of 266,174 and 520,362 input token
 The selected local image is `ds4-flash-rs:c1-consensus-20261126`. To rebuild that image, use source tag `checkpoint-2026-11-26-c1-03-consensus`, run `cargo build --release --locked` from the engine checkout, then run `docker build -t ds4-flash-rs:c1-consensus-20261126 .`. The serving and rollback commands use the main engine checkout.
 
 ```sh
-docker compose --env-file ../models/.env -f compose.yml -f compose.c1-optimized.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/c1-optimized.yml up --no-build -d --wait
 ```
 
 To restore the previous qualified image and drafter policy, run the following command.
 
 ```sh
-docker compose --env-file ../models/.env -f compose.yml -f compose.decode-optimized.yml up --no-build -d --wait
+docker compose --env-file ../models/.env -f compose.yml -f deploy/profiles/decode-optimized.yml up --no-build -d --wait
 ```
 
-For the short edit, run `python3 tools/edit_scaling.py --clients 1 --waves 7` with the existing engine credential in the environment. For long coding, generate the frozen histories using the documented seed, then run `python tools/long_decode.py --histories histories.json --clients 1 --output 512 --rounds 6` in the documented Python environment. Both clients stream from the native endpoint. The raw measurements, CUDA microbenchmarks and profiler capture are archived locally in `~/.cache/ds4-flash-rs/profiles/c1-20261126/`. [Long coding reproduction](LONG-CONTEXT-BENCHMARK.md#reproduce-the-coding-workload)
+For the short edit, run `python3 tools/edit_scaling.py --clients 1 --waves 7` with the existing engine credential in the environment. For long coding, generate the frozen histories using the documented seed, then run `python tools/long_decode.py --histories histories.json --clients 1 --output 512 --rounds 6` in the documented Python environment. Both clients stream from the native endpoint. The raw measurements, CUDA microbenchmarks and profiler capture are archived locally in `~/.cache/ds4-flash-rs/profiles/c1-20261126/`. [Long coding reproduction](long-context.md#reproduce-the-coding-workload)
 
 Each experiment has an annotated Git tag.
 
@@ -60,4 +60,4 @@ Each experiment has an annotated Git tag.
 
 ## Active service
 
-The selected Compose profile returned the expected answer to the smoke request and reported six resident slots, 32 logical sessions, 48 GiB of RAM swap and 128 GiB of disk swap. On that running service the six warm single-client requests per workload measured **366.0 tok/s** on the 25.6k edit and **256.3 tok/s** at 404k. [Image identity, limits and live results](results/c1-selected-service.json)
+The selected Compose profile returned the expected answer to the smoke request and reported six resident slots, 32 logical sessions, 48 GiB of RAM swap and 128 GiB of disk swap. On that running service the six warm single-client requests per workload measured **366.0 tok/s** on the 25.6k edit and **256.3 tok/s** at 404k. [Image identity, limits and live results](../results/decode/c1-selected-service.json)
