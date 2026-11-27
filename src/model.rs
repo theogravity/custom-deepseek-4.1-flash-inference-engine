@@ -56,15 +56,10 @@ pub(crate) fn bounded_replay() -> Result<bool> {
     }
 }
 
-// Every reusable boundary has 128 real decoder/DSpark rows. Keep the tail
-// in one call so replay-only layers can start with an empty sliding window.
-fn replay_chunk(pos: usize, horizon: usize, chunk: usize) -> (usize, bool) {
-    let remaining = horizon - pos;
-    if remaining > 128 && chunk > 128 {
-        (chunk.min(remaining - 128), true)
-    } else {
-        (remaining.min(chunk), false)
-    }
+// Preserve the encoder batch at every boundary. A following short chunk can
+// still read this one when fewer than 129 prompt rows remain.
+fn skip_replay_chunk(pos: usize, rows: usize, horizon: usize) -> bool {
+    rows > 128 && pos + rows + 128 < horizon
 }
 
 // Geometric boundaries bound the number of snapshots on long prefills while
@@ -194,7 +189,6 @@ pub(crate) struct Session {
     temperature: f32,
     rng: Option<StdRng>,
     suspended: Option<SwapHandle>,
-    decoder_gap: bool,
     cache: AttentionState,
     draft: Option<DraftState>,
     lookup: prompt_lookup::PromptLookup,
@@ -467,7 +461,6 @@ impl Model {
             temperature,
             rng: (temperature > 0.).then(StdRng::from_entropy),
             suspended: None,
-            decoder_gap: false,
             cache,
             draft,
             lookup,
@@ -752,26 +745,22 @@ impl Model {
             .get(session.next_point)
             .copied()
             .unwrap_or(prompt.len());
-        let replay = self.bounded_replay && !interruptible && self.chunk > 128;
-        let (n, skip_replay) = if replay {
-            replay_chunk(pos, horizon, self.chunk)
-        } else {
-            (self.chunk.min(prompt.len() - pos), false)
-        };
+        let n = self.chunk.min(prompt.len() - pos);
         let last = pos + n == prompt.len();
+        let replay = self.bounded_replay && self.chunk > 128;
+        let skip_replay = replay && skip_replay_chunk(pos, n, horizon);
         let observe = session.draft.is_some()
             && !skip_replay
             && (interruptible || pos + n > horizon.saturating_sub(128));
         self.rt.target_prefill = true;
         let skip_decoder = skip_replay
-            || (!self.bounded_replay
+            || (!replay
                 && self.prune_prefill_decoder
                 && !interruptible
                 && !observe
                 && !last
                 && !session.cache.decoder_restore_pending()
                 && crate::attention::can_defer_decoder(pos + n, horizon, self.chunk));
-        session.cache.replay_fresh_window = replay && !skip_replay && session.decoder_gap;
         let target = self.forward_prefill(
             ForwardItem {
                 cache: &mut session.cache,
@@ -786,17 +775,13 @@ impl Model {
         self.rt.target_prefill = false;
         session.cache.replay_fresh_window = false;
         let target = target?;
-        session.decoder_gap = skip_replay;
         if let Some(draft) = session.draft.as_mut().filter(|_| observe) {
-            draft.observe(
-                &mut self.rt,
-                target
-                    .features
-                    .as_ref()
-                    .context("missing DSpark prefill features")?,
-                pos,
-                n,
-            )?;
+            let features = target
+                .features
+                .as_ref()
+                .context("missing DSpark prefill features")?;
+            let retained = if replay { n.min(128) } else { n };
+            draft.observe(&mut self.rt, features, pos + n - retained, retained)?;
         }
         session.pos += n;
         if !last {
@@ -931,26 +916,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replay_finishes_each_checkpoint_with_a_complete_window() {
-        for chunk in [129, 256, 512, 8192] {
-            for length in [1, 127, 128, 129, 511, 8193, 15864, 60013, 524288] {
-                let mut pos = 0;
-                for end in checkpoints(length, chunk).into_iter().chain([length]) {
-                    let start = pos;
-                    while pos < end {
-                        let (n, skip) = replay_chunk(pos, end, chunk);
-                        assert!(n > 0 && n <= chunk);
-                        pos += n;
-                        if skip {
-                            assert!(pos <= end - 128);
-                        } else {
-                            assert_eq!(n, (end - start).min(128));
-                            assert_eq!(end, pos);
-                        }
-                    }
-                }
-            }
+    fn replay_preserves_encoder_chunks_and_short_final_dependencies() {
+        for tail in 1..=128 {
+            assert!(!skip_replay_chunk(0, 8192, 8192 + tail));
         }
+        assert!(skip_replay_chunk(0, 8192, 8192 + 129));
+        assert!(!skip_replay_chunk(8192, 8, 8200));
+        assert!(!skip_replay_chunk(0, 128, 10000));
     }
 
     #[test]
@@ -975,6 +947,59 @@ mod tests {
                 chunk
             ));
         }
+    }
+
+    #[test]
+    #[ignore = "requires both inference GPUs, bounded replay and a private RAM prefix tier"]
+    fn replay_prefix_matches_independent_physical_chunks() -> Result<()> {
+        let pack = std::path::PathBuf::from(std::env::var("DS4_TEST_PACK")?);
+        let tok = Tokenizer::from_file(pack.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ids: Vec<u32> = (0..2311).map(|i| 1000 + (i * 37 % 7800) as u32).collect();
+        let mut model = Model::open(&pack, &tok, [0, 1], 4096, 512)?;
+        assert!(model.bounded_replay && model.prefix.enabled());
+        let mut idle = model.start_request(ids[..1701].to_vec(), 4, 0.)?;
+        let mut cold = model.start_request(ids.clone(), 4, 0.)?;
+        let mut short = model.start_request(ids[..1701].to_vec(), 4, 0.)?;
+        assert_eq!((idle.pos, cold.pos, short.pos), (0, 0, 0));
+        // 1536 is a final, non-geometric reusable checkpoint for the short
+        // request. Process it independently through the idle entry point.
+        idle.points = vec![1536];
+        while idle.pos < 1536 {
+            model.prefill_step(&mut idle, true)?;
+        }
+        while short.pos < 1536 {
+            model.prefill_step(&mut short, false)?;
+        }
+        assert_eq!(
+            idle.cache.encode_snapshot(1536)?,
+            short.cache.encode_snapshot(1536)?
+        );
+        assert_eq!(
+            idle.draft.as_ref().unwrap().snapshot(&mut model.rt, 1536)?,
+            short
+                .draft
+                .as_ref()
+                .unwrap()
+                .snapshot(&mut model.rt, 1536)?
+        );
+        model.store_prefill(&idle, true);
+        let mut branch = model.start_request(ids, 4, 0.)?;
+        assert_eq!(branch.pos, 1536);
+        let mut samples = Vec::new();
+        for session in [&mut cold, &mut branch] {
+            let mut out = Vec::new();
+            while !session.finished {
+                out.extend(model.step_batch(&mut [session]).pop().unwrap()?.tokens);
+            }
+            samples.push((out, session.cache.encode_snapshot(session.pos)?));
+        }
+        assert_eq!(samples[0].0, samples[1].0);
+        ensure!(
+            samples[0].1 == samples[1].1,
+            "restored continuation diverged"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1215,7 +1240,6 @@ mod tests {
                 temperature: 0.,
                 rng: None,
                 suspended: None,
-                decoder_gap: false,
                 cache: AttentionState::default(),
                 draft: None,
                 lookup: prompt_lookup::PromptLookup::new(&ids, Default::default()),

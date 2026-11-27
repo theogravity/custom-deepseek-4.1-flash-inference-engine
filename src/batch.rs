@@ -150,7 +150,9 @@ impl Model {
         engram_rows: Option<std::sync::mpsc::Receiver<Result<EngramRows>>>,
     ) -> Result<Vec<Result<Target>>> {
         let mut errors = (0..items.len()).map(|_| None).collect::<Vec<_>>();
-        let rows = ids.len();
+        let mut rows = ids.len();
+        let bounded =
+            self.bounded_replay && self.rt.target_prefill && self.chunk > 128 && rows > 128;
         let capture = items.iter().any(|s| s.capture_features);
         let mut features = None;
         self.rt.layer(0)?;
@@ -158,7 +160,7 @@ impl Model {
         let mut mix = residual::initial_mix(&mut self.rt, rows)?;
         let mut gathered: Option<EngramRows> = None;
         for layer in 0..40 {
-            if layer == attention::FIRST_LOCAL_DECODER && skip_decoder {
+            if layer == attention::FIRST_LOCAL_DECODER && skip_decoder && !bounded {
                 for s in items.iter_mut() {
                     s.cache.advance_deferred_windows(s.pos, s.rows)?;
                 }
@@ -190,13 +192,24 @@ impl Model {
                 }
                 residual::capture(&self.rt, &h, features.as_mut().unwrap(), layer - 37, rows)?;
             }
-            let x = residual::prepare(&mut self.rt, &stem, "attn", &h, &mut mix, rows)?;
-            if skip_decoder && self.bounded_replay && layer + 1 == attention::FIRST_LOCAL_DECODER {
+            let mut x = residual::prepare(&mut self.rt, &stem, "attn", &h, &mut mix, rows)?;
+            if bounded && layer + 1 == attention::FIRST_LOCAL_DECODER {
                 let [s] = &mut *items else {
-                    anyhow::bail!("source-only replay expects a single prefill");
+                    anyhow::bail!("source-only replay expects one prefill");
                 };
-                attention::write_last_source(&mut self.rt, s.cache, s.pos, s.rows, &x)?;
-                break;
+                let retain = if skip_decoder { 0 } else { 128 };
+                attention::write_last_source(&mut self.rt, s.cache, s.pos, s.rows, &x, retain)?;
+                if retain == 0 {
+                    break;
+                }
+                let skip = rows - retain;
+                let mix_cols = mix.len() / rows;
+                h = self.rt.slice(&h, skip * 4 * DIM, retain * 4 * DIM)?;
+                mix = self.rt.slice(&mix, skip * mix_cols, retain * mix_cols)?;
+                x = self.rt.slice(&x, skip * DIM, retain * DIM)?;
+                s.pos += skip;
+                s.rows = retain;
+                rows = retain;
             }
             let y = attend(&mut self.rt, items, &mut errors, layer, &x)?;
             if errors.iter().all(Option::is_some) {

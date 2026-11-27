@@ -587,6 +587,7 @@ struct Verification {
 #[derive(Default)]
 pub struct AttentionState {
     pub(crate) replay_fresh_window: bool,
+    replay_window: Option<Dev>,
     prompt_len: usize,
     capacity_limit: usize,
     verify: Option<Verification>,
@@ -1490,6 +1491,7 @@ pub(crate) fn write_last_source(
     pos: usize,
     batch: usize,
     x: &Dev,
+    retain: usize,
 ) -> Result<()> {
     let owner = FIRST_LOCAL_DECODER - 1;
     let prefix = format!("layers.{owner}.attn");
@@ -1557,8 +1559,25 @@ pub(crate) fn write_last_source(
         },
         "writing replay window",
     )?;
-    window.next_pos = pos + batch;
-    state.advance_deferred_windows(pos, batch)
+    let skipped = batch - retain;
+    window.next_pos = pos + skipped;
+    // A live rotation may have installed a timing marker for a discarded
+    // window. Materialize it once so its recorded transfer can finish.
+    for w in state
+        .windows
+        .iter_mut()
+        .filter(|(l, w)| **l >= FIRST_LOCAL_DECODER && w.restored.is_some())
+        .map(|(_, w)| w)
+    {
+        w.on(rt.device, Some(&mut rt.moe_cache))?;
+    }
+    state.advance_deferred_windows(pos, skipped)?;
+    if retain != 0 {
+        state.replay_window =
+            Some(rt.slice(&packed, (kept - retain) * DIM / 2, retain * DIM / 2)?);
+        state.replay_fresh_window = true;
+    }
+    Ok(())
 }
 
 pub fn forward_dev(
@@ -1605,12 +1624,19 @@ pub(crate) fn forward_group(
         "normalizing attention query projection",
     )?;
     let mut q = project(rt, &prefix, "wq_b", &qr, batch, HEADS * DIM, 1)?;
-    let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
-    let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
-    cuda_ok(
-        unsafe { ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32) },
-        "normalizing window keys",
-    )?;
+    let mut kv = if spans.len() == 1 && spans[0].state.replay_window.is_some() {
+        None
+    } else {
+        let mut kv = project(rt, &prefix, "wkv", x, batch, DIM, 1)?;
+        let gamma = rt.vector_ptr(&format!("{prefix}.kv_norm.weight"), DIM)?;
+        cuda_ok(
+            unsafe {
+                ds4_attn_normalize(rt.device, kv.as_mut_ptr(), gamma, DIM as i32, batch as i32)
+            },
+            "normalizing window keys",
+        )?;
+        Some(kv)
+    };
     let mut o = rt.buffer(q.len())?;
     let mut start = 0;
     for s in spans {
@@ -1628,7 +1654,9 @@ pub(crate) fn forward_group(
                 &qr,
                 start,
                 unsafe { q.as_mut_ptr().add(start * HEADS * DIM) },
-                unsafe { kv.as_mut_ptr().add(start * DIM) },
+                kv.as_mut().map_or(ptr::null_mut(), |v| unsafe {
+                    v.as_mut_ptr().add(start * DIM)
+                }),
                 out_ptr,
             );
             if let Err(err) = result {
@@ -1722,29 +1750,40 @@ fn apply_span(
         "rotating attention queries",
     )?;
     // Storage is packed BF16, with two values in each pooled four-byte element.
-    let mut current = rt.buffer(batch * DIM / 2)?;
-    cuda_ok(
-        unsafe {
-            ds4_attn_transform(
-                rt.device,
-                kv_ptr,
-                current.as_mut_ptr().cast(),
-                freqs,
-                1,
-                DIM as i32,
-                64,
-                0,
-                batch as i32,
-            )
-        },
-        "packing attention window",
-    )?;
+    let prepared = state.replay_window.take();
+    let source_written = prepared.is_some();
+    let mut current = if let Some(window) = prepared {
+        require_state!(
+            layer + 1 == FIRST_LOCAL_DECODER && window.len() == batch * DIM / 2,
+            "invalid replay window"
+        );
+        window
+    } else {
+        let mut current = rt.buffer(batch * DIM / 2)?;
+        cuda_ok(
+            unsafe {
+                ds4_attn_transform(
+                    rt.device,
+                    kv_ptr,
+                    current.as_mut_ptr().cast(),
+                    freqs,
+                    1,
+                    DIM as i32,
+                    64,
+                    0,
+                    batch as i32,
+                )
+            },
+            "packing attention window",
+        )?;
 
+        current
+    };
     let mut width = 0;
     let mut ids: *const i32 = ptr::null();
     let mut values = ptr::null_mut();
     if let Some((owner, ratio)) = group {
-        if layer == owner {
+        if layer == owner && !source_written {
             let src = state.sources.entry(owner).or_default();
             if state.capacity_limit > 0 {
                 src.values

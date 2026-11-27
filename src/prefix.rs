@@ -52,7 +52,7 @@ fn namespace(root: &Path, chunk: usize) -> Result<Sha256> {
         h.update(b"prefill cuBLASLt MXFP8 v1");
     }
     if crate::model::bounded_replay()? {
-        h.update(b"bounded decoder tail with full source KV v1");
+        h.update(b"bounded decoder tail with full source KV v2");
     }
     if crate::attention::prefill_index_mma() {
         h.update(b"SM120 prompt index BF16 MMA v1");
