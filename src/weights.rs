@@ -48,6 +48,11 @@ impl Weights {
         }
         let index: Index =
             serde_json::from_reader(File::open(root.join("model.safetensors.index.json"))?)?;
+        let random_engram = match std::env::var("DS4_ENGRAM_RANDOM_READ").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            _ => bail!("DS4_ENGRAM_RANDOM_READ must be 0 or 1"),
+        };
         let shards: BTreeSet<_> = index.weight_map.values().collect();
         let mut w = Self {
             maps: vec![],
@@ -86,6 +91,16 @@ impl Weights {
                     b.checked_sub(a) == Some(bytes) && b <= map.len() - base,
                     "invalid extent for {key}"
                 );
+                // Engram hashes address independent 128-byte rows in tables on NVMe.
+                // Restrict the mapping hint to the table so dense weights keep readahead.
+                if random_engram
+                    && bytes != 0
+                    && (key.ends_with(".engram.embed.weight")
+                        || key.ends_with(".engram.embed.scale"))
+                {
+                    map.advise_range(memmap2::Advice::Random, base + a, bytes)
+                        .with_context(|| format!("random access hint for {key}"))?;
+                }
                 ensure!(
                     w.entries
                         .insert(
