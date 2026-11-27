@@ -82,6 +82,7 @@ Use the current checkout for the profiles and benchmark drivers. Build the measu
 ```bash
 bench_dir="$(mktemp -d)"
 git worktree add --detach "$bench_dir/engine" ecd8e2a96e1eee48c49100d1fe6c8e58eb0c8ce4
+git show 0e4ab62:deploy/profiles/tp2-prefill.yml > "$bench_dir/tp2-historical.yml"
 (
   cd "$bench_dir/engine" &&
   CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked --features recipe-prefill &&
@@ -99,7 +100,7 @@ On an idle benchmark host, with the API key exported, this Bash block recreates 
   export DS4_PREFILL_DECODER_PRUNE=1 DS4_IDLE_TOOL_PREFILL_MAX_TOKENS=0 DS4_FLASHINFER_PREFILL=0
   stack=(-f compose.yml -f deploy/profiles/decode-round2.yml -f deploy/profiles/coding.yml
          -f deploy/profiles/concurrent-coding.yml -f deploy/profiles/reference-drafter.yml
-         -f "$bench_dir/engine/deploy/profiles/tp2-prefill.yml")
+         -f "$bench_dir/tp2-historical.yml")
   for step in 8192 16384; do
     export DS4_PREFILL_CHUNK="$step" DS4_HOST_PREFIX_DIR="$bench_dir/prefix-$step"
     mkdir -m 700 "$DS4_HOST_PREFIX_DIR"
