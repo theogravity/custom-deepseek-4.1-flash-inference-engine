@@ -40,6 +40,8 @@ Single-client time to first streamed reasoning or visible output with the releas
 
 The two wide-step columns use the same build through 195,803 tokens. ¹The 505k result is from the preceding 16k build, with BF16 index scoring. Free VRAM on that run fell to 66 MiB per GPU. All four input lengths fit the 524,288-token serving limit. Six simultaneous 404k requests have yet to be qualified on this wide-step profile. [Protocol, builds and agent overlap](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint) · [Raw native results](benchmarks/results/upstream/tp2-wide-prefill.json)
 
+In a separate mixed coding run, switching from 8k to 16k cut first output for an arriving 68k code review from 45.23 to 41.50 seconds. The existing Rust generation’s longest overlapping gap between stream events increased from 12.84 to 14.89 seconds. This tradeoff and the spread between cold runs are why the experimental profile defaults to 8k. [Agent timings and repeat measurements](benchmarks/reports/local-vllm-prefill.md#wide-tp2-checkpoint)
+
 ## Build and serve from a fresh clone
 
 Install the CUDA toolkit at `/usr/local/cuda`, a C++ host compiler, Rust, Docker Compose and the NVIDIA Container Toolkit. Download the checkpoint including its code-tuned drafter to the model mount. From this checkout, with the same `LITELLM_MASTER_KEY` as your proxy exported in the shell, run the following commands. The Compose profile reserves host GPU indices 1 and 2 and serves on port 8001.

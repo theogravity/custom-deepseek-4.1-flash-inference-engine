@@ -422,6 +422,272 @@
           "minimum_available_host_mib": 234935
         }
       ]
+    },
+    "agent8kn": {
+      "engine_revision": "16c9201468076127006ca7ad66e982216b54e2c6",
+      "image": "sha256:543fe0549aa76ce7d513d6a53607c699e6d85600e1df97d0edc925c169b72feb",
+      "step_tokens": 8192,
+      "options_relative_to_concurrent_coding": {
+        "DS4_DRAFTER": "released",
+        "DS4_SPEC_K": "5",
+        "DS4_PROMPT_LOOKUP": "0",
+        "DS4_OUTPUT_LOOKUP": "0",
+        "DS4_PREFIX_RAM_MIB": "49152",
+        "DS4_PREFIX_DISK_MIB": "131072",
+        "DS4_PREFILL_DECODER_PRUNE": "1",
+        "DS4_TP_DENSE": "1",
+        "DS4_TP2_PREFILL": "1",
+        "DS4_PREFILL_LT": "1",
+        "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+        "DS4_PREFILL_BOUNDED_REPLAY": "1",
+        "DS4_TP2_PACKED_INPUT": "1",
+        "DS4_TP2_PEER_DMA": "1",
+        "DS4_TP2_STAGE_WEIGHTS": "1",
+        "DS4_PREFILL_BLAS": "1",
+        "DS4_PREFILL_INDEX_MMA": "1",
+        "DS4_TRANSIENT_POOL_MIB": "4096",
+        "DS4_FLASHINFER_PREFILL": "1",
+        "DS4_TP_DENSE_BF16_WIRE": "1",
+        "DS4_PREFILL_INDEX_FP8": "1"
+      },
+      "warmup": {
+        "seed": 91570510,
+        "word_count": 3500,
+        "ttft_s": 16.4042316749983,
+        "content_sha256": "fe903dda0d55f4beec0a4528349d973fe160487654273240d1afc88a92e81186",
+        "done": true,
+        "finish": "stop",
+        "prompt_tokens": 11080,
+        "completion_tokens": 28,
+        "total_tokens": 11108,
+        "case": "cold,3500,91570510",
+        "delta": {
+          "requests_started": 1,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        },
+        "minimum_free_gpu_mib": [
+          23236,
+          23852
+        ],
+        "minimum_available_host_mib": 236872
+      },
+      "timed": [
+        {
+          "seed": 91570511,
+          "word_count": 5000,
+          "ttft_s": 3.7037968619988533,
+          "content_sha256": "254ddb2961f88547e242bdc5264aa19ecebb38956332e5fe40e6e84265a1d54b",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 15864,
+          "completion_tokens": 29,
+          "total_tokens": 15893,
+          "case": "cold,5000,91570511",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            14614,
+            14512
+          ],
+          "minimum_available_host_mib": 236533
+        },
+        {
+          "seed": 91570512,
+          "word_count": 19000,
+          "ttft_s": 11.846434723993298,
+          "content_sha256": "784010f5955a0b841c96008ebab719afe605d49f21d11f9469818463d4e3c999",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 60013,
+          "completion_tokens": 28,
+          "total_tokens": 60041,
+          "case": "cold,19000,91570512",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            4246,
+            4596
+          ],
+          "minimum_available_host_mib": 236328
+        }
+      ],
+      "overlap": {
+        "first_client": {
+          "prompt_tokens": 70,
+          "completion_tokens": 1500,
+          "total_tokens": 1570
+        },
+        "second_client": {
+          "prompt_tokens": 68049,
+          "completion_tokens": 64,
+          "total_tokens": 68113
+        },
+        "first_client_stream_events": 1500,
+        "second_ttft_s": 45.22715371999948,
+        "peer_events_during_second_ttft": 41,
+        "max_peer_interevent_s": 12.842821961996378,
+        "max_gap_start_from_second_start_s": 0.7998884599946905,
+        "max_gap_end_from_second_start_s": 13.642710421991069,
+        "first_client_to_last_event_s": 115.79423823900288,
+        "first_client_to_done_s": 115.79427785999724,
+        "counters": {
+          "requests_started": 2,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        }
+      }
+    },
+    "agent16kn": {
+      "engine_revision": "16c9201468076127006ca7ad66e982216b54e2c6",
+      "image": "sha256:543fe0549aa76ce7d513d6a53607c699e6d85600e1df97d0edc925c169b72feb",
+      "step_tokens": 16384,
+      "options_relative_to_concurrent_coding": {
+        "DS4_DRAFTER": "released",
+        "DS4_SPEC_K": "5",
+        "DS4_PROMPT_LOOKUP": "0",
+        "DS4_OUTPUT_LOOKUP": "0",
+        "DS4_PREFIX_RAM_MIB": "49152",
+        "DS4_PREFIX_DISK_MIB": "131072",
+        "DS4_PREFILL_DECODER_PRUNE": "1",
+        "DS4_TP_DENSE": "1",
+        "DS4_TP2_PREFILL": "1",
+        "DS4_PREFILL_LT": "1",
+        "DS4_IDLE_TOOL_PREFILL_MAX_TOKENS": "0",
+        "DS4_PREFILL_BOUNDED_REPLAY": "1",
+        "DS4_TP2_PACKED_INPUT": "1",
+        "DS4_TP2_PEER_DMA": "1",
+        "DS4_TP2_STAGE_WEIGHTS": "1",
+        "DS4_PREFILL_BLAS": "1",
+        "DS4_PREFILL_INDEX_MMA": "1",
+        "DS4_TRANSIENT_POOL_MIB": "4096",
+        "DS4_FLASHINFER_PREFILL": "1",
+        "DS4_TP_DENSE_BF16_WIRE": "1",
+        "DS4_PREFILL_INDEX_FP8": "1"
+      },
+      "warmup": {
+        "seed": 91570510,
+        "word_count": 3500,
+        "ttft_s": 32.79671236600552,
+        "content_sha256": "fe903dda0d55f4beec0a4528349d973fe160487654273240d1afc88a92e81186",
+        "done": true,
+        "finish": "stop",
+        "prompt_tokens": 11080,
+        "completion_tokens": 28,
+        "total_tokens": 11108,
+        "case": "cold,3500,91570510",
+        "delta": {
+          "requests_started": 1,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        },
+        "minimum_free_gpu_mib": [
+          22668,
+          22888
+        ],
+        "minimum_available_host_mib": 237802
+      },
+      "timed": [
+        {
+          "seed": 91570511,
+          "word_count": 5000,
+          "ttft_s": 9.640623452985892,
+          "content_sha256": "254ddb2961f88547e242bdc5264aa19ecebb38956332e5fe40e6e84265a1d54b",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 15864,
+          "completion_tokens": 29,
+          "total_tokens": 15893,
+          "case": "cold,5000,91570511",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            13594,
+            11630
+          ],
+          "minimum_available_host_mib": 236605
+        },
+        {
+          "seed": 91570512,
+          "word_count": 19000,
+          "ttft_s": 21.379789313999936,
+          "content_sha256": "784010f5955a0b841c96008ebab719afe605d49f21d11f9469818463d4e3c999",
+          "done": true,
+          "finish": "stop",
+          "prompt_tokens": 60013,
+          "completion_tokens": 28,
+          "total_tokens": 60041,
+          "case": "cold,19000,91570512",
+          "delta": {
+            "requests_started": 1,
+            "prefix_reused_tokens": 0,
+            "rotations": 0,
+            "resumes": 0,
+            "suspend_failures": 0,
+            "resume_failures": 0
+          },
+          "minimum_free_gpu_mib": [
+            658,
+            1068
+          ],
+          "minimum_available_host_mib": 236850
+        }
+      ],
+      "overlap": {
+        "first_client": {
+          "prompt_tokens": 70,
+          "completion_tokens": 1500,
+          "total_tokens": 1570
+        },
+        "second_client": {
+          "prompt_tokens": 68049,
+          "completion_tokens": 64,
+          "total_tokens": 68113
+        },
+        "first_client_stream_events": 1500,
+        "second_ttft_s": 41.50245250698936,
+        "peer_events_during_second_ttft": 25,
+        "max_peer_interevent_s": 14.894159774994478,
+        "max_gap_start_from_second_start_s": 0.16849974599608686,
+        "max_gap_end_from_second_start_s": 15.062659520990564,
+        "first_client_to_last_event_s": 116.68525336601306,
+        "first_client_to_done_s": 116.68530657701194,
+        "counters": {
+          "requests_started": 2,
+          "prefix_reused_tokens": 0,
+          "rotations": 0,
+          "resumes": 0,
+          "suspend_failures": 0,
+          "resume_failures": 0
+        }
+      }
     }
   },
   "trace": {
