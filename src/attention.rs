@@ -2602,7 +2602,7 @@ mod tests {
             key[..INDEX_DIM].fill(e4m3_code(1.));
             key[1] = e4m3_code(step / 512.);
             key[INDEX_DIM..].copy_from_slice(&1f32.to_le_bytes());
-            expected_scores.push(28. / 64. - step / 32768.);
+            expected_scores.push(-4. / 64. - step / 32768.);
         }
         let mut queries = vec![0f32; rows * INDEX_HEADS * INDEX_DIM];
         let mut weights = vec![0f32; rows * INDEX_HEADS];
@@ -2615,7 +2615,12 @@ mod tests {
             let head = i % INDEX_HEADS;
             q[0] = [0.5, 1., 2., -1.][head % 4];
             q[1] = f32::from(head == 1);
-            weights[i] = [1., -1., 2., -1.][head % 4];
+            // Changing only head 2 contributes a constant -32/64 shift.
+            weights[i] = if head == 2 {
+                -14.
+            } else {
+                [1., -1., 2., -1.][head % 4]
+            };
             // Opposite features cancel. ReLU suppresses every fourth head
             // before the remaining positive and negative weights are applied.
             for pair in q[2..].chunks_exact_mut(2) {
@@ -2654,7 +2659,12 @@ mod tests {
             )?;
             // This bound is less than half the 2^-15 cutoff gap. Ranking
             // must agree exactly, including the lower-index tie breaker.
-            for row in actual.chunks_exact(width) {
+            for (i, row) in actual.chunks_exact(width).enumerate() {
+                let boundary_key = if i == 0 { TOP + 1 } else { width - 1 };
+                assert!(
+                    row[boundary_key] < 0.,
+                    "cutoff must be negative, mode={mode} row={i}"
+                );
                 for (&a, &b) in row.iter().zip(&expected_scores) {
                     assert!((a - b).abs() <= 1e-5, "mode={mode}: {a} vs {b}");
                 }
