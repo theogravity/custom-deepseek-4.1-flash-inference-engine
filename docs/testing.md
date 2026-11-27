@@ -56,7 +56,6 @@ export CUDA_VISIBLE_DEVICES="$(nvidia-smi --query-gpu=name,uuid --format=csv,noh
 DS4_TEST_PACK=/mnt/models/dsv41-flash-exl3 DS4_TEST_DEVICE=0 \
   cargo test --release pool_pairs -- --ignored --test-threads=1 --nocapture
 ```
-```
 
 ### Batched SM120 MQA prompt scoring
 
