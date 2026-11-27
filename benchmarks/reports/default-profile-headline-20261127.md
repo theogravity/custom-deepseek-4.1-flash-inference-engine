@@ -30,6 +30,18 @@ Those chunk-64 runs also changed physical compute batch size, so they cannot iso
 
 A partial 92 GiB C4 run with TP dense projection disabled was stopped when free VRAM fell to 66 MiB; its three measured waves were similar to the TP-dense run, but the arm is too short and memory-constrained to draw a reliable comparison. [Partial raw data](../results/upstream/c4-code-edit-default-prefill64-cache92-no-tpdense-20261127.jsonl)
 
+## Follow-up: larger physical prefill batches
+
+Fresh 60k-token prompts were used to check whether a larger compute batch helps new input tokens. All three completed with zero prefix reuse and timing-only output validation. There was no separate warm-up, and the control timings varied substantially, so this is exploratory rather than a controlled A/B.
+
+| Physical batch | Prompt tokens | TTFT | Free VRAM after request (GPU 1 / GPU 2) |
+|---:|---:|---:|---:|
+| 8,192 | 60,049 | 27.77 s | not sampled |
+| 16,384 | 60,117 | 22.93 s | 3,836 / 902 MiB |
+| 8,192 | 60,068 | 20.60 s | 2,822 / 4,428 MiB |
+
+The 16k sample was faster than the first 8k sample, but slower than the later 8k sample and left less than 1 GiB free on GPU 2. A 12,288-token batch failed with a CUDA launch error. The current service was restored to 8,192 tokens and remains healthy. We did not promote a larger batch or claim a speedup; the 16k headroom is too small for the six-session/full-context target. [8k control 1](../results/upstream/cold-60k-control-8k-prefix-search-20261127.jsonl) · [16k candidate](../results/upstream/cold-60k-candidate-16k-prefix-search-20261127.jsonl) · [8k control 2 and memory sample](../results/upstream/cold-60k-control-8k-memory-20261127.jsonl)
+
 ## Cold single-client prefill
 
 Each case was a single request with a fresh prompt, zero prefix tokens reused and one output. Inputs use the upstream word counts. Results are single samples; output correctness was not graded in timing-only mode.
