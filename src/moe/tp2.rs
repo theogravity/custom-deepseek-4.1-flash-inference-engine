@@ -70,6 +70,99 @@ unsafe extern "C" {
     ) -> i32;
     fn cudaHostAlloc(host: *mut *mut c_void, bytes: usize, flags: u32) -> i32;
     fn cudaFreeHost(host: *mut c_void) -> i32;
+    fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
+}
+
+fn preload_fits(resident: usize, capacity: usize, free: usize) -> bool {
+    let budget = capacity * RANK_SLOT_BYTES;
+    budget.saturating_sub(resident) >= RANK_SLOT_BYTES && free >= EXPERT_HEADROOM + RANK_SLOT_BYTES
+}
+
+fn preload_rank(
+    cache: &mut DeviceCache,
+    weights: &Weights,
+    layers: usize,
+    rank: u8,
+) -> Result<usize> {
+    cuda(unsafe { cudaSetDevice(cache.device) })?;
+    let result = (|| {
+        let capacity = cache.limit * SLOT_BYTES / RANK_SLOT_BYTES;
+        let mut loaded = 0;
+        for layer in 0..layers {
+            for expert in 0..EXPERTS {
+                let key = Key(Layer::Backbone(layer), expert, SlotFormat::Rank(rank));
+                if cache.slots.contains_key(&key) {
+                    continue;
+                }
+                let mut free = 0;
+                cuda(unsafe { ds_moe_free_bytes(cache.device, &mut free) })?;
+                if !preload_fits(cache.resident_bytes, capacity, free) {
+                    return Ok(loaded);
+                }
+                let slot = match cache.upload_slot(weights, key, capacity, 0) {
+                    Ok(slot) => slot,
+                    Err(e)
+                        if e.downcast_ref::<MoeCudaError>()
+                            .is_some_and(|e| e.0 == CUDA_ERROR_MEMORY_ALLOCATION) =>
+                    {
+                        return Ok(loaded)
+                    }
+                    Err(e) => return Err(e),
+                };
+                // Age zero keeps unsolicited weights behind routed entries of the
+                // same frequency. A format sibling can already have a routed count.
+                let frequency = cache
+                    .frequencies
+                    .as_ref()
+                    .map_or(0, |f| f[frequency_index(key)]);
+                cache.eviction_order.insert((frequency, 0, key));
+                cache.slots.insert(key, (slot, 0));
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
+    })();
+    // The staged uploader may still own either pinned slab when the last
+    // copy successfully enqueues, or when a later checkpoint fails to load.
+    let drained = cuda(unsafe { cudaStreamSynchronize(ptr::null_mut()) });
+    result.and_then(|loaded| drained.map(|_| loaded))
+}
+
+pub(crate) fn preload_encoder(
+    rt: &mut Runtime,
+    devices: [i32; 2],
+    layers: usize,
+) -> Result<[usize; 2]> {
+    let active = rt.device;
+    let result = (|| {
+        for device in devices {
+            rt.moe_cache.device(device)?;
+        }
+        let [Some(first), Some(second)] = rt
+            .moe_cache
+            .devices
+            .get_disjoint_mut([&devices[0], &devices[1]])
+        else {
+            bail!("missing encoder rank cache");
+        };
+        let weights = &*rt.weights;
+        let mut loaded = [0; 2];
+        let [left, right] = &mut loaded;
+        run_ranks(
+            std::thread::Builder::new(),
+            || {
+                *right = preload_rank(second, weights, layers, 1)?;
+                Ok(())
+            },
+            || {
+                *left = preload_rank(first, weights, layers, 0)?;
+                Ok(())
+            },
+        )?;
+        Ok(loaded)
+    })();
+    let restored = cuda(unsafe { cudaSetDevice(active) });
+    result.and_then(|loaded| restored.map(|_| loaded))
 }
 
 pub(super) fn eligible(
@@ -398,6 +491,98 @@ pub(super) fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_preload_preserves_resident_bytes_and_headroom() {
+        let required = EXPERT_HEADROOM + RANK_SLOT_BYTES;
+        assert!(preload_fits(0, 1, required));
+        assert!(!preload_fits(0, 1, required - 1));
+        assert!(!preload_fits(RANK_SLOT_BYTES, 1, required));
+        assert!(!preload_fits(SLOT_BYTES, 2, required));
+        assert!(!preload_fits(SLOT_BYTES, 1, required));
+    }
+
+    #[test]
+    #[ignore = "requires DS4_TEST_PACK and both inference GPUs in CUDA_VISIBLE_DEVICES"]
+    fn startup_preload_reuses_exact_shards_without_routed_accesses() -> Result<()> {
+        unsafe extern "C" {
+            fn cudaGetDevice(device: *mut i32) -> i32;
+            fn cudaMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: i32) -> i32;
+        }
+        let mut rt = Runtime::open(
+            std::path::Path::new(&std::env::var("DS4_TEST_PACK")?),
+            [0, 1],
+        )?;
+        for device in [0, 1] {
+            let cache = rt.moe_cache.device(device)?;
+            cache.limit = if device == 0 { 2 } else { 1 };
+            cache.frequencies = Some(vec![0; EXPERT_KEYS].into_boxed_slice());
+            cache.stage_rank_weights = true;
+        }
+        rt.layer(20)?;
+        let mut active = -1;
+        let loaded = preload_encoder(&mut rt, [0, 1], 20)?;
+        assert_eq!(loaded, [3, 1]);
+        cuda(unsafe { cudaGetDevice(&mut active) })?;
+        assert_eq!(active, 1);
+        for (rank, count) in loaded.into_iter().enumerate() {
+            let device = rank as i32;
+            cuda(unsafe { cudaSetDevice(device) })?;
+            let cache = rt.moe_cache.device(device)?;
+            assert_eq!(cache.clock, 0);
+            assert!(cache.frequencies.as_ref().unwrap().iter().all(|&n| n == 0));
+            assert_eq!(cache.slots.len(), count);
+            assert_eq!(cache.resident_bytes, count * RANK_SLOT_BYTES);
+            let key = |expert| Key(Layer::Backbone(0), expert, SlotFormat::Rank(rank as u8));
+            let capacity = cache.capacity(RANK_SLOT_BYTES)?;
+            assert_eq!(capacity, count);
+
+            // Compare every uploaded byte to the direct, unstaged routed path.
+            let mut reference = DeviceCache::new(device)?;
+            reference.stage_rank_weights = false;
+            let mut actual = vec![0u8; RANK_SLOT_BYTES];
+            let mut expected = vec![0u8; RANK_SLOT_BYTES];
+            for expert in 0..count {
+                let (slot, age) = cache.slots[&key(expert)];
+                assert_eq!(age, 0);
+                let direct = reference.acquire(&rt.weights, key(expert), 1, reference.clock)?;
+                for (dst, src) in [(&mut actual, slot), (&mut expected, direct)] {
+                    cuda(unsafe {
+                        cudaMemcpy(dst.as_mut_ptr().cast(), src as *const c_void, dst.len(), 2)
+                    })?;
+                }
+                ensure!(
+                    actual == expected,
+                    "wrong preloaded bytes on rank {rank} expert {expert}"
+                );
+            }
+            let first = cache.slots[&key(0)].0;
+            assert_eq!(
+                cache.acquire(&rt.weights, key(0), capacity, cache.clock)?,
+                first
+            );
+            assert_eq!(cache.uploads, count);
+            assert_eq!(
+                cache.frequencies.as_ref().unwrap()[frequency_index(key(0))],
+                1
+            );
+            cache.acquire(&rt.weights, key(count), capacity, cache.clock)?;
+            let victim = if count > 1 { 1 } else { 0 };
+            assert!(!cache.slots.contains_key(&key(victim)));
+            assert_eq!(cache.uploads, count + 1);
+            assert_eq!(cache.slots.len(), count);
+        }
+        rt.layer(20)?;
+        assert_eq!(preload_encoder(&mut rt, [0, 1], 20)?, [0; 2]);
+        cuda(unsafe { cudaGetDevice(&mut active) })?;
+        assert_eq!(active, 1);
+        for (device, previous) in loaded.into_iter().enumerate() {
+            let cache = rt.moe_cache.device(device as i32)?;
+            assert_eq!(cache.clock, 2);
+            assert_eq!(cache.uploads, previous + 1);
+        }
+        Ok(())
+    }
 
     #[test]
     fn tp2_only_runs_for_wide_target_prefill() {

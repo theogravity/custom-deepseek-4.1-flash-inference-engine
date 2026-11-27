@@ -31,6 +31,8 @@ cd ~/llm
 docker compose -p models -f models/dsv41-flash-exl3.yml up -d --wait
 ```
 
+The TP2 prefill profile accepts `DS4_TP2_PRELOAD_LAYERS` from 0 (default) through 20. At startup both inference GPUs load their routed expert shards for the first requested encoder layers in checkpoint order. Each complete layer uses about 2.39 GiB per GPU. Each rank stops when it reaches its expert cache budget or its next allocation would leave less than 512 MiB free. Preloading copies weights before readiness and leaves routed access counts at zero. The `tp2_preload` startup log reports per-device slot counts and bytes, preload time and total model-open time.
+
 ## Prefix caching and API
 
 The native prefix cache saves target attention state and the drafter's last 128 positions at completed prefill boundaries. Keys cover the token prefix, attention layout and numerical settings, checkpoint files and tokenizer. Draft sidecars also bind to the drafter weights. Entries carry checksums, disk writes use atomic renames, and the store bounds RAM and disk independently. A request can restore a shared prefix after a tool call or a process restart. The engine evaluates the suffix and generates the new completion. Set both cache budgets to 0 to disable persistence and cross-request memoization.

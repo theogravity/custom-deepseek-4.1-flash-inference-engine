@@ -23,7 +23,8 @@ const SLOT_BYTES: usize = 3 * (HIDDEN * INTER * 3 / 8 + 2 * (HIDDEN + INTER));
 #[cfg(feature = "recipe-prefill")]
 mod tp2;
 #[cfg(feature = "recipe-prefill")]
-const RANK_SLOT_BYTES: usize = 3 * (HIDDEN * (INTER / 2) * 3 / 8 + 2 * (HIDDEN + INTER / 2));
+pub(crate) const RANK_SLOT_BYTES: usize =
+    3 * (HIDDEN * (INTER / 2) * 3 / 8 + 2 * (HIDDEN + INTER / 2));
 const MAX_GROUP_ROWS: usize = 256;
 const MAX_GROUP_EXPERTS: usize = 64;
 
@@ -110,17 +111,28 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+#[derive(Debug)]
+struct MoeCudaError(i32, String);
+impl std::fmt::Display for MoeCudaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CUDA MoE error {}: {}", self.0, self.1)
+    }
+}
+impl std::error::Error for MoeCudaError {}
+
+const CUDA_ERROR_MEMORY_ALLOCATION: i32 = 2;
+const EXPERT_HEADROOM: usize = 512 << 20;
+
 fn cuda(code: i32) -> Result<()> {
     if code != 0 {
         // cudaErrorMemoryAllocation is 2 in the CUDA runtime ABI. An exhausted
         // request may retire its state and retry on this same worker thread.
         // Leave unrelated asynchronous errors available to their own caller.
-        const CUDA_ERROR_MEMORY_ALLOCATION: i32 = 2;
         if code == CUDA_ERROR_MEMORY_ALLOCATION && unsafe { cudaPeekAtLastError() } == code {
             unsafe { cudaGetLastError() };
         }
         let message = unsafe { CStr::from_ptr(ds_moe_error(code)) }.to_string_lossy();
-        bail!("CUDA MoE error {code}: {message}");
+        return Err(MoeCudaError(code, message.into_owned()).into());
     }
     Ok(())
 }
@@ -132,7 +144,7 @@ pub(crate) fn reclaim_rank_headroom(
     free: usize,
     slot: usize,
 ) -> Result<usize> {
-    let missing = ((512usize << 20) + slot).saturating_sub(free);
+    let missing = (EXPERT_HEADROOM + slot).saturating_sub(free);
     if missing > 0 {
         if let Some(pool) = pool.and_then(|p| p.upgrade()) {
             if pool
@@ -269,6 +281,29 @@ pub(crate) fn tp2_prefill_enabled() -> Result<bool> {
     );
     Ok(enabled)
 }
+
+pub(crate) fn encoder_preload_layers(
+    value: Result<String, std::env::VarError>,
+    tp2: bool,
+) -> Result<usize> {
+    let layers = match value {
+        Ok(v) => v
+            .parse::<usize>()
+            .context("invalid DS4_TP2_PRELOAD_LAYERS")?,
+        Err(std::env::VarError::NotPresent) => 0,
+        Err(e) => return Err(e.into()),
+    };
+    ensure!(layers <= 20, "DS4_TP2_PRELOAD_LAYERS must be in 0..=20");
+    ensure!(
+        layers == 0 || tp2,
+        "DS4_TP2_PRELOAD_LAYERS requires DS4_TP2_PREFILL=1"
+    );
+    Ok(layers)
+}
+
+#[cfg(feature = "recipe-prefill")]
+pub(crate) use tp2::preload_encoder;
+
 fn switch(name: &str, default: bool) -> Result<bool> {
     match std::env::var(name).as_deref() {
         Err(std::env::VarError::NotPresent) => Ok(default),
@@ -450,7 +485,7 @@ impl DeviceCache {
         limit: usize,
         slot_bytes: usize,
     ) -> usize {
-        let available = (resident_bytes + free).saturating_sub(512 << 20);
+        let available = (resident_bytes + free).saturating_sub(EXPERT_HEADROOM);
         (available.min(limit * SLOT_BYTES) / slot_bytes).max(1)
     }
 
@@ -531,6 +566,20 @@ impl DeviceCache {
         if let Some(slot) = self.touch(key, stamp) {
             return Ok(slot);
         }
+        let slot = self.upload_slot(weights, key, capacity, group_start)?;
+        self.record_access(key, None, stamp);
+        self.slots.insert(key, (slot, stamp));
+        Ok(slot)
+    }
+
+    // Preloading and routed misses upload the same validated checkpoint bytes.
+    fn upload_slot(
+        &mut self,
+        weights: &Weights,
+        key: Key,
+        capacity: usize,
+        group_start: u64,
+    ) -> Result<usize> {
         // Check all sizes before passing mmap pointers over FFI.
         let parts = checkpoint_parts(weights, key)?;
         let slot_bytes = key.2.bytes();
@@ -576,8 +625,6 @@ impl DeviceCache {
         let slot = slot as usize;
         self.resident_bytes += slot_bytes;
         self.uploads += 1;
-        self.record_access(key, None, stamp);
-        self.slots.insert(key, (slot, stamp));
         Ok(slot)
     }
 }
@@ -1178,6 +1225,25 @@ fn forward<const E: usize, const K: usize>(
 mod tests {
     use super::*;
     use Layer::Backbone;
+    #[test]
+    fn encoder_preload_validates_bounds_and_tp2() {
+        assert_eq!(
+            encoder_preload_layers(Err(std::env::VarError::NotPresent), false).unwrap(),
+            0
+        );
+        assert_eq!(encoder_preload_layers(Ok("0".into()), false).unwrap(), 0);
+        for layers in 1..=20 {
+            assert_eq!(
+                encoder_preload_layers(Ok(layers.to_string()), true).unwrap(),
+                layers
+            );
+        }
+        assert!(encoder_preload_layers(Ok("1".into()), false).is_err());
+        for bad in ["", "-1", "21", "all"] {
+            assert!(encoder_preload_layers(Ok(bad.into()), true).is_err());
+        }
+    }
+
     #[test]
     fn cache_capacity_reclaims_headroom_and_honors_the_user_limit() {
         assert_eq!(

@@ -308,7 +308,11 @@ impl Model {
         max_ctx: usize,
         chunk: usize,
     ) -> Result<Self> {
-        let max_chunk = if crate::moe::tp2_prefill_enabled()? && crate::runtime::tp_dense() {
+        let open_started = std::time::Instant::now();
+        let tp2 = crate::moe::tp2_prefill_enabled()?;
+        let preload =
+            crate::moe::encoder_preload_layers(std::env::var("DS4_TP2_PRELOAD_LAYERS"), tp2)?;
+        let max_chunk = if tp2 && crate::runtime::tp_dense() {
             16384
         } else {
             512
@@ -333,7 +337,7 @@ impl Model {
             Err(std::env::VarError::NotPresent) => 0,
             Err(e) => return Err(e.into()),
         };
-        Ok(Self {
+        let model = Self {
             idle_tool_prefill: None,
             idle_tool_limit: idle_tool_limit.min(max_ctx),
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
@@ -359,7 +363,20 @@ impl Model {
             },
             max_ctx,
             chunk,
-        })
+        };
+        #[cfg(feature = "recipe-prefill")]
+        let mut model = model;
+        #[cfg(feature = "recipe-prefill")]
+        if preload > 0 {
+            let started = std::time::Instant::now();
+            let slots = crate::moe::preload_encoder(&mut model.rt, devices, preload)?;
+            let bytes = slots.map(|n| n * crate::moe::RANK_SLOT_BYTES);
+            eprintln!("tp2_preload requested_layers={preload} devices={devices:?} slots={slots:?} bytes={bytes:?} preload_seconds={:.3} model_open_seconds={:.3}",
+                      started.elapsed().as_secs_f64(), open_started.elapsed().as_secs_f64());
+        }
+        #[cfg(not(feature = "recipe-prefill"))]
+        let _ = (preload, open_started);
+        Ok(model)
     }
     pub fn max_context(&self) -> usize {
         self.max_ctx
