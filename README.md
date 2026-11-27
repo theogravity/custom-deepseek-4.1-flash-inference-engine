@@ -43,3 +43,7 @@ Six timed batches per cell on the same warm code-edit workload. The isolated Eng
 `python3 tools/acceptance.py` exercises the local LiteLLM proxy and installed coding clients. It creates a temporary file with a random receipt for each client, asks the client to read it with a tool, and checks its final answer.
 
 See [THEORY.md](THEORY.md) for the throughput model and [PLAN.md](PLAN.md) for measured results, workload limits and the tested system state.
+
+## License
+
+The launcher, tests and project documentation are available under the [MIT license](LICENSE). The native Engram gather and the Triton integration carry their original Apache-2.0 headers. [Apache License 2.0](integration/Apache-2.0.txt)
