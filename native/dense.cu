@@ -344,7 +344,6 @@ extern "C" int ds_project(Context *c, const void *w, const float *x, float *y,
 extern "C" int ds_gemm(Context *c, const void *w, const float *x, float *y,
                        int rows, int cols, int batch, int groups, int mode) {
   CUDA(cudaSetDevice(c->device));
-  mode = projection_mode(c, mode, batch, prefill);
   size_t nx = size_t(cols) * groups * batch, ny = size_t(rows) * batch;
   if (c->input.resize(nx * 4) || c->output.resize(ny * 4))
     return -1;
