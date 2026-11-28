@@ -7,8 +7,13 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <new>
+#include <mutex>
+#include <memory>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "moe_types.cuh"
@@ -301,13 +306,14 @@ __global__ void finish(const float *routed, float *shared_out, size_t count) {
 
 template <int projection, bool mcg>
 void launch_projection(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows,
-                       int splits, const float *src, half *rotated, float *partial, float *dst) {
+                       int splits, const float *src, half *rotated, float *partial, float *dst,
+                       cudaStream_t stream = nullptr) {
     constexpr int K = projection == Down ? I : H, N = projection == Down ? H : I;
-    rotate_input<projection><<<dim3((K + 511) / 512, rows), 128>>>(routes, src, rotated);
+    rotate_input<projection><<<dim3((K + 511) / 512, rows), 128, 0, stream>>>(routes, src, rotated);
     project<projection, mcg>
-        <<<dim3(N / 64, n_jobs, splits), 128>>>(jobs, rotated, partial, rows, splits);
+        <<<dim3(N / 64, n_jobs, splits), 128, 0, stream>>>(jobs, rotated, partial, rows, splits);
     rotate_output<projection>
-        <<<dim3((N + 511) / 512, rows), 128>>>(routes, partial, dst, rows, splits);
+        <<<dim3((N + 511) / 512, rows), 128, 0, stream>>>(routes, partial, dst, rows, splits);
 }
 // Small decode and verification descriptors fit in the kernel parameter block.
 // The CUDA launch copies this trivially-copyable argument before returning, so
@@ -326,34 +332,216 @@ __global__ void write_descriptors(const __grid_constant__ Descriptors<capacity> 
 }
 template <int capacity>
 void stage_descriptors(const Job *jobs, int njobs, const RoutedRow *routes, int rows,
-                       Job *dst_jobs, RoutedRow *dst_routes) {
+                       Job *dst_jobs, RoutedRow *dst_routes, cudaStream_t stream = nullptr) {
     Descriptors<capacity> plan{};
     std::memcpy(plan.jobs, jobs, njobs * sizeof(Job));
     std::memcpy(plan.routes, routes, rows * sizeof(RoutedRow));
-    write_descriptors<<<1, capacity>>>(plan, njobs, rows, dst_jobs, dst_routes);
+    write_descriptors<<<1, capacity, 0, stream>>>(plan, njobs, rows, dst_jobs, dst_routes);
 }
 
 template <bool mcg>
 void launch_ffn(Job *device_jobs, RoutedRow *device_rows, int n_jobs, int rows, int splits,
-                const float *x, half *rotated, float *partial, float *gate, float *up, float *weighted) {
+                const float *x, half *rotated, float *partial, float *gate, float *up, float *weighted,
+                cudaStream_t stream = nullptr) {
     launch_projection<Gate, mcg>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial,
-                            gate);
-    launch_projection<Up, mcg>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, up);
-    swiglu<<<(rows * I + 255) / 256, 256>>>(gate, up, rows * I);
+                            gate, stream);
+    launch_projection<Up, mcg>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, up, stream);
+    swiglu<<<(rows * I + 255) / 256, 256, 0, stream>>>(gate, up, rows * I);
     launch_projection<Down, mcg>(device_jobs, device_rows, n_jobs, rows, splits, gate, rotated,
-                            partial, weighted);
+                            partial, weighted, stream);
 }
 template <bool mcg, bool packed_decode>
 void launch_fused(const Job *jobs, const RoutedRow *routes, int n_jobs, int rows, int splits,
-                  const float *x, half *rotated, float *partial, float *weighted) {
+                  const float *x, half *rotated, float *partial, float *weighted,
+                  cudaStream_t stream = nullptr) {
     // The partial allocation is sized for H down columns, sufficient for
     // 2*I gate/up columns. The contiguous gate/up/rotated buffers hold 2*H halves.
     static_assert(2 * I <= H && 2 * I * sizeof(float) >= H * sizeof(half));
-    rotate_input<Gate, true><<<dim3((H+511)/512,rows,2),128>>>(routes, x, rotated);
-    project<Gate, mcg, true, packed_decode><<<dim3(I/64,n_jobs,2*splits),128>>>(jobs, rotated, partial, rows, splits);
-    prepare_down<<<dim3((I+511)/512,rows),128>>>(routes, partial, rotated, rows, splits);
-    project<Down, mcg, false, packed_decode><<<dim3(H/64,n_jobs,splits),128>>>(jobs, rotated, partial, rows, splits);
-    rotate_output<Down><<<dim3((H+511)/512,rows),128>>>(routes, partial, weighted, rows, splits);
+    rotate_input<Gate, true><<<dim3((H+511)/512,rows,2),128,0,stream>>>(routes, x, rotated);
+    project<Gate, mcg, true, packed_decode><<<dim3(I/64,n_jobs,2*splits),128,0,stream>>>(jobs, rotated, partial, rows, splits);
+    prepare_down<<<dim3((I+511)/512,rows),128,0,stream>>>(routes, partial, rotated, rows, splits);
+    project<Down, mcg, false, packed_decode><<<dim3(H/64,n_jobs,splits),128,0,stream>>>(jobs, rotated, partial, rows, splits);
+    rotate_output<Down><<<dim3((H+511)/512,rows),128,0,stream>>>(routes, partial, weighted, rows, splits);
+}
+
+struct GraphShape {
+    void *scratch;
+    const float *input;
+    float *output;
+    int jobs, rows, splits, mcg, fused, device;
+    bool operator==(const GraphShape &o) const {
+        return std::tie(scratch,input,output,jobs,rows,splits,mcg,fused,device) ==
+               std::tie(o.scratch,o.input,o.output,o.jobs,o.rows,o.splits,o.mcg,o.fused,o.device);
+    }
+};
+struct GraphShapeHash {
+    size_t operator()(const GraphShape &s) const {
+        size_t h = std::hash<void *>{}(s.scratch);
+        h ^= std::hash<const float *>{}(s.input) + 0x9e3779b9 + (h<<6) + (h>>2);
+        h ^= std::hash<float *>{}(s.output) + 0x9e3779b9 + (h<<6) + (h>>2);
+        auto mix = [&h](int v) { h ^= std::hash<int>{}(v) + 0x9e3779b9 + (h<<6) + (h>>2); };
+        mix(s.jobs); mix(s.rows); mix(s.splits); mix(s.mcg); mix(s.fused); mix(s.device);
+        return h;
+    }
+};
+struct GraphEntry {
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    Job *host_jobs = nullptr;
+    RoutedRow *host_rows = nullptr;
+    bool replay_logged = false;
+    ~GraphEntry() {
+        if (exec) cudaGraphExecDestroy(exec);
+        if (graph) cudaGraphDestroy(graph);
+        if (host_jobs) cudaFreeHost(host_jobs);
+        if (host_rows) cudaFreeHost(host_rows);
+    }
+};
+struct GraphContext {
+    int device = -1;
+    cudaStream_t stream = nullptr;
+    cudaEvent_t before = nullptr, done = nullptr;
+    bool launched = false;
+    int status = 0;
+    std::unordered_map<GraphShape, GraphEntry, GraphShapeHash> graphs;
+    ~GraphContext() {
+        int old = -1;
+        cudaGetDevice(&old);
+        if (device >= 0) cudaSetDevice(device);
+        if (stream) cudaStreamSynchronize(stream);
+        graphs.clear();
+        if (before) cudaEventDestroy(before);
+        if (done) cudaEventDestroy(done);
+        if (stream) cudaStreamDestroy(stream);
+        if (old >= 0) cudaSetDevice(old);
+    }
+};
+static std::mutex graph_mutex;
+static std::unordered_map<void *, std::unique_ptr<GraphContext>> graph_contexts;
+static bool graph_trace_enabled() {
+    const char *value = std::getenv("DS4_MOE_CUDA_GRAPH_TRACE");
+    return value && value[0] == '1' && value[1] == '\0';
+}
+static int graph_error(const char *stage, cudaError_t error) {
+    std::fprintf(stderr, "moe-cuda-graph error stage=%s code=%d message=%s\n",
+                 stage, int(error), cudaGetErrorString(error));
+    return int(error);
+}
+
+static GraphContext *graph_context(void *scratch, int device) {
+    auto &entry = graph_contexts[scratch];
+    if (!entry) {
+        entry = std::make_unique<GraphContext>();
+        entry->device = device;
+        entry->status = int(cudaStreamCreateWithFlags(&entry->stream, cudaStreamNonBlocking));
+        if (entry->status == 0)
+            entry->status = int(cudaEventCreateWithFlags(&entry->before, cudaEventDisableTiming));
+        if (entry->status == 0)
+            entry->status = int(cudaEventCreateWithFlags(&entry->done, cudaEventDisableTiming));
+    }
+    if (entry->device != device && entry->status == 0) entry->status = int(cudaErrorInvalidDevice);
+    return entry.get();
+}
+
+extern "C" void ds_moe_graph_release(void *scratch) {
+    if (!scratch) return;
+    std::lock_guard<std::mutex> lock(graph_mutex);
+    auto it = graph_contexts.find(scratch);
+    if (it != graph_contexts.end()) graph_contexts.erase(it);
+}
+
+static int graph_run(void *scratch, int device, const Job *jobs, int n_jobs,
+                     const RoutedRow *routes, int rows, const float *x, float *weighted,
+                     int mcg, int splits, int fused, char *base,
+                     size_t partial_size, size_t inter_size, size_t rotated_size,
+                     size_t meta_size) {
+    std::lock_guard<std::mutex> lock(graph_mutex);
+    GraphContext *ctx = graph_context(scratch, device);
+    if (ctx->status) return ctx->status;
+    auto ready = ctx->launched ? cudaEventQuery(ctx->done) : cudaSuccess;
+    if (ready == cudaErrorNotReady) return -1; // An in-flight graph owns the staging descriptors.
+    if (ready != cudaSuccess) return graph_error("event-query", ready);
+    GraphShape shape{scratch,x,weighted,n_jobs,rows,splits,mcg,fused,device};
+    auto found = ctx->graphs.find(shape);
+    if (found == ctx->graphs.end() && ctx->graphs.size() >= 256) return -1;
+    auto [it, inserted] = ctx->graphs.try_emplace(shape);
+    GraphEntry &entry = it->second;
+    char *meta = base + partial_size + 2 * inter_size + rotated_size;
+    Job *device_jobs = reinterpret_cast<Job *>(meta);
+    RoutedRow *device_rows = reinterpret_cast<RoutedRow *>(meta + size_t(n_jobs) * sizeof(Job));
+    size_t jobs_bytes = size_t(n_jobs) * sizeof(Job), routes_bytes = size_t(rows) * sizeof(RoutedRow);
+    const float *graph_x = x;
+    float *graph_y = weighted;
+    if (inserted) {
+        auto rc = cudaMallocHost(&entry.host_jobs, jobs_bytes);
+        if (rc != cudaSuccess) return graph_error("cuda-graph-operation", rc);
+        rc = cudaMallocHost(&entry.host_rows, routes_bytes);
+        if (rc != cudaSuccess) return graph_error("cuda-graph-operation", rc);
+    }
+    std::memcpy(entry.host_jobs, jobs, jobs_bytes);
+    std::memcpy(entry.host_rows, routes, routes_bytes);
+
+    auto rc = cudaEventRecord(ctx->before, nullptr);
+    if (rc != cudaSuccess) return graph_error("record-before", rc);
+    rc = cudaStreamWaitEvent(ctx->stream, ctx->before, 0);
+    if (rc != cudaSuccess) return graph_error("wait-before", rc);
+
+    if (!entry.exec) {
+        rc = cudaStreamBeginCapture(ctx->stream, cudaStreamCaptureModeThreadLocal);
+        if (rc != cudaSuccess) return graph_error("begin-capture", rc);
+        auto abort_capture = [&]() {
+            cudaGraph_t abandoned = nullptr;
+            cudaStreamEndCapture(ctx->stream, &abandoned);
+            if (abandoned) cudaGraphDestroy(abandoned);
+        };
+        rc = cudaMemcpyAsync(device_jobs, entry.host_jobs, jobs_bytes, cudaMemcpyHostToDevice, ctx->stream);
+        if (rc != cudaSuccess) graph_error("jobs-copy", rc);
+        if (rc == cudaSuccess) rc = cudaMemcpyAsync(device_rows, entry.host_rows, routes_bytes, cudaMemcpyHostToDevice, ctx->stream);
+        if (rc != cudaSuccess) graph_error("routes-copy", rc);
+        if (rc == cudaSuccess) {
+            if (fused) {
+                auto launch = mcg ? (fused == 2 ? launch_fused<true,true> : launch_fused<true,false>)
+                                 : (fused == 2 ? launch_fused<false,true> : launch_fused<false,false>);
+                launch(device_jobs, device_rows, n_jobs, rows, splits, graph_x,
+                       reinterpret_cast<half *>(base + partial_size),
+                       reinterpret_cast<float *>(base), graph_y, ctx->stream);
+            } else if (mcg) {
+                launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, graph_x,
+                    reinterpret_cast<half *>(base + partial_size + 2 * inter_size),
+                    reinterpret_cast<float *>(base), reinterpret_cast<float *>(base + partial_size),
+                    reinterpret_cast<float *>(base + partial_size + inter_size), graph_y, ctx->stream);
+            } else {
+                launch_ffn<false>(device_jobs, device_rows, n_jobs, rows, splits, graph_x,
+                    reinterpret_cast<half *>(base + partial_size + 2 * inter_size),
+                    reinterpret_cast<float *>(base), reinterpret_cast<float *>(base + partial_size),
+                    reinterpret_cast<float *>(base + partial_size + inter_size), graph_y, ctx->stream);
+            }
+            rc = cudaGetLastError();
+        }
+        if (rc == cudaSuccess) {
+            rc = cudaStreamEndCapture(ctx->stream, &entry.graph);
+            if (rc != cudaSuccess) return graph_error("end-capture", rc);
+        } else {
+            graph_error("captured-op", rc);
+            abort_capture();
+            return int(cudaErrorNotSupported);
+        }
+        rc = cudaGraphInstantiate(&entry.exec, entry.graph, 0);
+        if (rc != cudaSuccess) return graph_error("instantiate", rc);
+        if (graph_trace_enabled())
+            std::fprintf(stderr, "moe-cuda-graph capture device=%d rows=%d jobs=%d splits=%d mcg=%d fused=%d\n",
+                         device, rows, n_jobs, splits, mcg, fused);
+        // The first launch executes the freshly instantiated graph below.
+    } else if (!entry.replay_logged && graph_trace_enabled()) {
+        std::fprintf(stderr, "moe-cuda-graph replay device=%d rows=%d jobs=%d splits=%d\n",
+                     device, rows, n_jobs, splits);
+        entry.replay_logged = true;
+    }
+    rc = cudaGraphLaunch(entry.exec, ctx->stream);
+    if (rc == cudaSuccess) rc = cudaEventRecord(ctx->done, ctx->stream);
+    if (rc == cudaSuccess) rc = cudaStreamWaitEvent(nullptr, ctx->done, 0);
+    if (rc == cudaSuccess) ctx->launched = true;
+    return rc == cudaSuccess ? 0 : graph_error("launch-graph", rc);
 }
 
 } // namespace
@@ -449,7 +637,7 @@ extern "C" int ds_moe_finish(const float *routed, float *shared_out, size_t coun
 // group also uses the default stream, including uploads into reused slots.
 extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *jobs, int n_jobs,
                               const RoutedRow *routes, int rows, const float *x, float *weighted,
-                              int mcg, int splits, int inline_metadata, int fused) {
+                              int mcg, int splits, int inline_metadata, int fused, int use_graph) {
     // Verifying several positions must use the same K-reduction boundaries as
     // serial decoding, even if the block touches 32 or more distinct experts.
     if (splits != 2 && splits != 8) return int(cudaErrorInvalidValue);
@@ -469,14 +657,17 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
     size_t meta_size = jobs_size + size_t(rows) * sizeof(RoutedRow);
     size_t size = partial_size + 2 * inter_size + rotated_size + meta_size;
     if (*scratch_bytes < size) {
-        if (*scratch)
+        if (*scratch) {
+            ds_moe_graph_release(*scratch);
             CHECK(cudaFree(*scratch));
+        }
         *scratch = nullptr;
         *scratch_bytes = 0;
         CHECK(cudaMalloc(scratch, size));
         *scratch_bytes = size;
     }
-    char *base = static_cast<char *>(*scratch);
+    char *scratch_base = static_cast<char *>(*scratch);
+    char *base = scratch_base;
     float *partial = reinterpret_cast<float *>(base);
     base += partial_size;
     float *gate = reinterpret_cast<float *>(base);
@@ -487,6 +678,17 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
     base += rotated_size;
     Job *device_jobs = reinterpret_cast<Job *>(base);
     auto device_rows = reinterpret_cast<RoutedRow *>(base + jobs_size);
+    if (use_graph && rows <= 64) {
+        int device = 0;
+        CHECK(cudaGetDevice(&device));
+        int graph_status = graph_run(*scratch, device, jobs, n_jobs, routes, rows, x, weighted,
+                                     mcg, splits, fused, scratch_base, partial_size, inter_size,
+                                     rotated_size, meta_size);
+        if (graph_status == 0) return 0;
+        if (graph_status != -1) return graph_status;
+        // A busy graph keeps its metadata pinned until its completion event.
+        // Use the existing eager path rather than waiting for it on the host.
+    }
     if (inline_metadata && rows <= 64) {
         if (rows <= 8)
             stage_descriptors<8>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
@@ -502,7 +704,7 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
         // Mode 1 is the original fused reference, 2 packs codebook arithmetic by pairs.
         auto launch = mcg ? (fused == 2 ? launch_fused<true,true> : launch_fused<true,false>)
                           : (fused == 2 ? launch_fused<false,true> : launch_fused<false,false>);
-        launch(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted);
+        launch(device_jobs, device_rows, n_jobs, rows, splits, x, work, partial, weighted, nullptr);
     } else if (mcg)
         launch_ffn<true>(device_jobs, device_rows, n_jobs, rows, splits, x, rotated, partial, gate, up, weighted);
     else
@@ -525,7 +727,7 @@ extern "C" int ds_moe_run(void **scratch, size_t *scratch_bytes, const Job *jobs
     CHECK(cudaMalloc(&io.ptr, 2 * count * sizeof(float)));
     CHECK(cudaMemcpy(io.ptr, x, count * sizeof(float), cudaMemcpyHostToDevice));
     int code = ds_moe_run_dev(scratch, scratch_bytes, jobs, n_jobs, routes.data(), rows,
-                              io.ptr, io.ptr + count, 0, n_jobs < 32 ? 8 : 2, 1, 0);
+                              io.ptr, io.ptr + count, 0, n_jobs < 32 ? 8 : 2, 1, 0, 0);
     if (code)
         return code;
     return int(cudaMemcpy(y, io.ptr + count, count * sizeof(float), cudaMemcpyDeviceToHost));

@@ -24,6 +24,17 @@ The strongest remaining vLLM mechanism to test is full CUDA-graph replay for ste
 
 The next implementation experiment should first establish which native decode stages are capture-safe (no per-step host reads, allocations, or variable shapes), then capture one warmed C4 and C6 graph shape. Measure graph replay with identical requests and verify output parity before expanding shape coverage. This is a larger architectural step than the rejected CPU/calibration toggles.
 
+## CUDA-graph replay experiment (2026-11-27)
+
+A narrow graph around each routed MoE FFN group was added as an opt-in path (`DS4_MOE_CUDA_GRAPH=1`); CPU router-score reads and per-layer dispatch remain eager. The graph uses a dedicated nonblocking stream with default-stream event handoffs, pinned host descriptors, and eager fallback while a prior graph owns the staging buffers. Trace logging is disabled unless `DS4_MOE_CUDA_GRAPH_TRACE=1`. The feature remains off by default.
+
+| Experiment | C4 aggregate tok/s | C6 aggregate tok/s | Output hashes | Decision |
+|---|---:|---:|---|---|
+| Stable GPU-only control | 490.7 | 495.6 | baseline | keep |
+| MoE FFN CUDA-graph groups | 488.8 | 498.3 | exact match | no reliable improvement; keep opt-in only |
+
+Each result uses one warm-up and six measured waves, 1,500 generated tokens per client. All scored requests completed and matched reasoning/content hashes with their controls. Raw waves are in `../results/decode/c4-moe-cuda-graphs-20261127.jsonl` and `../results/decode/c6-moe-cuda-graphs-20261127.jsonl`. Candidate changes: `DS4_MOE_CUDA_GRAPH`/trace toggles and graph capture around expert FFN groups. The small C6 delta (+0.5%) is within ordinary run variation and does not justify enabling this path by default. This result does not test full-step replay.
+
 ## What transfers from Hyperflare
 
 Hyperflare PR #515 combines per-depth calibration with a correction for surplus from packed, variable-length allocations. The calibration half alone did not help this fixed code-edit replay. The surplus half is aimed at crowded rounds where requests get unequal draft budgets; our current fixed-width speculative path does not yet have the same packed causal-prefix allocator, so copying that correction alone would be mathematically ungrounded. Revisit it only alongside a measured variable-length packed scheduler and per-request calibration data.

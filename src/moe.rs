@@ -97,7 +97,9 @@ unsafe extern "C" {
         splits: i32,
         inline_metadata: i32,
         fused: i32,
+        use_graph: i32,
     ) -> i32;
+    fn ds_moe_graph_release(scratch: *mut c_void);
     #[cfg(test)]
     fn ds_moe_run(
         scratch: *mut *mut c_void,
@@ -387,6 +389,7 @@ struct DeviceCache {
     packed_upload: bool,
     inline_metadata: bool,
     recipe_prefill: bool,
+    cuda_graph: bool,
     #[cfg(feature = "recipe-prefill")]
     tp2_prefill: bool,
     #[cfg(feature = "recipe-prefill")]
@@ -433,6 +436,7 @@ impl DeviceCache {
         Ok(Self {
             idle_pool: None,
             recipe_prefill,
+            cuda_graph: switch("DS4_MOE_CUDA_GRAPH", false)?,
             #[cfg(feature = "recipe-prefill")]
             tp2_prefill: tp2_prefill_enabled()?,
             #[cfg(feature = "recipe-prefill")]
@@ -665,6 +669,7 @@ impl DeviceCache {
 
 impl Drop for DeviceCache {
     fn drop(&mut self) {
+        unsafe { ds_moe_graph_release(self.scratch as *mut c_void) };
         #[cfg(feature = "recipe-prefill")]
         unsafe {
             tp2::ds_recipe_free_uploads(self.device, self.upload_workspace);
@@ -871,6 +876,7 @@ struct Dispatch<'a> {
     weighted: &'a mut Dev,
     top_k: usize,
     recipe_eligible: bool,
+    cuda_graph: bool,
 }
 
 impl Dispatch<'_> {
@@ -936,6 +942,7 @@ impl Dispatch<'_> {
                 } else {
                     0
                 },
+                (self.cuda_graph && !recipe).into(),
             )
         };
         device.scratch = scratch as usize;
@@ -1119,6 +1126,7 @@ fn forward<const E: usize, const K: usize>(
         None
     };
     let device = rt.moe_cache.device(rt.device)?;
+    let cuda_graph = !rt.target_prefill && device.cuda_graph;
     let mut primary = Placement::prepare(device, layer, local, false)?;
     let report = device.metrics;
     let mut peer = if let Some(work) = &peer_work {
@@ -1162,6 +1170,7 @@ fn forward<const E: usize, const K: usize>(
         weighted: &mut weighted,
         top_k: K,
         recipe_eligible: rt.target_prefill && batch >= 128 && matches!(layer, Layer::Backbone(_)),
+        cuda_graph,
     };
     let (mut begin, mut ni, mut pi) = (0, 0, 0);
     while begin < routes.len() {
