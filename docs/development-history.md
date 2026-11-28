@@ -93,3 +93,35 @@ Preparing canonical history on idle GPUs reduced the wait after a simulated two-
 ## Coding-agent optimization round, 2026-11-26
 
 Caching ordinary text tokens cut the median wait for first output on changing 404k histories from 0.85–0.93 s to 0.48 s. Six warm 404k coding streams delivered 299.7 aggregate tok/s over the whole request wave. Two-score interleaving in the DSpark head and bulk prefix-key hashing remain experimental. [Results and three checkpoints](../benchmarks/reports/agent-followups.md)
+
+## C4/C6 decode follow-up, 2026-11-27
+
+The focus shifted to the concurrent agentic code-edit gap against vLLM and on testing mechanisms from vLLM and Hyperflare. The standard screening workload uses a 25,625-token prompt, 1,500 generated tokens per client, one warm-up wave and six scored waves. Native tests use the workstation's 375 W per inference GPU cap and compare against same-day stable controls. GPU-only candidate runs check reasoning/content hashes; the CPU-expert path uses approximate host math and is not a text-parity claim.
+
+### Retained or validated
+
+- **Decoupled prefix checkpoints from compute chunk size.** The 8,192-token prefill batch had also become the KV prefix snapshot interval, leaving 1,049 tokens of a repeated 25,625-token prompt to re-prefill. Prefix snapshots are now 64-token aligned while physical prefill remains 8,192 tokens. The matched post-fix benchmark measured 491.4 C4 and 497.8 C6 aggregate tok/s, with 0.219 s and 0.312 s median first output. The model output hashes matched controls. See [prefix fix benchmark](../benchmarks/reports/prefix-fix-benchmark-20261127.md).
+- **Batch-aware confidence remains a default.** Raising the confidence threshold from 0.4 to 0.5 only for concurrent decoding preserved the C1 behavior and measured +0.37% at C1, +0.56% at C4 and +0.93% at C6 versus the matched 0.4 control. Outputs matched exactly. The gain is modest but consistent across the tested client counts. See [batch-aware confidence](../benchmarks/reports/batch-adaptive-confidence.md).
+- **Ragged target batches are already supported.** Each request can contribute a different number of verification rows; the batch path packs their real histories. This is distinct from choosing a shared draft budget across requests.
+
+### Rejected or left experimental
+
+| Experiment | C4 aggregate tok/s | C6 aggregate tok/s | Comparison / outcome |
+|---|---:|---:|---|
+| Stable control for CPU, calibration, graph and corrected adaptive runs | 490.7 | 495.6 | Matched baseline |
+| CPU host-expert overlap port | 457.8 | 499.7 | Vs. matched baseline: −6.7% / +0.8%; disabled |
+| Hyperflare-style depth calibration alone | 468.0 | 483.9 | Vs. matched baseline: −4.6% / −2.4%; removed |
+| Fixed shared budget, 4 draft tokens per request | 481.3 | 488.6 | Vs. fresh controls 498.8 / 504.1: −3.5% / −3.1%; disabled |
+| Fixed shared budget, 6 draft tokens per request | 459.2 | 462.9 | Vs. fresh controls 498.8 / 504.1: −7.9% / −8.2%; disabled |
+| Routed MoE FFN CUDA-graph groups | 488.8 | 498.3 | Vs. matched baseline: −0.4% / +0.5%; no reliable gain, opt-in only |
+| Cost-aware shared draft budget, corrected runs | 460.5 | 499.5 | Vs. matched baseline: −6.2% / +0.8%; mixed, disabled by default |
+
+The shared-budget variants retain a causal prefix chosen from confidence scores. The cost-aware version adds an in-memory profile of grouped draft and target step times, keyed by context and batch shape. It falls back to the existing confidence threshold until enough samples exist. The C6 +0.8% result is within run variation; no tested scheduler has shown a reliable C4/C6 gain. See the [vLLM and Hyperflare follow-up](../benchmarks/reports/vllm-hyperflare-followup-2026-11-27.md), [shared-budget comparison](../benchmarks/reports/vllm-c46-decode-path-20261127.md), and [corrected adaptive-budget results](../benchmarks/reports/adaptive-draft-budget-2026-11-27.md).
+
+The graph experiment captures only routed expert FFN groups. CPU-side router-score reads and dispatch remain between layers, so this is not a full decode-step graph. It verified replay on both cards and exact output parity but did not improve throughput reliably. Full-step capture remains a separate architectural effort requiring capture-safe router and attention paths.
+
+### Measurement correction and current state
+
+An initial adaptive-budget benchmark accidentally printed confidence vectors during every decode step, which distorted the throughput. Those raw files are explicitly labeled `verbose-log-contaminated` and excluded from the corrected table. Curve collection and diagnostic logging are now separate; vectors print only when `DS4_CONFIDENCE_TRACE=1`. Lookup verification batches are also excluded from learned-cost observations because their proposal yield is not represented by DSpark confidence curves.
+
+The live service was returned to the stable TP2 image `ds4-flash-rs:tp2-peer-index-prefix64-20261127`. CUDA-graph groups and adaptive budget selection remain disabled by default. Checkpoints for the graph and scheduler experiments are tagged `checkpoint-2026-11-27-moe-cuda-graph-groups` and `checkpoint-2026-11-27-adaptive-budget-corrected`. Detailed raw waves and reproducibility notes are linked in the reports above.

@@ -31,8 +31,12 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_EXPERT_EVICTION` | lfu | Keeps frequently used experts on each card. Counts span the process lifetime. Ties use least-recent access. [Tested image and launch command](../benchmarks/reports/expert-cache.md#running-the-candidate-on-this-workstation) |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
-| `DS4_ADAPTIVE_DRAFT_BUDGET` | 0 | Opt in to a shared draft-token budget selected from per-step confidence and observed draft/target costs; profiles in memory by context bucket and batch shape, and uses the normal confidence threshold until enough samples exist |
-| `DS4_ADAPTIVE_DRAFT_BUDGET_TRACE` | 0 | Log the selected budget and sampled cost points periodically |
+| `DS4_CONFIDENCE_BATCH_DELTA` | 0.1 | Adds to the confidence threshold only when more than one request is decoding; this batch-aware setting is retained by default |
+| `DS4_ADAPTIVE_DRAFT_BUDGET` | 0 | Experimental shared draft-token budget from confidence and observed draft/target costs. Mixed C4/C6 results; leave off by default. Uses the normal confidence threshold until enough samples exist. [Results](../benchmarks/reports/adaptive-draft-budget-2026-11-27.md) |
+| `DS4_ADAPTIVE_DRAFT_BUDGET_TRACE` | 0 | Log selected budgets and sampled cost points periodically |
+| `DS4_CONFIDENCE_TRACE` | unset | Print per-request confidence vectors and accepted draft counts; diagnostic only, adds log output |
+| `DS4_MOE_CUDA_GRAPH` | 0 | Experimental replay of routed MoE FFN groups only. Did not show a reliable C4/C6 gain; it does not capture a full decode step. [Results](../benchmarks/reports/vllm-hyperflare-followup-2026-11-27.md#cuda-graph-replay-experiment-2026-11-27) |
+| `DS4_MOE_CUDA_GRAPH_TRACE` | 0 | Log MoE graph capture and replay events |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
 | `DS4_OUTPUT_LOOKUP` | `repeated` in the recommended TP2 profile | Use recent verified output for a single client and repeated patterns from each active client's own output concurrently. Weak concurrent matches fall back to DSpark. Select `single`, `0` or `1` to change the policy. |
 | `DS4_C1_OUTPUT_CONSENSUS` | 1 in the recommended TP2 profile | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. |
