@@ -23,10 +23,14 @@ unsafe extern "C" {
 pub(super) struct Gate {
     threshold: f32,
     trace: bool,
+    batch_budget_per_request: Option<usize>,
 }
 impl Gate {
-    pub(super) fn configured(concurrent_sessions: usize) -> Result<Option<Self>> {
-        let threshold = match std::env::var("DS4_CONFIDENCE_THRESHOLD") {
+    pub(super) fn configured(
+        concurrent_sessions: usize,
+        draft_batch_size: usize,
+    ) -> Result<Option<Self>> {
+        let mut threshold = match std::env::var("DS4_CONFIDENCE_THRESHOLD") {
             Ok(v) => v
                 .parse::<f32>()
                 .context("invalid DS4_CONFIDENCE_THRESHOLD")?,
@@ -49,8 +53,39 @@ impl Gate {
             "DS4_CONFIDENCE_BATCH_DELTA must be in [0,1]"
         );
         let trace = std::env::var_os("DS4_CONFIDENCE_TRACE").is_some_and(|v| v == "1");
+        let batch_budget_per_request = match std::env::var("DS4_BATCH_DRAFT_BUDGET_PER_REQUEST") {
+            Ok(v) if v.is_empty() => None,
+            Ok(v) => {
+                let value = v
+                    .parse::<usize>()
+                    .context("invalid DS4_BATCH_DRAFT_BUDGET_PER_REQUEST")?;
+                ensure!(
+                    value > 0,
+                    "DS4_BATCH_DRAFT_BUDGET_PER_REQUEST must be positive"
+                );
+                Some(value)
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let batch_budget_active = batch_budget_active(batch_budget_per_request, draft_batch_size);
+        if batch_budget_active {
+            // The batch allocator needs each full confidence curve to price
+            // candidates across requests; per-request thresholding happens after.
+            threshold = 0.;
+        }
         let threshold = threshold_for_batch(threshold, batch_delta, concurrent_sessions);
-        Ok((threshold > 0. || trace).then_some(Self { threshold, trace }))
+        Ok(
+            (threshold > 0. || trace || batch_budget_active).then_some(Self {
+                threshold,
+                trace: trace || batch_budget_active,
+                batch_budget_per_request: if batch_budget_active {
+                    batch_budget_per_request
+                } else {
+                    None
+                },
+            }),
+        )
     }
     pub(super) fn evaluate(
         &self,
@@ -89,6 +124,10 @@ impl Gate {
         proposed.truncate(keep);
         Ok((proposed, self.trace.then_some(confidence)))
     }
+
+    pub(super) fn batch_budget_per_request(&self) -> Option<usize> {
+        self.batch_budget_per_request
+    }
 }
 
 fn threshold_for_batch(threshold: f32, delta: f32, concurrent_sessions: usize) -> f32 {
@@ -97,6 +136,10 @@ fn threshold_for_batch(threshold: f32, delta: f32, concurrent_sessions: usize) -
     } else {
         threshold
     }
+}
+
+fn batch_budget_active(per_request: Option<usize>, draft_batch_size: usize) -> bool {
+    per_request.is_some() && draft_batch_size > 1
 }
 
 fn select(logits: &[f32], threshold: f32) -> Result<(usize, Vec<f32>)> {
@@ -110,6 +153,31 @@ fn select(logits: &[f32], threshold: f32) -> Result<(usize, Vec<f32>)> {
         .position(|&v| v < threshold)
         .unwrap_or(scores.len());
     Ok((keep, scores))
+}
+
+pub(super) fn allocate_batch_budget(conditional: &[Vec<f32>], budget: usize) -> Result<Vec<usize>> {
+    let mut candidates = Vec::new();
+    for (request, probabilities) in conditional.iter().enumerate() {
+        let mut survival = 1.0f32;
+        for (depth, &probability) in probabilities.iter().enumerate() {
+            ensure!(
+                probability.is_finite() && (0.0..=1.0).contains(&probability),
+                "invalid draft confidence probability"
+            );
+            survival *= probability;
+            candidates.push((survival, request, depth));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut kept = vec![0; conditional.len()];
+    for &(_, request, depth) in candidates.iter().take(budget.min(candidates.len())) {
+        kept[request] = kept[request].max(depth + 1);
+    }
+    Ok(kept)
 }
 
 #[cfg(test)]
@@ -133,6 +201,21 @@ mod tests {
         assert_eq!(threshold_for_batch(0.4, 0.0, 6), 0.4);
         assert_eq!(threshold_for_batch(0.8, 0.5, 6), 1.0);
         assert_eq!(threshold_for_batch(0.0, 0.1, 6), 0.0);
+    }
+
+    #[test]
+    fn shared_budget_requires_a_real_grouped_draft_batch() {
+        assert!(!batch_budget_active(Some(4), 1));
+        assert!(batch_budget_active(Some(4), 2));
+        assert!(!batch_budget_active(None, 6));
+    }
+
+    #[test]
+    fn batch_budget_allocates_by_cumulative_survival_and_keeps_prefixes() -> Result<()> {
+        let kept = allocate_batch_budget(&[vec![0.9, 0.9, 0.2], vec![0.7, 0.7, 0.7]], 3)?;
+        assert_eq!(kept, [2, 1]);
+        assert!(allocate_batch_budget(&[vec![f32::NAN]], 1).is_err());
+        Ok(())
     }
 
     #[test]
@@ -178,6 +261,7 @@ mod tests {
         let (tokens, actual) = Gate {
             threshold: 0.,
             trace: true,
+            batch_budget_per_request: None,
         }
         .evaluate(&mut rt, &h, &mix, 21, &ids)?;
         assert_eq!(tokens, [1234, 981, 17]);

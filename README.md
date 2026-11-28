@@ -16,6 +16,7 @@ The native rates are medians of six waves at 375 W per GPU with batch-aware spec
 
 - [Latest C4/C6 comparison and run data](benchmarks/reports/prefix-fix-benchmark-20261127.md)
 - [Batch-aware decode optimization and matched controls](benchmarks/reports/batch-adaptive-confidence.md)
+- [vLLM decode path investigation and rejected shared-budget trial](benchmarks/reports/vllm-c46-decode-path-20261127.md)
 - [Long-context, cold-prefill and session-capacity results](benchmarks/reports/default-profile-headline-20261127.md)
 - [All benchmark reports and raw data](benchmarks/)
 

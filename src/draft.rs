@@ -141,14 +141,19 @@ pub(crate) fn propose_many(
     }
     let x = residual::readout(rt, &h, &mut mix, "mtp.2.norm.weight", 0, rows)?;
     let logits = rt.linear_dev("head.weight", &x, rows, 1)?;
-    let gate = confidence::Gate::configured(concurrent_sessions)?;
+    let gate = confidence::Gate::configured(concurrent_sessions, requests.len())?;
+    let batch_budget = gate
+        .as_ref()
+        .filter(|_| requests.len() > 1)
+        .and_then(confidence::Gate::batch_budget_per_request)
+        .map(|n| n.saturating_mul(requests.len()));
     if let [r] = requests {
         let ids = rt.markov(&logits, r.seed, r.width)?;
         return Ok(vec![finish_proposal(rt, r, gate.as_ref(), &h, &mix, &ids)?]);
     }
     let mut proposals = Vec::with_capacity(requests.len());
     let mut offset = 0;
-    for r in requests {
+    for r in requests.iter_mut() {
         let logits = rt.slice(&logits, offset * 129280, r.width * 129280)?;
         let ids = rt.markov(&logits, r.seed, r.width)?;
         let result = if gate.is_some() {
@@ -162,6 +167,21 @@ pub(crate) fn propose_many(
         };
         proposals.push(result);
         offset += r.width;
+    }
+    if let Some(budget) = batch_budget {
+        let curves = requests
+            .iter_mut()
+            .map(|r| {
+                r.state
+                    .trace
+                    .take()
+                    .context("missing DSpark confidence curve for batch allocation")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kept = confidence::allocate_batch_budget(&curves, budget)?;
+        for (proposal, keep) in proposals.iter_mut().zip(kept) {
+            proposal.truncate(keep);
+        }
     }
     Ok(proposals)
 }

@@ -1,0 +1,5 @@
+{"date":"2026-11-27","kind":"baseline","clients":[1,4,6],"tok_s":[410.0,497.8,503.8],"profile":"batch-adaptive-confidence; 375W GPU; coding edit 25,625 input / 1,500 output"}
+{"date":"2026-11-27","kind":"vllm-reference","clients":[6],"tok_s":[537.2,561.0],"profile":"same-host CPU host experts on; 375W; prior six-wave controls"}
+{"date":"2026-11-27","kind":"fresh-control","clients":[4,6],"tok_s":[498.8,504.1],"profile":"original binary restarted; cold expert cache; one warm-up plus six measured waves"}
+{"date":"2026-11-27","kind":"rejected","setting":"shared draft budget 4/request","clients":[4,6],"tok_s":[481.3,488.6],"delta_percent":[-3.5,-3.1],"profile":"fixed budget, current confidence head, 25.6k coding edit"}
+{"date":"2026-11-27","kind":"rejected","setting":"shared draft budget 6/request","clients":[4,6],"tok_s":[459.2,462.9],"delta_percent":[-7.9,-8.2],"profile":"fixed budget, current confidence head, 25.6k coding edit"}
