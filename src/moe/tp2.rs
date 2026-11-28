@@ -8,6 +8,15 @@ const COPY_FLOATS: usize = (2 << 20) / size_of::<f32>();
 
 unsafe extern "C" {
     pub(super) fn ds_recipe_free_uploads(device: i32, work: *mut c_void);
+    fn ds_recipe_stage_begin(work: *mut *mut c_void, slab: *mut *mut u8) -> i32;
+    fn ds_recipe_stage_fill(
+        slab: *mut u8,
+        parts: *const *const c_void,
+        rank: i32,
+        piece: i32,
+        pieces: i32,
+    );
+    fn ds_recipe_stage_commit(work: *mut c_void, slot: *mut c_void) -> i32;
     pub(super) fn ds_recipe_staged_rank(
         work: *mut *mut c_void,
         slot: *mut c_void,
@@ -73,9 +82,56 @@ unsafe extern "C" {
     fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
 }
 
+/// `DS4_TP2_PARALLEL_STAGE` (default 1) selects the parallel shard stager.
+pub(super) fn parallel_stage() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DS4_TP2_PARALLEL_STAGE").as_deref() != Ok("0"))
+}
+
+/// Fill the staging slab for one rank shard from the rayon pool, then upload
+/// it with one DMA. Same bytes as `ds_recipe_staged_rank`; the serial
+/// single-thread copy from the mmapped checkpoint dominated prompt expert time.
+pub(super) fn staged_rank_parallel(
+    work: &mut *mut c_void,
+    slot: *mut c_void,
+    bytes: usize,
+    parts: &[*const c_void; 9],
+    rank: u8,
+) -> i32 {
+    if bytes < RANK_SLOT_BYTES || slot.is_null() || parts.iter().any(|p| p.is_null()) {
+        return 1; // cudaErrorInvalidValue
+    }
+    let mut slab = ptr::null_mut();
+    let t = crate::runtime::phase::start();
+    let status = unsafe { ds_recipe_stage_begin(work, &mut slab) };
+    crate::runtime::phase::add(crate::runtime::phase::STAGE_WAIT, t);
+    if status != 0 {
+        return status;
+    }
+    fill_slab(slab, parts, rank);
+    let t = crate::runtime::phase::start();
+    let status = unsafe { ds_recipe_stage_commit(*work, slot) };
+    crate::runtime::phase::add(crate::runtime::phase::STAGE_COMMIT, t);
+    status
+}
+
+/// Copy one rank shard from the mmapped checkpoint into `slab` (upload
+/// layout) from eight rayon tasks.
+fn fill_slab(slab: *mut u8, parts: &[*const c_void; 9], rank: u8) {
+    const PIECES: i32 = 8;
+    let t = crate::runtime::phase::start();
+    let (slab, parts) = (slab as usize, parts.map(|p| p as usize));
+    (0..PIECES).into_par_iter().for_each(|piece| {
+        let parts = parts.map(|p| p as *const c_void);
+        unsafe { ds_recipe_stage_fill(slab as *mut u8, parts.as_ptr(), rank.into(), piece, PIECES) }
+    });
+    crate::runtime::phase::add(crate::runtime::phase::STAGE_FILL, t);
+}
+
 fn preload_fits(resident: usize, capacity: usize, free: usize) -> bool {
     let budget = capacity * RANK_SLOT_BYTES;
-    budget.saturating_sub(resident) >= RANK_SLOT_BYTES && free >= EXPERT_HEADROOM + RANK_SLOT_BYTES
+    budget.saturating_sub(resident) >= RANK_SLOT_BYTES
+        && free >= expert_headroom() + RANK_SLOT_BYTES
 }
 
 fn preload_rank(
@@ -271,7 +327,9 @@ fn run_rank(
     output: usize,
 ) -> Result<()> {
     cuda(unsafe { cudaSetDevice(cache.device) })?;
+    let t = crate::runtime::phase::start();
     let capacity = cache.capacity(RANK_SLOT_BYTES)?;
+    crate::runtime::phase::add(crate::runtime::phase::RANK_CAPACITY, t);
     let mut jobs = Vec::new();
     let mut descriptors = Vec::with_capacity(GROUP_ROWS.min(routes.len()));
     while !routes.is_empty() {
@@ -279,6 +337,7 @@ fn run_rank(
         jobs.clear();
         descriptors.clear();
         let group_start = cache.clock;
+        let t = crate::runtime::phase::start();
         for expert in group.chunk_by(|a, b| a.expert == b.expert) {
             let slot = cache.acquire(
                 weights,
@@ -306,6 +365,8 @@ fn run_rank(
                 }
             }
         }
+        crate::runtime::phase::add(crate::runtime::phase::RANK_ACQUIRE, t);
+        let t = crate::runtime::phase::start();
         let mut scratch = cache.scratch as *mut c_void;
         let status = unsafe {
             ds_recipe_rank_group(
@@ -320,6 +381,7 @@ fn run_rank(
             )
         };
         cache.scratch = scratch as usize;
+        crate::runtime::phase::add(crate::runtime::phase::RANK_LAUNCH, t);
         cuda(status)?;
         routes = rest;
     }
@@ -387,6 +449,7 @@ pub(super) fn dispatch(
         };
         let replica = peer_cache.rank_workspace.io as *mut f32;
         let partials = unsafe { replica.add(len) };
+        let t = crate::runtime::phase::start();
         cuda(unsafe {
             ds_recipe_broadcast(
                 x.as_ptr(),
@@ -406,6 +469,8 @@ pub(super) fn dispatch(
             )
         })?;
 
+        crate::runtime::phase::add(crate::runtime::phase::TP2_BROADCAST, t);
+        let t = crate::runtime::phase::start();
         let weights = &*rt.weights;
         let peer_input = replica as usize;
         let peer_output = partials as usize;
@@ -436,6 +501,8 @@ pub(super) fn dispatch(
                 )
             },
         )?;
+        crate::runtime::phase::add(crate::runtime::phase::TP2_RANKS, t);
+        let t = crate::runtime::phase::start();
         if direct {
             cuda(unsafe {
                 ds_recipe_collect_dma(
@@ -464,6 +531,7 @@ pub(super) fn dispatch(
                 })?;
             }
         }
+        crate::runtime::phase::add(crate::runtime::phase::TP2_COLLECT, t);
         let owner_cache = rt.moe_cache.device(owner)?;
         if owner_cache.metrics {
             let uploads =
@@ -494,7 +562,7 @@ mod tests {
 
     #[test]
     fn startup_preload_preserves_resident_bytes_and_headroom() {
-        let required = EXPERT_HEADROOM + RANK_SLOT_BYTES;
+        let required = expert_headroom() + RANK_SLOT_BYTES;
         assert!(preload_fits(0, 1, required));
         assert!(!preload_fits(0, 1, required - 1));
         assert!(!preload_fits(RANK_SLOT_BYTES, 1, required));

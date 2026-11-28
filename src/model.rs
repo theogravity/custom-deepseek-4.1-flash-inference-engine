@@ -122,6 +122,58 @@ fn cached<T>(result: Result<T>, operation: &str) -> Option<T> {
     }
 }
 
+/// Opt-in host wall-clock split of concurrent decode steps (`DS4_STEP_TIMING=1`).
+/// Prints averages over every 256 steps with at least two decoding requests.
+mod step_timing {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::OnceLock;
+    pub(super) const DRAFT: usize = 0;
+    pub(super) const FORWARD: usize = 1;
+    pub(super) const FINISH: usize = 2;
+    // Phases of the current step, then window totals: draft/forward/finish
+    // nanoseconds, steps, sessions, base rows and requested draft width.
+    static STEP: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    static TOTAL: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+    fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("DS4_STEP_TIMING").as_deref() == Ok("1"))
+    }
+    pub(super) fn add(phase: usize, started: std::time::Instant) {
+        if enabled() {
+            STEP[phase].fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        }
+    }
+    pub(super) fn step(sessions: usize, rows: usize, draft_tokens: usize) {
+        if !enabled() {
+            return;
+        }
+        let phases: Vec<u64> = STEP.iter().map(|p| p.swap(0, Relaxed)).collect();
+        if sessions < 2 {
+            return;
+        }
+        for (total, value) in TOTAL.iter().zip(phases.into_iter().chain([
+            1,
+            sessions as u64,
+            rows as u64,
+            draft_tokens as u64,
+        ])) {
+            total.fetch_add(value, Relaxed);
+        }
+        if TOTAL[3].load(Relaxed) == 256 {
+            let t: Vec<f64> = TOTAL.iter().map(|v| v.swap(0, Relaxed) as f64).collect();
+            eprintln!(
+                "step-timing steps=256 sessions={:.2} base_rows={:.1} draft_width={:.1} draft_ms={:.2} forward_ms={:.2} finish_ms={:.2}",
+                t[4] / 256.,
+                t[5] / 256.,
+                t[6] / 256.,
+                t[0] / 256e6,
+                t[1] / 256e6,
+                t[2] / 256e6
+            );
+        }
+    }
+}
+
 // The target draws one independent sample for each candidate position on GPU.
 // Rejected suffix samples are discarded with the corresponding target state.
 struct Scores(Vec<u32>);
@@ -796,6 +848,7 @@ impl Model {
         let draft_started = std::time::Instant::now();
         let (drafts, grouped_draft) =
             self.learned_proposals(&mut inputs, concurrent_sessions, adaptive_cost);
+        step_timing::add(step_timing::DRAFT, draft_started);
         if self.adaptive_budget
             && adaptive_eligible
             && draft_count > 1
@@ -841,6 +894,9 @@ impl Model {
         if !work.is_empty() {
             self.decode_group(&mut work, &mut results);
         }
+        if concurrent_sessions > 0 {
+            step_timing::step(concurrent_sessions, base_rows, draft_tokens);
+        }
         results.into_iter().map(Option::unwrap).collect()
     }
 
@@ -879,7 +935,9 @@ impl Model {
         let pos = session.pos;
         let prompt = &session.ids[..session.prompt_len];
         if session.points.get(session.next_point) == Some(&pos) {
+            self.rt.debug_sync("before prefix store")?;
             self.store_prefill(session, interruptible)?;
+            self.rt.debug_sync(&format!("prefix store at {pos}"))?;
             session.next_point += 1;
         }
         let horizon = session
@@ -899,6 +957,7 @@ impl Model {
         let observe = session.draft.is_some()
             && !skip_replay
             && (interruptible || pos + n > horizon.saturating_sub(128));
+        let chunk_timer = crate::runtime::phase::start();
         self.rt.target_prefill = true;
         let skip_decoder = skip_replay
             || (!replay
@@ -921,7 +980,14 @@ impl Model {
         );
         self.rt.target_prefill = false;
         session.cache.replay_fresh_window = false;
+        crate::runtime::phase::report(
+            chunk_timer,
+            &format!("pos={pos} rows={n} skip_decoder={skip_decoder}"),
+        );
         let target = target?;
+        self.rt.debug_sync(&format!(
+            "prefill chunk pos {pos} rows {n} skip_decoder {skip_decoder}"
+        ))?;
         if let Some(draft) = session.draft.as_mut().filter(|_| observe) {
             let features = target
                 .features
@@ -929,6 +995,7 @@ impl Model {
                 .context("missing DSpark prefill features")?;
             let retained = if replay { n.min(128) } else { n };
             draft.observe(&mut self.rt, features, pos + n - retained, retained)?;
+            self.rt.debug_sync("prefill DSpark observe")?;
         }
         session.pos += n;
         if !last {
@@ -1020,8 +1087,11 @@ impl Model {
             })
             .collect();
         self.rt.verification = items.len() > 1 || items[0].rows > 1;
+        let forward_started = std::time::Instant::now();
         let targets = self.forward_batch(&mut items);
         self.rt.verification = false;
+        step_timing::add(step_timing::FORWARD, forward_started);
+        let finish_started = std::time::Instant::now();
         let observed = matches!(&targets, Ok(targets) if targets.len() == work.len());
         match targets {
             Ok(targets) if targets.len() == work.len() => {
@@ -1041,6 +1111,7 @@ impl Model {
                 }
             }
         }
+        step_timing::add(step_timing::FINISH, finish_started);
         if self.adaptive_budget && observed && cost_profile_eligible {
             self.adaptive_costs.observe_verify(
                 context_bucket,

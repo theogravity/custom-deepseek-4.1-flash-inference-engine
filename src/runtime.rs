@@ -115,6 +115,82 @@ pub fn packed_dense() -> bool {
 pub fn tp_dense() -> bool {
     std::env::var_os("DS4_TP_DENSE").is_some_and(|v| v == "1")
 }
+/// Opt-in host wall-clock split of each prompt chunk (`DS4_PREFILL_TIMING=1`).
+pub(crate) mod phase {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    pub(crate) const ATTENTION: usize = 0;
+    pub(crate) const MOE: usize = 1;
+    pub(crate) const ROUTER_WAIT: usize = 2;
+    pub(crate) const ROUTES: usize = 3;
+    pub(crate) const TP2_BROADCAST: usize = 4;
+    pub(crate) const TP2_RANKS: usize = 5;
+    pub(crate) const TP2_COLLECT: usize = 6;
+    pub(crate) const ENGRAM: usize = 7;
+    pub(crate) const RESIDUAL: usize = 8;
+    pub(crate) const SHARED: usize = 9;
+    pub(crate) const RANK_ACQUIRE: usize = 10;
+    pub(crate) const RANK_LAUNCH: usize = 11;
+    pub(crate) const RANK_CAPACITY: usize = 12;
+    pub(crate) const UPLOAD_EVICT: usize = 13;
+    pub(crate) const UPLOAD_MALLOC: usize = 14;
+    pub(crate) const STAGE_WAIT: usize = 15;
+    pub(crate) const STAGE_FILL: usize = 16;
+    pub(crate) const STAGE_COMMIT: usize = 17;
+    pub(crate) const UPLOAD_COUNT: usize = 18;
+    const NAMES: [&str; 19] = [
+        "attention",
+        "moe",
+        "router_wait",
+        "routes",
+        "tp2_broadcast",
+        "tp2_ranks",
+        "tp2_collect",
+        "engram",
+        "residual",
+        "shared_expert",
+        "rank_acquire_sum",
+        "rank_launch_sum",
+        "rank_capacity_sum",
+        "upload_evict_sum",
+        "upload_malloc_sum",
+        "stage_wait_sum",
+        "stage_fill_sum",
+        "stage_commit_sum",
+        "uploads_x1000",
+    ];
+    static NS: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+    /// Counts appear in the report divided by 1000 (`uploads_x1000_ms` = count).
+    pub(crate) fn count(id: usize) {
+        if start().is_some() {
+            NS[id].fetch_add(1_000_000, Relaxed);
+        }
+    }
+    pub(crate) fn start() -> Option<Instant> {
+        static ON: OnceLock<bool> = OnceLock::new();
+        ON.get_or_init(|| std::env::var("DS4_PREFILL_TIMING").as_deref() == Ok("1"))
+            .then(Instant::now)
+    }
+    pub(crate) fn add(id: usize, started: Option<Instant>) {
+        if let Some(t) = started {
+            NS[id].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+        }
+    }
+    pub(crate) fn report(started: Option<Instant>, label: &str) {
+        let Some(t) = started else { return };
+        let parts: Vec<String> = NAMES
+            .iter()
+            .zip(&NS)
+            .map(|(name, ns)| format!("{name}_ms={:.1}", ns.swap(0, Relaxed) as f64 / 1e6))
+            .collect();
+        eprintln!(
+            "prefill-timing {label} total_ms={:.1} {}",
+            t.elapsed().as_secs_f64() * 1e3,
+            parts.join(" ")
+        );
+    }
+}
 struct Allocation {
     device: i32,
     ptr: *mut f32,
@@ -333,6 +409,31 @@ impl Runtime {
     }
     pub(crate) fn index_pool(&self, device: i32) -> Arc<Mutex<Pool>> {
         self.pools[&device].clone()
+    }
+    /// `DS4_DEBUG_SYNC=1`: synchronize both inference GPUs and report the
+    /// first asynchronous fault against `stage`. Diagnostic only; very slow.
+    pub(crate) fn debug_sync(&self, stage: &str) -> Result<()> {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("DS4_DEBUG_SYNC").as_deref() == Ok("1")) {
+            return Ok(());
+        }
+        unsafe extern "C" {
+            fn cudaDeviceSynchronize() -> i32;
+            fn cudaGetLastError() -> i32;
+        }
+        for dev in self.devices {
+            checked(unsafe { ds_set_device(dev) })?;
+            let code = unsafe { cudaDeviceSynchronize() };
+            if code != 0 {
+                eprintln!("debug-sync fault after {stage} on device {dev}: CUDA error {code}");
+                unsafe { cudaGetLastError() };
+                anyhow::bail!("CUDA error {code} after {stage} on device {dev}");
+            }
+        }
+        if !stage.contains("layer") {
+            eprintln!("debug-sync ok: {stage}");
+        }
+        checked(unsafe { ds_set_device(self.device) })
     }
     pub fn peer_device(&self) -> i32 {
         self.devices[usize::from(self.device == self.devices[0])]

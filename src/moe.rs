@@ -123,7 +123,18 @@ impl std::fmt::Display for MoeCudaError {
 impl std::error::Error for MoeCudaError {}
 
 const CUDA_ERROR_MEMORY_ALLOCATION: i32 = 2;
-const EXPERT_HEADROOM: usize = 512 << 20;
+/// Free VRAM kept outside the expert cache for allocations that do not
+/// reclaim expert slots themselves (CUDA libraries, native scratch).
+/// `DS4_MOE_HEADROOM_MIB` overrides the 512 MiB default.
+pub(crate) fn expert_headroom() -> usize {
+    static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        std::env::var("DS4_MOE_HEADROOM_MIB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(512 << 20, |mib| mib << 20)
+    })
+}
 
 fn cuda(code: i32) -> Result<()> {
     if code != 0 {
@@ -146,7 +157,7 @@ pub(crate) fn reclaim_rank_headroom(
     free: usize,
     slot: usize,
 ) -> Result<usize> {
-    let missing = (EXPERT_HEADROOM + slot).saturating_sub(free);
+    let missing = (expert_headroom() + slot).saturating_sub(free);
     if missing > 0 {
         if let Some(pool) = pool.and_then(|p| p.upgrade()) {
             if pool
@@ -378,6 +389,15 @@ struct DeviceCache {
     resident_bytes: usize,
     eviction_order: BTreeSet<(u64, u64, Key)>,
     frequencies: Option<Box<[u64]>>,
+    // Full-format (decode) misses evict prefill rank shards before any full
+    // slot. Shards inherit their expert's decode count, so LFU alone keeps
+    // the unused shards of decode-hot experts after a long prompt.
+    rank_first: bool,
+    decoding: bool,
+    // The staged peer-to-primary collect is executed by the peer's copy
+    // engine. Freeing its destination on the primary does not wait for that
+    // copy, so the buffer lives until this device's next router read.
+    retired_collect: Option<Dev>,
     clock: u64,
     scratch: usize,
     scratch_bytes: usize,
@@ -461,6 +481,9 @@ impl DeviceCache {
                 Ok("lfu") => Some(vec![0; EXPERT_KEYS].into_boxed_slice()),
                 _ => bail!("DS4_EXPERT_EVICTION must be lru or lfu"),
             },
+            rank_first: switch("DS4_EVICT_RANK_FIRST", true)?,
+            retired_collect: None,
+            decoding: false,
             clock: 0,
             scratch: 0,
             scratch_bytes: 0,
@@ -484,11 +507,21 @@ impl DeviceCache {
     fn evict_slot(&mut self, group_start: u64) -> Result<(usize, usize)> {
         // Most entries predate this CUDA group. Skip its pinned slots even
         // when their frequency is lower than every evictable slot.
-        let victim = self
-            .eviction_order
-            .iter()
-            .find(|(_, age, _)| *age <= group_start)
-            .copied()
+        let evictable = |&&(_, age, _): &&(u64, u64, Key)| age <= group_start;
+        #[cfg(feature = "recipe-prefill")]
+        let shard = (self.rank_first && self.decoding)
+            .then(|| {
+                self.eviction_order
+                    .iter()
+                    .filter(evictable)
+                    .find(|(_, _, key)| matches!(key.2, SlotFormat::Rank(_)))
+                    .copied()
+            })
+            .flatten();
+        #[cfg(not(feature = "recipe-prefill"))]
+        let shard = None;
+        let victim = shard
+            .or_else(|| self.eviction_order.iter().find(evictable).copied())
             .context("no evictable expert slot")?;
         self.eviction_order.remove(&victim);
         let key = victim.2;
@@ -506,7 +539,7 @@ impl DeviceCache {
         limit_bytes: usize,
         slot_bytes: usize,
     ) -> usize {
-        let available = (resident_bytes + free).saturating_sub(EXPERT_HEADROOM);
+        let available = (resident_bytes + free).saturating_sub(expert_headroom());
         (available.min(limit_bytes) / slot_bytes).max(1)
     }
 
@@ -601,6 +634,7 @@ impl DeviceCache {
     ) -> Result<usize> {
         self.clock += 1;
         let stamp = self.clock;
+        self.decoding = key.2 == SlotFormat::Full;
         if let Some(slot) = self.touch(key, stamp) {
             return Ok(slot);
         }
@@ -622,6 +656,8 @@ impl DeviceCache {
         let parts = checkpoint_parts(weights, key)?;
         let slot_bytes = key.2.bytes();
         let mut reuse = None;
+        let t = crate::runtime::phase::start();
+        crate::runtime::phase::count(crate::runtime::phase::UPLOAD_COUNT);
         while self.resident_bytes + slot_bytes > capacity * slot_bytes {
             let (old, bytes) = self.evict_slot(group_start)?;
             if bytes == slot_bytes && reuse.is_none() {
@@ -630,6 +666,8 @@ impl DeviceCache {
                 unsafe { ds_moe_free(self.device, old as *mut c_void) };
             }
         }
+        crate::runtime::phase::add(crate::runtime::phase::UPLOAD_EVICT, t);
+        let t = crate::runtime::phase::start();
         let slot = if let Some(slot) = reuse {
             slot as *mut c_void
         } else {
@@ -637,10 +675,19 @@ impl DeviceCache {
             cuda(unsafe { cudaMalloc(&mut slot, slot_bytes) })?;
             slot
         };
+        crate::runtime::phase::add(crate::runtime::phase::UPLOAD_MALLOC, t);
         let status = match key.2 {
             #[cfg(feature = "recipe-prefill")]
             SlotFormat::Rank(rank) => unsafe {
-                if self.stage_rank_weights {
+                if self.stage_rank_weights && tp2::parallel_stage() {
+                    tp2::staged_rank_parallel(
+                        &mut self.upload_workspace,
+                        slot,
+                        slot_bytes,
+                        &parts,
+                        rank,
+                    )
+                } else if self.stage_rank_weights {
                     tp2::ds_recipe_staged_rank(
                         &mut self.upload_workspace,
                         slot,
@@ -841,7 +888,10 @@ fn route_rows<const E: usize, const K: usize>(
             .enumerate()
             .for_each(assign);
     }
-    output.sort_unstable_by_key(|r| (r.expert, r.token));
+    // Expert-major, token-ascending order. Each token selects distinct
+    // experts, so a stable counting sort by expert equals sorting by
+    // (expert, token) and avoids a serial comparison sort of every prompt row.
+    let mut output = sort_by_expert::<E>(output);
     // Match the original expert-major sequential accumulation, including when
     // a token's routes span multiple groups or its expert slot is evicted.
     let mut counts = vec![0; batch];
@@ -850,6 +900,22 @@ fn route_rows<const E: usize, const K: usize>(
         counts[route.token] += 1;
     }
     Ok(output)
+}
+
+fn sort_by_expert<const E: usize>(routes: Vec<Route>) -> Vec<Route> {
+    let mut starts = vec![0usize; E + 1];
+    for r in &routes {
+        starts[r.expert + 1] += 1;
+    }
+    for e in 0..E {
+        starts[e + 1] += starts[e];
+    }
+    let mut sorted = vec![Route::default(); routes.len()];
+    for r in routes {
+        sorted[starts[r.expert]] = r;
+        starts[r.expert] += 1;
+    }
+    sorted
 }
 
 fn shared(rt: &mut Runtime, base: &str, x: &Dev, batch: usize) -> Result<Dev> {
@@ -1087,16 +1153,24 @@ fn forward<const E: usize, const K: usize>(
         cache.parallel_prefill_router && rt.target_prefill && matches!(layer, Layer::Backbone(_));
     let (routes, mut shared_out) = if cache.overlap_router {
         cache.router.start(&logits)?;
+        let t = crate::runtime::phase::start();
         let shared_out = shared(rt, &base, x, batch)?;
+        crate::runtime::phase::add(crate::runtime::phase::SHARED, t);
         let read = &rt.moe_cache.device(rt.device)?.router;
-        (
-            routes::<E, K>(read.scores(logits.len())?, &bias, batch, parallel_router)?,
-            shared_out,
-        )
+        let t = crate::runtime::phase::start();
+        let scores = read.scores(logits.len())?;
+        crate::runtime::phase::add(crate::runtime::phase::ROUTER_WAIT, t);
+        let t = crate::runtime::phase::start();
+        let routes = routes::<E, K>(scores, &bias, batch, parallel_router)?;
+        crate::runtime::phase::add(crate::runtime::phase::ROUTES, t);
+        (routes, shared_out)
     } else {
         let routes = routes::<E, K>(&rt.to_host(&logits)?, &bias, batch, parallel_router)?;
         (routes, shared(rt, &base, x, batch)?)
     };
+    // The router read above waited for this device's stream, which orders
+    // the previous staged collect, so its destination can be released now.
+    drop(rt.moe_cache.device(rt.device)?.retired_collect.take());
     ensure!(
         shared_out.len() == x.len(),
         "shared expert output shape mismatch"
@@ -1228,6 +1302,9 @@ fn forward<const E: usize, const K: usize>(
             })?;
         }
     }
+    if let Some(compact) = compact {
+        rt.moe_cache.device(primary.device)?.retired_collect = Some(compact);
+    }
     cuda(unsafe {
         ds_moe_finish(
             weighted.as_ptr(),
@@ -1257,7 +1334,14 @@ fn forward<const E: usize, const K: usize>(
                 Layer::Backbone(_) => "target",
                 Layer::Draft(_) => "draft",
             };
-            eprintln!("moe pass={kind} rows={batch} routes={} unique_layer_experts={} expert_uploads={} expert_h2d_bytes={} capacity_queries={}",
+            let census = |device: i32| {
+                rt.moe_cache.devices.get(&device).map_or((0, 0), |c| {
+                    let full = c.slots.keys().filter(|k| k.2 == SlotFormat::Full).count();
+                    (full, c.slots.len() - full)
+                })
+            };
+            let (full, shards) = census(primary.device);
+            eprintln!("moe pass={kind} rows={batch} routes={} unique_layer_experts={} expert_uploads={} expert_h2d_bytes={} capacity_queries={} full_slots={full} rank_slots={shards}",
                       m.routes, m.unique, m.uploads, m.uploads * SLOT_BYTES, m.capacity_queries);
         }
     }
@@ -1427,6 +1511,67 @@ mod tests {
         );
         assert!(cache.evict_slot(0).is_err());
         assert_eq!(cache.slots.len(), 1);
+    }
+
+    #[test]
+    fn counting_sort_matches_expert_token_order() {
+        use rand::{seq::index::sample, Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for batch in [1, 31, 500, 8192] {
+            // Token-major routes with distinct experts per token, as scored.
+            let routes: Vec<Route> = (0..batch)
+                .flat_map(|token| {
+                    let experts = sample(&mut rng, EXPERTS, TOP_K).into_vec();
+                    let weights: Vec<f32> = (0..TOP_K).map(|_| rng.gen()).collect();
+                    experts
+                        .into_iter()
+                        .zip(weights)
+                        .map(move |(expert, weight)| Route {
+                            expert,
+                            token,
+                            rank: 0,
+                            weight,
+                        })
+                })
+                .collect();
+            let mut reference = routes.clone();
+            reference.sort_unstable_by_key(|r| (r.expert, r.token));
+            assert_eq!(sort_by_expert::<EXPERTS>(routes), reference);
+        }
+    }
+
+    #[cfg(feature = "recipe-prefill")]
+    #[test]
+    fn decode_misses_evict_prompt_shards_before_full_slots() {
+        let mut cache = DeviceCache::new(0).unwrap();
+        let shard = Key(Backbone(3), 7, SlotFormat::Rank(0));
+        let full = Backbone(3).full(9);
+        // The shard inherited a decode-hot count; the full slot is colder.
+        for (key, count, age) in [(shard, 50, 1), (full, 2, 2)] {
+            cache.slots.insert(key, (0, age));
+            cache.eviction_order.insert((count, age, key));
+        }
+        cache.resident_bytes = SLOT_BYTES + RANK_SLOT_BYTES;
+        cache.decoding = false;
+        let mut prompt = DeviceCache::new(0).unwrap();
+        prompt.slots = cache.slots.clone();
+        prompt.eviction_order = cache.eviction_order.clone();
+        prompt.resident_bytes = cache.resident_bytes;
+        prompt.evict_slot(u64::MAX).unwrap();
+        assert!(
+            !prompt.slots.contains_key(&full),
+            "prompt keeps plain LFU order"
+        );
+        cache.decoding = true;
+        cache.evict_slot(u64::MAX).unwrap();
+        assert!(!cache.slots.contains_key(&shard));
+        assert!(cache.slots.contains_key(&full));
+        // A shard pinned by the current group is skipped like any other slot.
+        cache.slots.insert(shard, (0, 9));
+        cache.eviction_order.insert((50, 9, shard));
+        cache.evict_slot(5).unwrap();
+        assert!(!cache.slots.contains_key(&full));
+        assert!(cache.slots.contains_key(&shard));
     }
 
     #[cfg(feature = "recipe-prefill")]

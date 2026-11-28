@@ -1,8 +1,13 @@
 services:
   dsv41-flash-exl3:
-    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-peer-index-prefix64-20261127}
+    image: ${DS4_TP2_IMAGE:-ds4-flash-rs:tp2-round5-20261128}
     environment:
-      DS4_MOE_CACHE_GIB: "${DS4_MOE_CACHE_GIB:-68}"
+      # The expert cache may grow to 88 GiB but always leaves 4 GiB of free VRAM;
+      # KV and pooled buffers still evict experts when they need memory.
+      DS4_MOE_CACHE_GIB: "${DS4_MOE_CACHE_GIB:-88}"
+      DS4_MOE_HEADROOM_MIB: "${DS4_MOE_HEADROOM_MIB:-4096}"
+      DS4_MOE_INLINE_WIDE: "${DS4_MOE_INLINE_WIDE:-1}"
+      DS4_EVICT_RANK_FIRST: "${DS4_EVICT_RANK_FIRST:-1}"
       DS4_PREFILL_GPU_POOL_PAIRS: "${DS4_PREFILL_GPU_POOL_PAIRS:-1}"
       DS4_PREFILL_ROUTER_BOUNDS: "${DS4_PREFILL_ROUTER_BOUNDS:-0}"
       DS4_ENGRAM_RANDOM_READ: "${DS4_ENGRAM_RANDOM_READ:-0}"
@@ -12,7 +17,7 @@ services:
       DS4_PREFILL_BOUNDED_REPLAY: "1"
       DS4_PREFILL_INDEX_MMA: "1"
       DS4_TP2_PACKED_INPUT: "1"
-      DS4_TP2_PEER_BOUNDARY: "${DS4_TP2_PEER_BOUNDARY:-0}"
+      DS4_TP2_PEER_BOUNDARY: "${DS4_TP2_PEER_BOUNDARY:-1}"
       DS4_TP2_PEER_DMA: "${DS4_TP2_PEER_DMA:-1}"
       DS4_TP2_PREFILL_EXPERT_GIB:
       DS4_TP2_PRELOAD_LAYERS: "${DS4_TP2_PRELOAD_LAYERS:-0}"

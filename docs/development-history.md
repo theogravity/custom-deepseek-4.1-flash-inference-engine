@@ -125,3 +125,21 @@ The graph experiment captures only routed expert FFN groups. CPU-side router-sco
 An initial adaptive-budget benchmark accidentally printed confidence vectors during every decode step, which distorted the throughput. Those raw files are explicitly labeled `verbose-log-contaminated` and excluded from the corrected table. Curve collection and diagnostic logging are now separate; vectors print only when `DS4_CONFIDENCE_TRACE=1`. Lookup verification batches are also excluded from learned-cost observations because their proposal yield is not represented by DSpark confidence curves.
 
 The live service was returned to the stable TP2 image `ds4-flash-rs:tp2-peer-index-prefix64-20261127`. CUDA-graph groups and adaptive budget selection remain disabled by default. Checkpoints for the graph and scheduler experiments are tagged `checkpoint-2026-11-27-moe-cuda-graph-groups` and `checkpoint-2026-11-27-adaptive-budget-corrected`. Detailed raw waves and reproducibility notes are linked in the reports above.
+
+## C4/C6 round three, 2026-11-27
+
+A warm C6 Nsight trace showed both inference GPUs idle for 34% of decode. The host waited on per-layer router logits, synchronous MoE descriptor copies (routed groups above 64 rows) and synchronous expert uploads from the 68 GiB cache, which holds about 71% of the routed target experts. Three experiments followed, each with matched controls and identical output hashes:
+
+| Experiment | C4 | C6 | Decision |
+|---|---:|---:|---|
+| Round-start control | 499.2 | 500.5 | Baseline |
+| Inline MoE descriptors up to 256 rows | 501.1 | 508.9 | Kept, default on |
+| Pinned-ring async small uploads | 503.9 | 506.9 | Wash at C6; reverted |
+| 88 GiB expert limit with a 4 GiB VRAM reserve | **535.0** | **533.3** | Kept, TP2 profile default |
+| Clean round-end image, profile defaults only | **533.9** | **533.2** | C4 is 3.1% above published vLLM; C6 is 4.3% below |
+
+A 6 GiB reserve fell back to 503.8 at C4, so the C4 gain depends on about 2 GiB of VRAM per GPU. Cold 189k/473k needle prompts passed with the new profile. The lowest free VRAM was 602 MiB on GPU 1 during long prefill, against 2.7 GiB with the old profile. Both profiles decode slowly for several waves after long cold prompts, likely because prompt routing inflates the lifetime LFU counts. Six full 524k sessions were not rerun. See [round three](../benchmarks/reports/c46-round3-20261127.md).
+
+### Decode recovery after long prompts
+
+Long cold prompts left the half-width TP2 rank shards of decode-hot experts resident, because those shards share the experts' LFU counts. Decode then reloaded 72–84 experts per verification pass, against 1.5 normally, and stayed near 320 tok/s at C6 for minutes. Decode misses now evict rank shards first (`DS4_EVICT_RANK_FIRST=1`). After a cold 189k-token prompt, C6 returns to 525–532 from its second wave, against 319–331 before, with unchanged cold TTFT. Under five decoders plus a cold 19k prompt every 10 s, decode rose from 128 to 189–191 tok/s. Extending the rule to prompt batches made the 189k prompt 44% slower and was not selected. Steady C4/C6 is unchanged. See [shard eviction](../benchmarks/reports/expert-shard-eviction-20261127.md).

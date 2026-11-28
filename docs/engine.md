@@ -37,6 +37,18 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_CONFIDENCE_TRACE` | unset | Print per-request confidence vectors and accepted draft counts; diagnostic only, adds log output |
 | `DS4_MOE_CUDA_GRAPH` | 0 | Experimental replay of routed MoE FFN groups only. Did not show a reliable C4/C6 gain; it does not capture a full decode step. [Results](../benchmarks/reports/vllm-hyperflare-followup-2026-11-27.md#cuda-graph-replay-experiment-2026-11-27) |
 | `DS4_MOE_CUDA_GRAPH_TRACE` | 0 | Log MoE graph capture and replay events |
+| `DS4_MOE_CACHE_GIB` | 88 in the recommended TP2 profile | Upper limit for routed expert slots per GPU. The cache also stops growing at the free-VRAM reserve below and gives slots back when KV or pooled buffers need memory. [Results](../benchmarks/reports/c46-round3-20261127.md) |
+| `DS4_MOE_HEADROOM_MIB` | 4096 in the recommended TP2 profile (512 if unset) | Free VRAM kept outside the expert cache for allocations that cannot reclaim slots. 6144 lost most of the C4 gain |
+| `DS4_EVICT_RANK_FIRST` | 1 | Decode and draft misses evict TP2 prompt rank shards before full expert slots, so decode recovers right after long prompts. Set 0 for plain LFU order. [Results](../benchmarks/reports/expert-shard-eviction-20261127.md) |
+| `DS4_MOE_INLINE_WIDE` | 1 | Pass routed groups of up to 256 rows to the GPU as kernel parameters instead of synchronous copies. Set 0 to restore the copies above 64 rows |
+| `DS4_TP2_PEER_BOUNDARY` | 1 in the recommended TP2 profile | Copy the layer-20 residual and mixing state GPU-to-GPU during prompt ingestion instead of through host memory (5 GB/s). The copy completes before the source can be freed |
+| `DS4_RECIPE_ASYNC_META` | 1 | Upload TP2 prompt-expert group descriptors through pinned buffers instead of synchronous copies |
+| `DS4_TP2_PARALLEL_STAGE` | 1 | Fill prompt rank-shard staging buffers from the rayon pool |
+| `RAYON_NUM_THREADS` | 24 in Compose | CPU pool for prompt routing and Engram gathers |
+| `DS4_PREFILL_TIMING` | 0 | Set 1 to log a host time split of each prompt chunk (attention, router wait, routing, TP2 expert phases, uploads, Engram) |
+| `DS4_DEBUG_SYNC` | 0 | Set 1 to synchronize both GPUs after each prompt stage and name the stage whose queued work faulted. Very slow; diagnostic only |
+| `DS4_MOE_STATS` | 0 | Set 1 to log expert routes, uploads and the full-slot/rank-shard census once per target, verification and draft pass |
+| `DS4_STEP_TIMING` | 0 | Set 1 to log the host time split (draft, target forward, scoring) averaged over 256 concurrent decode steps; diagnostic only |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
 | `DS4_OUTPUT_LOOKUP` | `repeated` in the recommended TP2 profile | Use recent verified output for a single client and repeated patterns from each active client's own output concurrently. Weak concurrent matches fall back to DSpark. Select `single`, `0` or `1` to change the policy. |
 | `DS4_C1_OUTPUT_CONSENSUS` | 1 in the recommended TP2 profile | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. |

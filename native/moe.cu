@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <new>
 #include <mutex>
 #include <memory>
@@ -689,11 +690,19 @@ extern "C" int ds_moe_run_dev(void **scratch, size_t *scratch_bytes, const Job *
         // A busy graph keeps its metadata pinned until its completion event.
         // Use the existing eager path rather than waiting for it on the host.
     }
-    if (inline_metadata && rows <= 64) {
+    // Wide groups (concurrent verification) pass up to 256 descriptors as a
+    // 10 KiB kernel parameter instead of a synchronous copy that drains the stream.
+    static const bool wide_inline = [] {
+        const char *v = std::getenv("DS4_MOE_INLINE_WIDE");
+        return !v || v[0] != '0';
+    }();
+    if (inline_metadata && (rows <= 64 || (wide_inline && rows <= 256))) {
         if (rows <= 8)
             stage_descriptors<8>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
-        else
+        else if (rows <= 64)
             stage_descriptors<64>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
+        else
+            stage_descriptors<256>(jobs, n_jobs, routes, rows, device_jobs, device_rows);
         CHECK(cudaGetLastError());
     } else {
         CHECK(cudaMemcpy(device_jobs, jobs, jobs_size, cudaMemcpyHostToDevice));

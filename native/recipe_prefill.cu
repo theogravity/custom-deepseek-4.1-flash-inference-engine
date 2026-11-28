@@ -7,6 +7,7 @@
 #include <mutex>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <new>
 #include "moe_types.cuh"
 #include "diffbot_device.cuh"
@@ -102,6 +103,56 @@ int recipe_gemm(dof::GemmArgs args) {
 }
 } // namespace
 
+namespace {
+// Group descriptors reach the device through two pinned buffers per device,
+// so the host keeps queueing groups instead of draining the stream with a
+// pageable cudaMemcpy. A buffer is rewritten only after its last copy ended.
+struct DescriptorStage {
+    char *host[2] = {nullptr, nullptr};
+    size_t bytes[2] = {0, 0};
+    cudaEvent_t done[2] = {nullptr, nullptr};
+    int next = 0;
+    std::mutex mutex;
+};
+DescriptorStage descriptor_stages[16];
+
+int upload_descriptors(Job *dst_jobs, const Job *jobs, size_t job_bytes,
+                       RoutedRow *dst_routes, const RoutedRow *routes, size_t route_bytes) {
+    static const bool async = [] {
+        const char *v = std::getenv("DS4_RECIPE_ASYNC_META");
+        return !v || v[0] != '0';
+    }();
+    int device = 0;
+    CHECK(cudaGetDevice(&device));
+    if (!async || device < 0 || device >= 16) {
+        CHECK(cudaMemcpy(dst_jobs, jobs, job_bytes, cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(dst_routes, routes, route_bytes, cudaMemcpyHostToDevice));
+        return 0;
+    }
+    DescriptorStage &stage = descriptor_stages[device];
+    std::lock_guard<std::mutex> lock(stage.mutex);
+    int i = stage.next;
+    stage.next ^= 1;
+    if (!stage.done[i]) CHECK(cudaEventCreateWithFlags(&stage.done[i], cudaEventDisableTiming));
+    else CHECK(cudaEventSynchronize(stage.done[i]));
+    size_t need = job_bytes + route_bytes;
+    if (stage.bytes[i] < need) {
+        if (stage.host[i]) CHECK(cudaFreeHost(stage.host[i]));
+        stage.host[i] = nullptr;
+        stage.bytes[i] = 0;
+        size_t grown = std::max(need, size_t(1) << 20);
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&stage.host[i]), grown, cudaHostAllocPortable));
+        stage.bytes[i] = grown;
+    }
+    std::memcpy(stage.host[i], jobs, job_bytes);
+    std::memcpy(stage.host[i] + job_bytes, routes, route_bytes);
+    CHECK(cudaMemcpyAsync(dst_jobs, stage.host[i], job_bytes, cudaMemcpyHostToDevice, nullptr));
+    CHECK(cudaMemcpyAsync(dst_routes, stage.host[i] + job_bytes, route_bytes, cudaMemcpyHostToDevice, nullptr));
+    CHECK(cudaEventRecord(stage.done[i], nullptr));
+    return 0;
+}
+} // namespace
+
 template<int I> static int recipe_group(void **scratch, size_t *capacity, const Job *jobs, int nj,
                  const RoutedRow *routes, int rows, const float *x, float *weighted) {
     size_t r = size_t(rows);
@@ -124,8 +175,8 @@ template<int I> static int recipe_group(void **scratch, size_t *capacity, const 
     auto base = static_cast<char *>(*scratch);
     auto j = reinterpret_cast<Job *>(base+jobs_off);
     auto rr = reinterpret_cast<RoutedRow *>(base+routes_off);
-    CHECK(cudaMemcpy(j,jobs,size_t(nj)*sizeof(Job),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(rr,routes,r*sizeof(RoutedRow),cudaMemcpyHostToDevice));
+    if (int status = upload_descriptors(j, jobs, size_t(nj)*sizeof(Job), rr, routes, r*sizeof(RoutedRow)))
+        return status;
     auto input = reinterpret_cast<half *>(base+input_off);
     auto quant = reinterpret_cast<uint8_t *>(base+activation_off);
     auto inter = reinterpret_cast<half *>(base+inter_off);
@@ -237,6 +288,73 @@ struct RankUploads {
 
 extern "C" void ds_recipe_free_uploads(int device, RankUploads *uploads) {
     if (uploads) { cudaSetDevice(device); delete uploads; }
+}
+
+// Parallel variant of ds_recipe_staged_rank: the host fills one pinned slab
+// from several threads (each copies a disjoint subset of rows), then a single
+// DMA uploads it. The slab bytes are identical to the serial stager's.
+namespace {
+constexpr int stage_down_chunks = 32;
+constexpr int stage_units = 2 * (H / 16) + stage_down_chunks + 1;
+
+int ensure_rank_uploads(RankUploads **state) {
+    if (*state) return 0;
+    auto *created = new(std::nothrow) RankUploads{};
+    if (!created) return int(cudaErrorMemoryAllocation);
+    for (int i=0; i<2; ++i) {
+        auto status=cudaMallocHost(&created->slab[i],ds_recipe_rank_slot_bytes());
+        if (status==cudaSuccess) status=cudaEventCreateWithFlags(&created->ready[i],cudaEventDisableTiming);
+        if (status!=cudaSuccess) { delete created; return int(status); }
+    }
+    *state=created;
+    return 0;
+}
+} // namespace
+
+extern "C" int ds_recipe_stage_begin(RankUploads **state, char **slab) {
+    if (!state || !slab) return int(cudaErrorInvalidValue);
+    if (int status = ensure_rank_uploads(state)) return status;
+    auto &work=**state;
+    const int i=work.next%2;
+    CHECK(cudaEventSynchronize(work.ready[i]));
+    *slab=work.slab[i];
+    return 0;
+}
+
+extern "C" void ds_recipe_stage_fill(char *slot, const void *const *parts, int rank, int piece, int pieces) {
+    constexpr int shard=intermediate/2;
+    constexpr size_t packed=trellis_bytes<shard>;
+    constexpr size_t pitch=(intermediate/16)*48*sizeof(uint16_t);
+    constexpr size_t down_chunk=(packed+stage_down_chunks-1)/stage_down_chunks;
+    for (int u=piece; u<stage_units; u+=pieces) {
+        if (u < 2*(H/16)) {
+            int proj = u < H/16 ? Gate : Up, r = u % (H/16);
+            auto *src=static_cast<const char *>(parts[proj==Gate ? 0 : 1])+rank*(pitch/2);
+            std::memcpy(slot+proj*packed+r*(pitch/2),src+r*pitch,pitch/2);
+        } else if (u < 2*(H/16)+stage_down_chunks) {
+            size_t begin=size_t(u-2*(H/16))*down_chunk, n=std::min(down_chunk,packed-std::min(begin,packed));
+            if (n) std::memcpy(slot+Down*packed+begin,static_cast<const char *>(parts[2])+rank*packed+begin,n);
+        } else {
+            auto *scales=reinterpret_cast<half *>(slot+3*packed);
+            for (auto proj : {Gate,Down,Up}) {
+                int first=proj==Gate ? 3 : proj==Up ? 5 : 7;
+                int inputs=proj==Down ? shard : H, outputs=proj==Down ? H : shard;
+                auto *dst=scales+proj*(H+shard);
+                std::memcpy(dst,static_cast<const half *>(parts[first])+(proj==Down?rank*shard:0),inputs*sizeof(half));
+                std::memcpy(dst+inputs,static_cast<const half *>(parts[first+1])+(proj==Down?0:rank*shard),outputs*sizeof(half));
+            }
+        }
+    }
+}
+
+extern "C" int ds_recipe_stage_commit(RankUploads *state, void *storage) {
+    if (!state || !storage) return int(cudaErrorInvalidValue);
+    auto &work=*state;
+    const int i=work.next++%2;
+    CHECK(cudaMemcpyAsync(storage,work.slab[i],ds_recipe_rank_slot_bytes(),cudaMemcpyHostToDevice));
+    auto recorded=cudaEventRecord(work.ready[i],nullptr);
+    if (recorded!=cudaSuccess) cudaStreamSynchronize(nullptr);
+    return int(recorded);
 }
 
 extern "C" int ds_recipe_staged_rank(RankUploads **state, void *storage, size_t capacity,

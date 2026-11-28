@@ -171,6 +171,7 @@ impl Model {
                 self.rt.layer(layer)?;
                 h = self.rt.move_activation(h)?;
                 mix = self.rt.move_activation(mix)?;
+                self.rt.debug_sync("layer-20 activation move")?;
             }
             if matches!(layer, 1 | 14) {
                 if let Some(source) = &engram_rows {
@@ -183,6 +184,7 @@ impl Model {
             }
             if let Some(engram) = gathered.take() {
                 engram.apply(&mut self.rt, &mut h)?;
+                self.rt.debug_sync(&format!("engram layer {layer}"))?;
             }
             if capture && layer >= 37 {
                 if layer == 37 {
@@ -209,12 +211,17 @@ impl Model {
                 s.rows = retain;
                 rows = retain;
             }
+            let t = crate::runtime::phase::start();
             let y = attend(&mut self.rt, items, &mut errors, layer, &x)?;
+            crate::runtime::phase::add(crate::runtime::phase::ATTENTION, t);
+            self.rt
+                .debug_sync(&format!("attention layer {layer} rows {rows}"))?;
             if errors.iter().all(Option::is_some) {
                 return Ok(errors.into_iter().map(|e| Err(e.unwrap())).collect());
             }
             residual::expand(&self.rt, &mut h, &y, &mix, rows)?;
             drop((x, y));
+            let t = crate::runtime::phase::start();
             if engram_rows.is_none() && matches!(layer, 0 | 13) {
                 for s in items.iter() {
                     let next =
@@ -227,8 +234,15 @@ impl Model {
                     }
                 }
             }
+            crate::runtime::phase::add(crate::runtime::phase::ENGRAM, t);
+            let t = crate::runtime::phase::start();
             let x = residual::prepare(&mut self.rt, &stem, "ffn", &h, &mut mix, rows)?;
+            crate::runtime::phase::add(crate::runtime::phase::RESIDUAL, t);
+            let t = crate::runtime::phase::start();
             let y = moe::forward_dev(&mut self.rt, layer, &x, rows)?;
+            crate::runtime::phase::add(crate::runtime::phase::MOE, t);
+            self.rt
+                .debug_sync(&format!("moe layer {layer} rows {rows}"))?;
             residual::expand(&self.rt, &mut h, &y, &mix, rows)?;
         }
 

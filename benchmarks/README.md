@@ -1,5 +1,7 @@
 # Benchmarks
 
+**Before proposing an experiment, check the [experiment ledger](experiment-ledger.md)** — every tried change with its result and verdict.
+
 [Same-host cold TTFT against the installed vLLM image](reports/local-vllm-prefill.md) covers the released DSpark drafter and the optional pack S8B expert kernel.
 
 | What do you want to measure? | Reports |
@@ -11,7 +13,7 @@
 | Coding-agent latency and task completion | [Changing 404k conversations](reports/agent-followups.md) · [Pi coding task](reports/pi-coding.md) · [Time after tool calls](reports/tool-return.md) |
 | Context, concurrency and KV | [Long-context decode](reports/long-context.md) · [Concurrent code edits](reports/concurrent-edits.md) · [Shared prefixes](reports/shared-prefix.md) |
 | Throughput ceilings and comparisons | [Hardware roofline](reports/roofline.md) · [vLLM comparison](reports/vllm-comparison.md) · [Single-client context sweep](reports/single-client-context.md) |
-| Decode optimizations | [vLLM and Hyperflare follow-up](reports/vllm-hyperflare-followup-2026-11-27.md) · [Batch-aware speculative confidence](reports/batch-adaptive-confidence.md) · [Single-client decode](reports/single-client-decode.md) · [Round one](reports/decode-round-1.md) · [Round two](reports/decode-round-2.md) |
+| Decode optimizations | [Decode recovery after long prompts](reports/expert-shard-eviction-20261127.md) · [C4/C6 round three](reports/c46-round3-20261127.md) · [vLLM and Hyperflare follow-up](reports/vllm-hyperflare-followup-2026-11-27.md) · [Batch-aware speculative confidence](reports/batch-adaptive-confidence.md) · [Single-client decode](reports/single-client-decode.md) · [Round one](reports/decode-round-1.md) · [Round two](reports/decode-round-2.md) |
 | Attention, drafters and experts | [Tiled attention](reports/attention-topk.md) · [Paired index scoring](reports/paired-index.md) · [Drafter inputs](reports/drafter-inputs.md) · [Expert transfers](reports/expert-transfers.md) · [Expert cache](reports/expert-cache.md) · [CPU experts](reports/cpu-experts.md) |
 
 The [workstation benchmark history](reports/workstation-history.md) includes the original power, cache-restore and full-window measurements. Raw results are grouped by workload in [results/](results/).

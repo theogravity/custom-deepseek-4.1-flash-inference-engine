@@ -1,0 +1,177 @@
+stage0 run=1 request=fail xid_new=1
+stage0 run=2 request=ok xid_new=0
+stage0 run=3 request=ok xid_new=0
+stage0 run=4 request=ok xid_new=0
+stage0 run=5 request=fail xid_new=1
+stage0 run=6 request=fail xid_new=1
+stage0 SUMMARY faults=3 clean=3 DS4_TP2_STAGE_WEIGHTS=0
+dma0 run=1 request=ok xid_new=0
+dma0 run=2 request=fail xid_new=1
+dma0 run=3 request=ok xid_new=0
+dma0 run=4 request=fail xid_new=1
+dma0 run=5 request=ok xid_new=0
+dma0 run=6 request=ok xid_new=0
+dma0 SUMMARY faults=2 clean=4 DS4_TP2_PEER_DMA=0
+prefix0 run=1 request=ok xid_new=0
+prefix0 run=2 request=ok xid_new=0
+prefix0 run=3 request=ok xid_new=0
+prefix0 run=4 request=ok xid_new=0
+prefix0 run=5 request=ok xid_new=0
+prefix0 run=6 request=ok xid_new=0
+prefix0 SUMMARY faults=0 clean=6 DS4_PREFIX_RAM_MIB=0 DS4_PREFIX_DISK_MIB=0
+index0 run=1 request=ok xid_new=0
+index0 run=2 request=ok xid_new=0
+index0 run=3 request=ok xid_new=0
+index0 run=4 request=ok xid_new=0
+index0 run=5 request=fail xid_new=1
+index0 SUMMARY faults=1 clean=4 DS4_TP2_INDEX=0
+dbg run=1 request=fail xid_new=1
+dbg run=2 request=ok xid_new=0
+dbg run=3 request=fail xid_new=1
+dbg run=4 request=ok xid_new=0
+dbg run=5 request=ok xid_new=0
+dbg run=6 request=ok xid_new=0
+dbg run=7 request=ok xid_new=0
+dbg run=8 request=ok xid_new=0
+dbg SUMMARY faults=2 clean=6 DS4_DEBUG_SYNC=1
+dbg2 run=1 request=ok xid_new=0
+dbg2 run=2 request=ok xid_new=0
+dbg2 run=3 request=ok xid_new=0
+dbg2 run=4 request=ok xid_new=0
+dbg2 run=5 request=ok xid_new=0
+dbg2 run=6 request=ok xid_new=0
+dbg2 run=7 request=ok xid_new=0
+dbg2 run=8 request=ok xid_new=0
+dbg2 SUMMARY faults=0 clean=8 DS4_DEBUG_SYNC=1
+front run=1 request=ok xid_new=0
+front run=2 request=fail xid_new=1
+front run=3 request=ok xid_new=0
+front run=4 request=ok xid_new=0
+front run=5 request=ok xid_new=0
+front run=6 request=fail xid_new=1
+front run=7 request=ok xid_new=0
+front run=8 request=ok xid_new=0
+front SUMMARY faults=2 clean=6 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=7
+back run=1 request=ok xid_new=0
+back run=2 request=ok xid_new=0
+back run=3 request=ok xid_new=0
+back run=4 request=ok xid_new=0
+back run=5 request=ok xid_new=0
+back run=6 request=ok xid_new=0
+back run=7 request=ok xid_new=0
+back run=8 request=ok xid_new=0
+back SUMMARY faults=0 clean=8 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=120
+upl run=1 request=fail xid_new=1
+upl run=2 request=ok xid_new=0
+upl run=3 request=fail xid_new=1
+upl run=4 request=ok xid_new=0
+upl run=5 request=ok xid_new=0
+upl run=6 request=ok xid_new=0
+upl run=7 request=ok xid_new=0
+upl run=8 request=ok xid_new=0
+upl SUMMARY faults=2 clean=6 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=64
+grp run=1 request=ok xid_new=0
+grp run=2 request=ok xid_new=0
+grp run=3 request=ok xid_new=0
+grp run=4 request=ok xid_new=0
+grp run=5 request=ok xid_new=0
+grp run=6 request=ok xid_new=0
+grp run=7 request=ok xid_new=0
+grp run=8 request=ok xid_new=0
+grp SUMMARY faults=0 clean=8 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=56
+s8 run=1 request=fail xid_new=1
+s8 run=2 request=ok xid_new=0
+s8 run=3 request=ok xid_new=0
+s8 run=4 request=fail xid_new=1
+s8 run=5 request=ok xid_new=0
+s8 run=6 request=fail xid_new=1
+s8 run=7 request=ok xid_new=0
+s8 run=8 request=ok xid_new=0
+s8 SUMMARY faults=3 clean=5 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=8
+s16 run=1 request=ok xid_new=0
+s16 run=2 request=fail xid_new=1
+s16 run=3 request=ok xid_new=0
+s16 run=4 request=ok xid_new=0
+s16 run=5 request=ok xid_new=0
+s16 run=6 request=ok xid_new=0
+s16 run=7 request=ok xid_new=0
+s16 run=8 request=fail xid_new=1
+s16 SUMMARY faults=2 clean=6 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=16
+s32 run=1 request=ok xid_new=0
+s32 run=2 request=ok xid_new=0
+s32 run=3 request=ok xid_new=0
+s32 run=4 request=ok xid_new=0
+s32 run=5 request=ok xid_new=0
+s32 run=6 request=ok xid_new=0
+s32 run=7 request=ok xid_new=0
+s32 run=8 request=ok xid_new=0
+s32 SUMMARY faults=0 clean=8 DS4_DEBUG_SYNC=1 DS4_DEBUG_SYNC_SITES=32
+fix1 run=1 request=ok xid_new=0
+fix1 run=2 request=ok xid_new=0
+fix1 run=3 request=ok xid_new=0
+fix1 run=4 request=ok xid_new=0
+fix1 run=5 request=ok xid_new=0
+fix1 run=6 request=ok xid_new=0
+fix1 run=7 request=ok xid_new=0
+fix1 run=8 request=ok xid_new=0
+fix1 run=9 request=ok xid_new=0
+fix1 run=10 request=ok xid_new=0
+fix1 run=11 request=ok xid_new=0
+fix1 run=12 request=ok xid_new=0
+fix1 SUMMARY faults=0 clean=12 DS4_DEBUG_SYNC=0
+fix2pb run=1 request=ok xid_new=0
+fix2pb run=2 request=ok xid_new=0
+fix2pb run=3 request=ok xid_new=0
+fix2pb run=4 request=ok xid_new=0
+fix2pb run=5 request=ok xid_new=0
+fix2pb run=6 request=ok xid_new=0
+fix2pb run=7 request=ok xid_new=0
+fix2pb run=8 request=ok xid_new=0
+fix2pb run=9 request=ok xid_new=0
+fix2pb run=10 request=ok xid_new=0
+fix2pb run=11 request=ok xid_new=0
+fix2pb run=12 request=ok xid_new=0
+fix2pb SUMMARY faults=0 clean=12 DS4_TP2_PEER_BOUNDARY=1
+bo-a 0 completed cold requests
+bo-b 4 completed cold requests
+bo-c 4 completed cold requests
+bo-d 4 completed cold requests
+bx-0a 0 completed cold requests
+bx-0b 4 completed cold requests
+bx-0c 4 completed cold requests
+bx-0d 0 completed cold requests
+am-on 0 completed cold requests
+am-c2 0 completed cold requests
+fix1 run=1 request=ok xid_new=0
+fix1 run=2 request=ok xid_new=0
+fix1 run=3 request=ok xid_new=0
+fix1 run=4 request=ok xid_new=0
+fix1 run=5 request=ok xid_new=0
+fix1 run=6 request=ok xid_new=0
+fix1 run=7 request=ok xid_new=0
+fix1 run=8 request=ok xid_new=0
+fix1 run=9 request=ok xid_new=0
+fix1 run=10 request=ok xid_new=0
+fix1 run=11 request=ok xid_new=0
+fix1 run=12 request=ok xid_new=0
+fix1 SUMMARY faults=0 clean=12 DS4_DEBUG_SYNC=0
+fix2pb run=1 request=ok xid_new=0
+fix2pb run=2 request=ok xid_new=0
+fix2pb run=3 request=ok xid_new=0
+fix2pb run=4 request=ok xid_new=0
+fix2pb run=5 request=ok xid_new=0
+fix2pb run=6 request=ok xid_new=0
+fix2pb run=7 request=ok xid_new=0
+fix2pb run=8 request=ok xid_new=0
+fix2pb run=9 request=ok xid_new=0
+fix2pb run=10 request=ok xid_new=0
+fix2pb run=11 request=ok xid_new=0
+fix2pb run=12 request=ok xid_new=0
+fix2pb SUMMARY faults=0 clean=12 DS4_TP2_PEER_BOUNDARY=1
+r5 run=1 request=ok xid_new=0
+r5 run=2 request=ok xid_new=0
+r5 run=3 request=ok xid_new=0
+r5 run=4 request=ok xid_new=0
+r5 run=5 request=ok xid_new=0
+r5 run=6 request=ok xid_new=0
+r5 SUMMARY faults=0 clean=6 
