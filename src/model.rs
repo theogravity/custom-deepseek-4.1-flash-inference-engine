@@ -314,6 +314,8 @@ pub struct Model {
     spec_k: usize,
     lookup: prompt_lookup::Config,
     batch_drafter: bool,
+    adaptive_budget: bool,
+    adaptive_costs: draft::confidence::CostProfile,
     rt: Runtime,
     engram: Arc<Engram>,
     overlap_prefill_engram: bool,
@@ -359,6 +361,20 @@ impl Model {
             Err(std::env::VarError::NotPresent) => 0,
             Err(e) => return Err(e.into()),
         };
+        let batch_drafter = match std::env::var("DS4_BATCH_DRAFT").as_deref() {
+            Ok("0") => false,
+            Ok("1") | Err(std::env::VarError::NotPresent) => true,
+            _ => bail!("DS4_BATCH_DRAFT must be 0 or 1"),
+        };
+        let adaptive_budget = match std::env::var("DS4_ADAPTIVE_DRAFT_BUDGET").as_deref() {
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            Ok("1") => true,
+            _ => bail!("DS4_ADAPTIVE_DRAFT_BUDGET must be 0 or 1"),
+        };
+        ensure!(
+            !adaptive_budget || batch_drafter,
+            "DS4_ADAPTIVE_DRAFT_BUDGET requires DS4_BATCH_DRAFT=1"
+        );
         let model = Self {
             gpu_fault: None,
             idle_tool_prefill: None,
@@ -366,11 +382,9 @@ impl Model {
             prefix: PrefixCache::new(pack, chunk, max_ctx)?,
             spec_k: spec_k()?,
             lookup: prompt_lookup::configured(tok)?,
-            batch_drafter: match std::env::var("DS4_BATCH_DRAFT").as_deref() {
-                Ok("0") => false,
-                Ok("1") | Err(std::env::VarError::NotPresent) => true,
-                _ => bail!("DS4_BATCH_DRAFT must be 0 or 1"),
-            },
+            batch_drafter,
+            adaptive_budget,
+            adaptive_costs: draft::confidence::CostProfile::default(),
             rt: Runtime::open(pack, devices)?,
             engram: Arc::new(Engram::new(tok)?),
             bounded_replay: bounded_replay()?,
@@ -743,6 +757,17 @@ impl Model {
         let mut inputs = Vec::new();
         let mut slots = Vec::new();
         let concurrent_sessions = decoding.len();
+        let base_rows = decoding
+            .iter()
+            .map(|(_, _, plan)| 1 + plan.tokens.len())
+            .sum::<usize>();
+        let adaptive_eligible = decoding.iter().all(|(_, _, plan)| plan.tokens.is_empty());
+        let sampling_requests = decoding.len();
+        let context_bucket = if decoding.is_empty() {
+            0
+        } else {
+            decoding.iter().map(|(_, s, _)| s.pos).sum::<usize>() / decoding.len() / 8192
+        };
         for (slot, (_, s, plan)) in decoding.iter_mut().enumerate() {
             if plan.source == ProposalSource::Learned {
                 slots.push(slot);
@@ -754,7 +779,36 @@ impl Model {
                 });
             }
         }
-        let drafts = self.learned_proposals(&mut inputs, concurrent_sessions);
+        let draft_count = inputs.len();
+        let draft_tokens = inputs.iter().map(|input| input.width).sum::<usize>();
+        let adaptive_cost = (self.adaptive_budget && adaptive_eligible && draft_count > 1)
+            .then(|| {
+                self.adaptive_costs.curve(
+                    context_bucket,
+                    draft_count,
+                    sampling_requests,
+                    draft_tokens,
+                    base_rows,
+                    sampling_requests,
+                )
+            })
+            .flatten();
+        let draft_started = std::time::Instant::now();
+        let (drafts, grouped_draft) =
+            self.learned_proposals(&mut inputs, concurrent_sessions, adaptive_cost);
+        if self.adaptive_budget
+            && adaptive_eligible
+            && draft_count > 1
+            && grouped_draft
+            && drafts.iter().all(Result::is_ok)
+        {
+            self.adaptive_costs.observe_draft(
+                context_bucket,
+                draft_count,
+                draft_tokens,
+                draft_started.elapsed().as_secs_f64() * 1e9,
+            );
+        }
         for (slot, proposed) in slots.into_iter().zip(drafts) {
             match proposed {
                 Ok(tokens) => decoding[slot].2.tokens = tokens,
@@ -894,31 +948,38 @@ impl Model {
         &mut self,
         inputs: &mut [DraftInput<'_>],
         concurrent_sessions: usize,
-    ) -> Vec<Result<Vec<u32>>> {
+        adaptive_cost: Option<draft::confidence::CostCurve>,
+    ) -> (Vec<Result<Vec<u32>>>, bool) {
         if inputs.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if let Err(e) = self.rt.layer(39) {
-            return inputs
-                .iter()
-                .map(|_| Err(anyhow::anyhow!("{e:#}")))
-                .collect();
+            return (
+                inputs
+                    .iter()
+                    .map(|_| Err(anyhow::anyhow!("{e:#}")))
+                    .collect(),
+                false,
+            );
         }
         if self.batch_drafter && inputs.len() > 1 {
-            match draft::propose_many(&mut self.rt, inputs, concurrent_sessions) {
-                Ok(proposals) => return proposals.into_iter().map(Ok).collect(),
+            match draft::propose_many(&mut self.rt, inputs, concurrent_sessions, adaptive_cost) {
+                Ok(proposals) => return (proposals.into_iter().map(Ok).collect(), true),
                 // No target or draft KV has been modified. Retry on the smaller
                 // per-request workspace, isolating a malformed individual ring.
                 Err(e) => eprintln!("grouped DSpark proposal failed: {e:#}; retrying separately"),
             }
         }
-        inputs
-            .iter_mut()
-            .map(|r| {
-                r.state
-                    .propose(&mut self.rt, r.pos, r.seed, r.width, concurrent_sessions)
-            })
-            .collect()
+        (
+            inputs
+                .iter_mut()
+                .map(|r| {
+                    r.state
+                        .propose(&mut self.rt, r.pos, r.seed, r.width, concurrent_sessions)
+                })
+                .collect(),
+            false,
+        )
     }
 
     fn plan_decode(session: &mut Session, proposal: Proposal) -> Result<DecodePlan> {
@@ -941,6 +1002,11 @@ impl Model {
     }
 
     fn decode_group(&mut self, work: &mut [DecodeWork<'_>], results: &mut [Option<Result<Step>>]) {
+        let started = std::time::Instant::now();
+        let target_requests = work.len();
+        let target_rows = work.iter().map(|w| w.plan.rows).sum::<usize>();
+        let context_bucket =
+            work.iter().map(|w| w.session.pos).sum::<usize>() / work.len().max(1) / 8192;
         let mut items: Vec<_> = work
             .iter_mut()
             .map(|w| ForwardItem {
@@ -955,6 +1021,7 @@ impl Model {
         self.rt.verification = items.len() > 1 || items[0].rows > 1;
         let targets = self.forward_batch(&mut items);
         self.rt.verification = false;
+        let observed = matches!(&targets, Ok(targets) if targets.len() == work.len());
         match targets {
             Ok(targets) if targets.len() == work.len() => {
                 for (one, target) in work.iter_mut().zip(targets) {
@@ -972,6 +1039,14 @@ impl Model {
                         Some(Err(anyhow::anyhow!("target forward failed: {message}")));
                 }
             }
+        }
+        if self.adaptive_budget && observed {
+            self.adaptive_costs.observe_verify(
+                context_bucket,
+                target_requests,
+                target_rows,
+                started.elapsed().as_secs_f64() * 1e9,
+            );
         }
     }
 

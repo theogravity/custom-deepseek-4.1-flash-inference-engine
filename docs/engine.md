@@ -31,6 +31,8 @@ The deployed profile uses the code-tuned DSpark drafter with up to seven proposa
 | `DS4_EXPERT_EVICTION` | lfu | Keeps frequently used experts on each card. Counts span the process lifetime. Ties use least-recent access. [Tested image and launch command](../benchmarks/reports/expert-cache.md#running-the-candidate-on-this-workstation) |
 | `DS4_SPEC_K` | automatic | Defaults to 7 for code weights and 5 for released weights |
 | `DS4_CONFIDENCE_THRESHOLD` | 0.4 | Use 0 to evaluate the whole learned draft |
+| `DS4_ADAPTIVE_DRAFT_BUDGET` | 0 | Opt in to a shared draft-token budget selected from per-step confidence and observed draft/target costs; profiles in memory by context bucket and batch shape, and uses the normal confidence threshold until enough samples exist |
+| `DS4_ADAPTIVE_DRAFT_BUDGET_TRACE` | 0 | Log the selected budget and sampled cost points periodically |
 | `DS4_PROMPT_LOOKUP`, `DS4_LOOKUP_K` | 1, 128 | Copy proposals from source tokens already present in the prompt |
 | `DS4_OUTPUT_LOOKUP` | `repeated` in the recommended TP2 profile | Use recent verified output for a single client and repeated patterns from each active client's own output concurrently. Weak concurrent matches fall back to DSpark. Select `single`, `0` or `1` to change the policy. |
 | `DS4_C1_OUTPUT_CONSENSUS` | 1 in the recommended TP2 profile | Use repeated output structure for a lone decoder. Set to 0 to disable single-client consensus. |

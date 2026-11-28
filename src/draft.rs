@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 
 #[path = "confidence.rs"]
-mod confidence;
+pub(crate) mod confidence;
 
 pub struct DraftState {
     attention: DraftAttention,
@@ -76,6 +76,7 @@ impl DraftState {
                 width,
             }],
             concurrent_sessions,
+            None,
         )?
         .pop()
         .context("missing draft result")
@@ -96,6 +97,7 @@ pub(crate) fn propose_many(
     rt: &mut Runtime,
     requests: &mut [DraftInput<'_>],
     concurrent_sessions: usize,
+    adaptive_cost: Option<confidence::CostCurve>,
 ) -> Result<Vec<Vec<u32>>> {
     ensure!(!requests.is_empty(), "empty draft batch");
     ensure!(
@@ -182,8 +184,70 @@ pub(crate) fn propose_many(
         for (proposal, keep) in proposals.iter_mut().zip(kept) {
             proposal.truncate(keep);
         }
+    } else if gate.as_ref().is_some_and(confidence::Gate::adaptive_budget) {
+        let curves = requests
+            .iter_mut()
+            .map(|r| {
+                r.state
+                    .trace
+                    .take()
+                    .context("missing DSpark confidence curve for adaptive allocation")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(cost) = adaptive_cost {
+            let kept = confidence::allocate_cost_aware(&curves, &cost)?;
+            trace_budget(
+                "adaptive",
+                kept.iter().sum(),
+                curves.iter().map(Vec::len).sum(),
+                Some(&cost),
+            );
+            for (proposal, keep) in proposals.iter_mut().zip(kept) {
+                proposal.truncate(keep);
+            }
+        } else {
+            let threshold = gate
+                .as_ref()
+                .expect("adaptive gate exists")
+                .fallback_threshold();
+            for (proposal, curve) in proposals.iter_mut().zip(curves) {
+                let keep = curve
+                    .iter()
+                    .position(|&p| p < threshold)
+                    .unwrap_or(curve.len());
+                proposal.truncate(keep);
+            }
+            trace_budget(
+                "confidence-fallback",
+                proposals.iter().map(Vec::len).sum(),
+                0,
+                None,
+            );
+        }
     }
     Ok(proposals)
+}
+
+fn trace_budget(
+    kind: &str,
+    selected: usize,
+    available: usize,
+    cost: Option<&confidence::CostCurve>,
+) {
+    if std::env::var("DS4_ADAPTIVE_DRAFT_BUDGET_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    static STEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let step = STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if step % 256 == 0 {
+        if let Some(cost) = cost {
+            eprintln!("adaptive-draft-budget mode={kind} selected={selected}/{available} base_rows={} sampling_requests={} cost_shapes={} draft_us={:.1} verify_points={:?}",
+                      cost.base_rows, cost.sampling_requests, cost.verify_points.len(), cost.draft_ns / 1000.,
+                      cost.verify_points.iter().map(|(rows, ns)| (*rows, (*ns / 1000.).round())).collect::<Vec<_>>());
+        } else {
+            eprintln!("adaptive-draft-budget mode={kind} selected={selected}");
+        }
+    }
 }
 
 fn finish_proposal(

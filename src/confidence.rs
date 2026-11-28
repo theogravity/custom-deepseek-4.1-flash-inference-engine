@@ -3,7 +3,10 @@ use crate::{
     runtime::{Dev, Runtime},
 };
 use anyhow::{ensure, Context, Result};
-use std::ffi::c_void;
+use std::{
+    collections::{HashMap, VecDeque},
+    ffi::c_void,
+};
 
 unsafe extern "C" {
     fn ds4_confidence(
@@ -22,8 +25,10 @@ unsafe extern "C" {
 
 pub(super) struct Gate {
     threshold: f32,
+    fallback_threshold: f32,
     trace: bool,
     batch_budget_per_request: Option<usize>,
+    adaptive_budget: bool,
 }
 impl Gate {
     pub(super) fn configured(
@@ -68,22 +73,30 @@ impl Gate {
             Err(std::env::VarError::NotPresent) => None,
             Err(e) => return Err(e.into()),
         };
-        let batch_budget_active = batch_budget_active(batch_budget_per_request, draft_batch_size);
-        if batch_budget_active {
+        let adaptive_budget = switch("DS4_ADAPTIVE_DRAFT_BUDGET", false)? && draft_batch_size > 1;
+        let fixed_budget_active = batch_budget_active(batch_budget_per_request, draft_batch_size);
+        ensure!(
+            !(adaptive_budget && fixed_budget_active),
+            "DS4_ADAPTIVE_DRAFT_BUDGET and DS4_BATCH_DRAFT_BUDGET_PER_REQUEST cannot both be enabled"
+        );
+        let fallback_threshold = threshold_for_batch(threshold, batch_delta, concurrent_sessions);
+        if fixed_budget_active || adaptive_budget {
             // The batch allocator needs each full confidence curve to price
             // candidates across requests; per-request thresholding happens after.
             threshold = 0.;
         }
         let threshold = threshold_for_batch(threshold, batch_delta, concurrent_sessions);
         Ok(
-            (threshold > 0. || trace || batch_budget_active).then_some(Self {
+            (threshold > 0. || trace || fixed_budget_active || adaptive_budget).then_some(Self {
                 threshold,
-                trace: trace || batch_budget_active,
-                batch_budget_per_request: if batch_budget_active {
+                fallback_threshold,
+                trace: trace || fixed_budget_active || adaptive_budget,
+                batch_budget_per_request: if fixed_budget_active {
                     batch_budget_per_request
                 } else {
                     None
                 },
+                adaptive_budget,
             }),
         )
     }
@@ -121,12 +134,156 @@ impl Gate {
         let scores = rt.to_host(&output)?;
         let mut proposed = rt.token_ids(ids)?;
         let (keep, confidence) = select(&scores, self.threshold)?;
-        proposed.truncate(keep);
+        if !self.adaptive_budget {
+            proposed.truncate(keep);
+        }
         Ok((proposed, self.trace.then_some(confidence)))
     }
 
     pub(super) fn batch_budget_per_request(&self) -> Option<usize> {
         self.batch_budget_per_request
+    }
+
+    pub(super) fn adaptive_budget(&self) -> bool {
+        self.adaptive_budget
+    }
+
+    pub(super) fn fallback_threshold(&self) -> f32 {
+        self.fallback_threshold
+    }
+}
+
+fn switch(name: &str, default: bool) -> Result<bool> {
+    match std::env::var(name) {
+        Ok(value) if value == "0" => Ok(false),
+        Ok(value) if value == "1" => Ok(true),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Ok(_) => anyhow::bail!("{name} must be 0 or 1"),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CostCurve {
+    pub draft_ns: f64,
+    pub verify_points: Vec<(usize, f64)>,
+    pub base_rows: usize,
+    pub sampling_requests: usize,
+}
+
+impl CostCurve {
+    pub fn verify_ns(&self, rows: usize) -> f64 {
+        let points = &self.verify_points;
+        let upper = points.partition_point(|(measured_rows, _)| *measured_rows < rows);
+        let (left, right) = if upper == 0 {
+            (points[0], points[1])
+        } else if upper == points.len() {
+            (points[points.len() - 2], points[points.len() - 1])
+        } else {
+            (points[upper - 1], points[upper])
+        };
+        let span = (right.0 - left.0).max(1) as f64;
+        let slope = ((right.1 - left.1) / span).max(0.);
+        (left.1 + slope * (rows as f64 - left.0 as f64)).max(1.)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CostProfile {
+    draft_ns: HashMap<(usize, usize, usize), Ema>,
+    verify_ns: HashMap<(usize, usize, usize), Ema>,
+}
+
+#[derive(Default)]
+struct Ema {
+    mean: f64,
+    count: u32,
+    recent: VecDeque<f64>,
+}
+
+impl Ema {
+    fn observe(&mut self, value: f64) {
+        self.recent.push_back(value);
+        if self.recent.len() > 31 {
+            self.recent.pop_front();
+        }
+        let mut sorted: Vec<_> = self.recent.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        self.mean = if sorted.len() % 2 == 0 {
+            let upper = sorted.len() / 2;
+            (sorted[upper - 1] + sorted[upper]) * 0.5
+        } else {
+            sorted[sorted.len() / 2]
+        };
+        self.count = self.count.saturating_add(1);
+    }
+}
+
+impl CostProfile {
+    pub fn observe_draft(
+        &mut self,
+        context_bucket: usize,
+        requests: usize,
+        draft_tokens: usize,
+        elapsed_ns: f64,
+    ) {
+        self.draft_ns
+            .entry((context_bucket, requests, draft_tokens))
+            .or_default()
+            .observe(elapsed_ns);
+    }
+
+    pub fn observe_verify(
+        &mut self,
+        context_bucket: usize,
+        requests: usize,
+        rows: usize,
+        elapsed_ns: f64,
+    ) {
+        self.verify_ns
+            .entry((context_bucket, requests, rows))
+            .or_default()
+            .observe(elapsed_ns);
+    }
+
+    pub fn curve(
+        &self,
+        context_bucket: usize,
+        draft_requests: usize,
+        target_requests: usize,
+        draft_tokens: usize,
+        base_rows: usize,
+        sampling_requests: usize,
+    ) -> Option<CostCurve> {
+        let draft = self
+            .draft_ns
+            .get(&(context_bucket, draft_requests, draft_tokens))?;
+        if draft.count < 8 {
+            return None;
+        }
+        let mut points: Vec<_> = self
+            .verify_ns
+            .iter()
+            .filter_map(|(&(ctx, batch, rows), value)| {
+                (ctx == context_bucket && batch == target_requests && value.count >= 4)
+                    .then_some((rows, value.mean))
+            })
+            .collect();
+        points.sort_by_key(|point| point.0);
+        if points.len() < 2 {
+            return None;
+        }
+        // GPU step costs should be nondecreasing with scheduled query rows.
+        // Remove measurement noise without discarding local kernel-shape steps.
+        for index in 1..points.len() {
+            points[index].1 = points[index].1.max(points[index - 1].1);
+        }
+        Some(CostCurve {
+            draft_ns: draft.mean,
+            verify_points: points,
+            base_rows,
+            sampling_requests,
+        })
     }
 }
 
@@ -180,6 +337,49 @@ pub(super) fn allocate_batch_budget(conditional: &[Vec<f32>], budget: usize) -> 
     Ok(kept)
 }
 
+pub(super) fn allocate_cost_aware(
+    conditional: &[Vec<f32>],
+    curve: &CostCurve,
+) -> Result<Vec<usize>> {
+    ensure!(!conditional.is_empty(), "empty confidence cohort");
+    let mut candidates = Vec::new();
+    for (request, probabilities) in conditional.iter().enumerate() {
+        let mut survival = 1.0f64;
+        for (depth, &probability) in probabilities.iter().enumerate() {
+            ensure!(
+                probability.is_finite() && (0.0..=1.0).contains(&probability),
+                "invalid draft confidence probability"
+            );
+            survival *= f64::from(probability);
+            candidates.push((survival, request, depth));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut cumulative = 0.;
+    let mut best_budget = 0;
+    let mut best_score = f64::NEG_INFINITY;
+    for budget in 0..=candidates.len() {
+        if budget > 0 {
+            cumulative += candidates[budget - 1].0;
+        }
+        let elapsed = curve.draft_ns + curve.verify_ns(curve.base_rows + budget);
+        let score = (curve.sampling_requests as f64 + cumulative) / elapsed;
+        if score > best_score {
+            best_score = score;
+            best_budget = budget;
+        }
+    }
+    let mut kept = vec![0; conditional.len()];
+    for &(_, request, depth) in candidates.iter().take(best_budget) {
+        kept[request] = kept[request].max(depth + 1);
+    }
+    Ok(kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +416,38 @@ mod tests {
         assert_eq!(kept, [2, 1]);
         assert!(allocate_batch_budget(&[vec![f32::NAN]], 1).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn cost_aware_budget_prices_draft_yield_against_measured_step_cost() -> Result<()> {
+        let curve = CostCurve {
+            draft_ns: 10.,
+            verify_points: vec![(2, 104.), (5, 106.), (10, 116.)],
+            base_rows: 2,
+            sampling_requests: 2,
+        };
+        let kept = allocate_cost_aware(&[vec![0.9, 0.9], vec![0.2, 0.2]], &curve)?;
+        assert_eq!(kept, [2, 1]);
+        assert_eq!(kept.iter().sum::<usize>(), 3);
+        assert!(allocate_cost_aware(&[vec![f32::NAN]], &curve).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cost_profile_waits_for_repeated_draft_and_multiple_verify_shapes() {
+        let mut profile = CostProfile::default();
+        for _ in 0..8 {
+            profile.observe_draft(3, 3, 21, 50_000.);
+        }
+        for _ in 0..4 {
+            profile.observe_verify(3, 4, 10, 100_000.);
+            profile.observe_verify(3, 4, 20, 120_000.);
+        }
+        let curve = profile.curve(3, 3, 4, 21, 4, 4).unwrap();
+        assert_eq!(curve.draft_ns, 50_000.);
+        assert!((curve.verify_ns(15) - 110_000.).abs() < 0.1);
+        assert!(profile.curve(3, 3, 3, 21, 4, 4).is_none());
+        assert!(profile.curve(4, 3, 4, 21, 4, 4).is_none());
     }
 
     #[test]
@@ -260,8 +492,10 @@ mod tests {
         let ids = rt.to_device(&[1234., 981., 17.])?;
         let (tokens, actual) = Gate {
             threshold: 0.,
+            fallback_threshold: 0.,
             trace: true,
             batch_budget_per_request: None,
+            adaptive_budget: false,
         }
         .evaluate(&mut rt, &h, &mix, 21, &ids)?;
         assert_eq!(tokens, [1234, 981, 17]);
