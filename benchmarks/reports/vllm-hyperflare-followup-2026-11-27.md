@@ -41,7 +41,7 @@ The target batch already supports ragged verification lengths: `plan_decode` rec
 
 A simple shared top-budget prototype exists, but the 4- and 6-token-per-request variants both reduced throughput (see `vllm-c46-decode-path-20261127.md`). So I do not recommend coupling a new allocator to the narrow MoE graph path: that graph did not improve C4/C6 reliably, and the service still reads router scores on the host between transformer layers, preventing full decode-step capture. vLLM's variable-length graph design assumes attention backends support always-capturable variable query lengths and profiles verification cost by token count; its design note describes those prerequisites and the shared cost objective. [vLLM adaptive verification design](https://github.com/vllm-project/vllm-project.github.io/blob/main/_posts/2026-08-14-dspark-adaptive-verification.md)
 
-The standalone cost-aware selector is implemented and measured in [the adaptive draft-budget report](adaptive-draft-budget-2026-11-27.md). It regressed C4 and C6, so it remains disabled by default. Full-step CUDA graph capture remains a separate prerequisite-heavy effort because of host router synchronization and attention capture support.
+The standalone cost-aware selector is implemented and measured in [the adaptive draft-budget report](adaptive-draft-budget-2026-11-27.md). Corrected results are mixed (C4 regresses; C6 is flat within run variation), so it remains disabled by default. Full-step CUDA graph capture remains a separate prerequisite-heavy effort because of host router synchronization and attention capture support.
 
 ## What transfers from Hyperflare
 

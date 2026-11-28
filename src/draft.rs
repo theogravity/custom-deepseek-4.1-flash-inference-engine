@@ -56,7 +56,9 @@ impl DraftState {
     }
     pub fn report_confidence(&mut self, kept: usize, accepted: usize) {
         if let Some(scores) = self.trace.take() {
-            eprintln!("draft-confidence kept={kept} accepted={accepted} scores={scores:?}");
+            if std::env::var("DS4_CONFIDENCE_TRACE").as_deref() == Ok("1") {
+                eprintln!("draft-confidence kept={kept} accepted={accepted} scores={scores:?}");
+            }
         }
     }
     pub fn propose(
@@ -196,10 +198,24 @@ pub(crate) fn propose_many(
             .collect::<Result<Vec<_>>>()?;
         if let Some(cost) = adaptive_cost {
             let kept = confidence::allocate_cost_aware(&curves, &cost)?;
+            let fallback_threshold = gate
+                .as_ref()
+                .expect("adaptive gate exists")
+                .fallback_threshold();
+            let fallback_budget = curves
+                .iter()
+                .map(|curve| {
+                    curve
+                        .iter()
+                        .position(|&p| p < fallback_threshold)
+                        .unwrap_or(curve.len())
+                })
+                .sum();
             trace_budget(
                 "adaptive",
                 kept.iter().sum(),
                 curves.iter().map(Vec::len).sum(),
+                Some(fallback_budget),
                 Some(&cost),
             );
             for (proposal, keep) in proposals.iter_mut().zip(kept) {
@@ -222,6 +238,7 @@ pub(crate) fn propose_many(
                 proposals.iter().map(Vec::len).sum(),
                 0,
                 None,
+                None,
             );
         }
     }
@@ -232,6 +249,7 @@ fn trace_budget(
     kind: &str,
     selected: usize,
     available: usize,
+    fallback: Option<usize>,
     cost: Option<&confidence::CostCurve>,
 ) {
     if std::env::var("DS4_ADAPTIVE_DRAFT_BUDGET_TRACE").as_deref() != Ok("1") {
@@ -239,10 +257,10 @@ fn trace_budget(
     }
     static STEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let step = STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if step % 256 == 0 {
+    if step % 32 == 0 {
         if let Some(cost) = cost {
-            eprintln!("adaptive-draft-budget mode={kind} selected={selected}/{available} base_rows={} sampling_requests={} cost_shapes={} draft_us={:.1} verify_points={:?}",
-                      cost.base_rows, cost.sampling_requests, cost.verify_points.len(), cost.draft_ns / 1000.,
+            eprintln!("adaptive-draft-budget mode={kind} selected={selected}/{available} confidence_budget={} base_rows={} sampling_requests={} cost_shapes={} draft_us={:.1} verify_points={:?}",
+                      fallback.unwrap_or_default(), cost.base_rows, cost.sampling_requests, cost.verify_points.len(), cost.draft_ns / 1000.,
                       cost.verify_points.iter().map(|(rows, ns)| (*rows, (*ns / 1000.).round())).collect::<Vec<_>>());
         } else {
             eprintln!("adaptive-draft-budget mode={kind} selected={selected}");

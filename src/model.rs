@@ -1005,6 +1005,7 @@ impl Model {
         let started = std::time::Instant::now();
         let target_requests = work.len();
         let target_rows = work.iter().map(|w| w.plan.rows).sum::<usize>();
+        let cost_profile_eligible = work.iter().all(|w| w.plan.source != ProposalSource::Lookup);
         let context_bucket =
             work.iter().map(|w| w.session.pos).sum::<usize>() / work.len().max(1) / 8192;
         let mut items: Vec<_> = work
@@ -1040,7 +1041,7 @@ impl Model {
                 }
             }
         }
-        if self.adaptive_budget && observed {
+        if self.adaptive_budget && observed && cost_profile_eligible {
             self.adaptive_costs.observe_verify(
                 context_bucket,
                 target_requests,
